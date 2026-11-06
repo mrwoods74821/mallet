@@ -17,13 +17,13 @@ use mallet_vmf::{format_vec3, Entity, IdAllocator, Solid, Vmf};
 
 use std::sync::Arc;
 
-use mallet_content::{parallel_map, GameFs, Materials};
+use mallet_content::{default_fgd, parallel_map, GameData, GameFs, Materials};
 
 use crate::canvas::PixmapCanvas;
 use crate::document::Document;
 use crate::input::InputFrame;
 use crate::render3d::{CameraStyle, Renderer3D};
-use crate::scene::{model_key, ModelCache, Overlay, Owner, Scene};
+use crate::scene::{entity_model, model_key, ModelCache, Overlay, Owner, Scene};
 use crate::view2d::{Axis2D, View2D};
 use crate::view3d::Camera3D;
 
@@ -156,6 +156,19 @@ pub enum ShotTarget {
     Side,
 }
 
+/// Progress of a whole-window screenshot, which only the UI thread can take.
+#[derive(Debug, Default)]
+pub enum WindowShot {
+    #[default]
+    Idle,
+    /// Asked for; the window sends the request on its next frame.
+    Requested,
+    /// Sent; waiting for the image.
+    Waiting,
+    /// The PNG, or why there is none.
+    Done(Result<Vec<u8>, String>),
+}
+
 /// How long the parts of recent frames took, for finding slowdowns.
 #[derive(Clone, Debug, Default)]
 pub struct FrameTimings {
@@ -240,6 +253,15 @@ pub struct Editor {
     pub materials: Option<Materials>,
     /// Prop models loaded so far, shared by every tab.
     pub models: ModelCache,
+    /// Entity classes from the game's FGD files, when they could be read.
+    pub game_data: Option<Arc<GameData>>,
+    /// A screenshot of the whole window asked for by the MCP `screenshot` tool.
+    pub window_shot: WindowShot,
+    /// Whether the Object Properties window is showing.
+    pub properties_open: bool,
+    /// A tab the `show_properties` tool asked the window to switch to: keyvalues,
+    /// outputs, inputs or flags.
+    pub properties_tab: Option<String>,
     /// Why each model in [`Self::models`] that is `None` could not be loaded.
     pub model_errors: HashMap<String, String>,
     /// The GPU renderer for the textured camera view, created once the window has a GPU.
@@ -279,6 +301,10 @@ impl Default for Editor {
             materials: None,
             models: ModelCache::new(),
             model_errors: HashMap::new(),
+            game_data: None,
+            properties_open: false,
+            properties_tab: None,
+            window_shot: WindowShot::Idle,
             gpu: None,
             last_block: DEFAULT_BLOCK,
             viewport_rects: quad_rects(Rect::from_min_size(Pos2::ZERO, DEFAULT_AREA), VIEWPORT_GAP),
@@ -459,7 +485,7 @@ impl Editor {
 
     fn set_document(&mut self, document: Document) {
         self.ensure_models(&document.vmf);
-        self.scene = Scene::build(&document.vmf, &self.models);
+        self.scene = Scene::build(&document.vmf, &self.models, self.game_data.as_deref());
         self.document = Some(document);
         self.selection.clear();
         self.overlay = Overlay::default();
@@ -531,7 +557,7 @@ impl Editor {
     pub fn rebuild_scene(&mut self) {
         if let Some(document) = self.document.take() {
             self.ensure_models(&document.vmf);
-            self.scene = Scene::build(&document.vmf, &self.models);
+            self.scene = Scene::build(&document.vmf, &self.models, self.game_data.as_deref());
             self.document = Some(document);
         } else {
             self.scene = Scene::default();
@@ -734,8 +760,8 @@ impl Editor {
         Ok(id)
     }
 
-    /// Creates a point entity at `origin` with an id, the class, zero angles and any extra
-    /// keys, and selects it. Undoable. Returns the new entity's id.
+    /// Creates a point entity at `origin` with an id, the class, its FGD defaults (or zero
+    /// angles without game data) and any extra keys, and selects it. Undoable. Returns the new entity's id.
     pub fn create_entity(&mut self, classname: &str, origin: DVec3, keys: &[(String, String)]) -> Result<u32, String> {
         let classname = classname.trim();
         if classname.is_empty() {
@@ -746,7 +772,9 @@ impl Editor {
         let mut entity = Entity::default();
         entity.set("id", id.to_string());
         entity.set("classname", classname);
-        entity.set("angles", "0 0 0");
+        for (key, value) in self.class_defaults(classname) {
+            entity.set(&key, value);
+        }
         entity.set("origin", format_vec3(origin));
         for (key, value) in keys {
             entity.set(key, value.clone());
@@ -854,9 +882,22 @@ impl Editor {
         if let Some(gpu) = &mut self.gpu {
             gpu.clear_textures();
         }
+        let fgd = default_fgd(game_dir);
+        self.game_data = fgd.and_then(|fgd| GameData::load(&[fgd]).ok()).map(Arc::new);
         self.rebuild_scene();
         self.message = format!("Using game content from {} ({mounts} search paths)", game_dir.display());
         Ok(mounts)
+    }
+
+    /// Reads entity classes from FGD files instead of the game's default FGD. Returns
+    /// how many classes were read.
+    pub fn set_fgds(&mut self, paths: &[PathBuf]) -> Result<usize, String> {
+        let data = GameData::load(paths)?;
+        let count = data.len();
+        self.game_data = Some(Arc::new(data));
+        self.rebuild_scene();
+        self.message = format!("Read {count} entity classes");
+        Ok(count)
     }
 
     /// Loads, in parallel, every prop model the map uses that is not loaded yet.
@@ -864,10 +905,10 @@ impl Editor {
         let Some(materials) = &self.materials else {
             return;
         };
+        let game_data = self.game_data.as_deref();
         let mut missing: Vec<String> = vmf
             .entities()
-            .filter_map(|entity| entity.get("model"))
-            .filter(|path| path.to_ascii_lowercase().ends_with(".mdl"))
+            .filter_map(|entity| entity_model(entity, game_data.and_then(|data| data.class(entity.classname()))))
             .map(model_key)
             .filter(|key| !self.models.contains_key(key))
             .collect();

@@ -20,6 +20,8 @@ const DEFAULT_STEAM_DIR: &str = "C:/Program Files (x86)/Steam";
 pub struct Config {
     /// The game folder holding `gameinfo.txt`, such as `.../GarrysMod/garrysmod`.
     pub game_dir: Option<PathBuf>,
+    /// FGD files chosen instead of the game's default one; empty to use the default.
+    pub fgds: Vec<PathBuf>,
 }
 
 impl Config {
@@ -34,6 +36,11 @@ impl Config {
         let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         Self {
             game_dir: value.get("game_dir").and_then(Value::as_str).map(PathBuf::from),
+            fgds: value
+                .get("fgds")
+                .and_then(Value::as_array)
+                .map(|paths| paths.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -43,7 +50,10 @@ impl Config {
         if let Some(folder) = path.parent() {
             fs::create_dir_all(folder).map_err(|error| error.to_string())?;
         }
-        let value = json!({ "game_dir": self.game_dir.as_ref().map(|dir| dir.display().to_string()) });
+        let value = json!({
+            "game_dir": self.game_dir.as_ref().map(|dir| dir.display().to_string()),
+            "fgds": self.fgds.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+        });
         let text = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
         fs::write(path, text).map_err(|error| error.to_string())
     }

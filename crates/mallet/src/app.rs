@@ -2,8 +2,9 @@
 //! toolbar, map tabs, tool palette and side panel are in `chrome`.
 
 mod chrome;
+mod properties;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,7 +17,7 @@ use eframe::egui_wgpu;
 
 use crate::canvas::{Canvas, PainterCanvas};
 use crate::config::{self, Config};
-use crate::editor::{self, Editor, SelectMode, Tool, ViewMode, VIEWPORT_GAP};
+use crate::editor::{self, Editor, SelectMode, Tool, ViewMode, WindowShot, VIEWPORT_GAP};
 use crate::keymap::{Action, KeyMap};
 use crate::netgraph::{NetGraph, NetGraphExtra};
 use crate::render3d::{CameraStyle, Renderer3D};
@@ -33,7 +34,7 @@ const PICK_TOLERANCE_PIXELS: f64 = 4.0;
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 19] = [
+const KEY_ACTIONS: [Action; 20] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -47,6 +48,7 @@ const KEY_ACTIONS: [Action; 19] = [
     Action::SelectionTool,
     Action::BlockTool,
     Action::EntityTool,
+    Action::Properties,
     Action::SelectAll,
     Action::ClearSelection,
     Action::DeleteSelection,
@@ -122,6 +124,8 @@ pub struct MalletApp {
     /// Frame timing overlay in the camera viewport's bottom-right corner.
     net_graph: NetGraph,
     show_net_graph: bool,
+    /// The Object Properties window's tab, drafts and other state.
+    properties: properties::PropertiesState,
 }
 
 impl MalletApp {
@@ -143,6 +147,7 @@ impl MalletApp {
             texture_previews: chrome::TexturePreviews::new(),
             net_graph: NetGraph::default(),
             show_net_graph: true,
+            properties: properties::PropertiesState::default(),
         };
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
@@ -172,6 +177,12 @@ impl MalletApp {
         let shared = Arc::clone(&self.editor);
         let ctx = ctx.clone();
         let handler = move |name: &str, arguments: &serde_json::Value| {
+            if name == "screenshot" && arguments.get("viewport").and_then(serde_json::Value::as_str) == Some("window") {
+                return match window_screenshot(&shared, &ctx) {
+                    Ok(png) => mcp::ToolResult::png(png),
+                    Err(message) => mcp::ToolResult::error(message),
+                };
+            }
             let result = tools::run(&mut editor::lock(&shared), name, arguments);
             ctx.request_repaint();
             if name == "send_input" && !result.is_error {
@@ -227,6 +238,7 @@ impl MalletApp {
         let mut chosen = None;
         let mut save_as = false;
         let mut choose_game = false;
+        let mut choose_fgds = false;
         let mut show_net_graph = self.show_net_graph;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -251,6 +263,8 @@ impl MalletApp {
                     menu_item(ui, &self.keymap, "Delete", Action::DeleteSelection, &mut chosen);
                     menu_item(ui, &self.keymap, "Select All", Action::SelectAll, &mut chosen);
                     menu_item(ui, &self.keymap, "Select None", Action::ClearSelection, &mut chosen);
+                    ui.separator();
+                    menu_item(ui, &self.keymap, "Properties", Action::Properties, &mut chosen);
                 });
                 ui.menu_button("View", |ui| {
                     menu_item(ui, &self.keymap, "Center 2D Views", Action::CenterViews2D, &mut chosen);
@@ -276,6 +290,10 @@ impl MalletApp {
                         choose_game = true;
                         ui.close_menu();
                     }
+                    if ui.button("Game Data Files (FGD)...").clicked() {
+                        choose_fgds = true;
+                        ui.close_menu();
+                    }
                     ui.separator();
                     menu_item(ui, &self.keymap, "Selection Tool", Action::SelectionTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Block Tool", Action::BlockTool, &mut chosen);
@@ -292,6 +310,9 @@ impl MalletApp {
         }
         if choose_game {
             choose_game_dir(editor);
+        }
+        if choose_fgds {
+            choose_fgd_files(editor);
         }
         self.show_net_graph = show_net_graph;
     }
@@ -421,6 +442,10 @@ impl MalletApp {
                 Tool::Select => {
                     let hit = editor.scene.pick_ray(origin, direction);
                     pick(editor, hit, pointer.modifiers);
+                    // Double-clicking opens the properties of what was picked, as in Hammer.
+                    if response.double_clicked_by(PointerButton::Primary) && !editor.selection.is_empty() {
+                        editor.properties_open = true;
+                    }
                 }
                 Tool::Entity => match editor.scene.surface_hit(origin, direction) {
                     Some(point) => {
@@ -672,6 +697,9 @@ impl MalletApp {
                         .pick_2d(view.axis, view.to_world(rect, position), tolerance);
                     pick(editor, hit, pointer.modifiers);
                 }
+                if response.double_clicked_by(PointerButton::Primary) && !editor.selection.is_empty() {
+                    editor.properties_open = true;
+                }
             }
             return;
         };
@@ -780,6 +808,7 @@ impl eframe::App for MalletApp {
         editor.timings.interval_max_ms = max;
         editor.timings.recent_intervals_ms = self.net_graph.recent_intervals(40);
         self.handle_input(ctx, &mut editor);
+        take_window_shot(ctx, &mut editor);
         self.update_title(ctx, &editor);
         self.menu_bar(ctx, &mut editor);
         self.toolbar(ctx, &mut editor);
@@ -788,6 +817,7 @@ impl eframe::App for MalletApp {
         self.tool_palette(ctx, &mut editor);
         self.side_panel(ctx, &mut editor);
         self.close_dialog(ctx, &mut editor);
+        self.properties_window(ctx, &mut editor);
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(egui::Color32::from_gray(30)))
             .show(ctx, |ui| self.viewports(ui, &mut editor, frame));
@@ -804,6 +834,59 @@ impl eframe::App for MalletApp {
             ctx.request_repaint();
         }
     }
+}
+
+/// Asks the window for a screenshot of itself and waits for the PNG.
+fn window_screenshot(shared: &Mutex<Editor>, ctx: &egui::Context) -> Result<Vec<u8>, String> {
+    editor::lock(shared).window_shot = WindowShot::Requested;
+    let deadline = Instant::now() + INPUT_TIMEOUT;
+    while Instant::now() < deadline {
+        {
+            let mut editor = editor::lock(shared);
+            if let WindowShot::Done(_) = editor.window_shot {
+                let WindowShot::Done(result) = std::mem::take(&mut editor.window_shot) else {
+                    unreachable!("matched above");
+                };
+                return result;
+            }
+        }
+        ctx.request_repaint();
+        thread::sleep(Duration::from_millis(5));
+    }
+    editor::lock(shared).window_shot = WindowShot::Idle;
+    Err("the window did not take the screenshot in time; it may be minimized".to_owned())
+}
+
+/// Sends a requested window screenshot to the GPU and encodes the image when it arrives.
+fn take_window_shot(ctx: &egui::Context, editor: &mut Editor) {
+    match editor.window_shot {
+        WindowShot::Requested => {
+            ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
+            editor.window_shot = WindowShot::Waiting;
+            ctx.request_repaint();
+        }
+        WindowShot::Waiting => {
+            let image = ctx.input(|input| {
+                input.raw.events.iter().find_map(|event| match event {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            match image {
+                Some(image) => editor.window_shot = WindowShot::Done(encode_screenshot(&image)),
+                None => ctx.request_repaint(),
+            }
+        }
+        _ => {}
+    }
+}
+
+fn encode_screenshot(image: &egui::ColorImage) -> Result<Vec<u8>, String> {
+    let [width, height] = image.size;
+    let size = tiny_skia::IntSize::from_wh(width as u32, height as u32).ok_or("the window has no area")?;
+    let bytes: Vec<u8> = image.pixels.iter().flat_map(|pixel| pixel.to_array()).collect();
+    let pixmap = tiny_skia::Pixmap::from_vec(bytes, size).ok_or("the screenshot has the wrong size")?;
+    pixmap.encode_png().map_err(|error| error.to_string())
 }
 
 /// Waits until the window has handled all queued synthetic input, including the frame
@@ -841,6 +924,38 @@ fn load_game_content(editor: &mut Editor) {
             editor.message = format!("Could not save settings: {error}");
         }
     }
+    if !config.fgds.is_empty() {
+        if let Err(error) = editor.set_fgds(&config.fgds) {
+            editor.message = format!("Could not read the chosen FGD files: {error}");
+        }
+    }
+}
+
+/// Asks for the FGD files to read entity classes from, reads them and remembers them.
+fn choose_fgd_files(editor: &mut Editor) {
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Choose the game's FGD files")
+        .add_filter("Forge Game Data", &["fgd"]);
+    if let Some(bin) = editor
+        .game_dir()
+        .and_then(Path::parent)
+        .map(|parent| parent.join("bin"))
+    {
+        dialog = dialog.set_directory(bin);
+    }
+    let Some(paths) = dialog.pick_files() else {
+        return;
+    };
+    match editor.set_fgds(&paths) {
+        Ok(_) => {
+            let mut config = Config::load();
+            config.fgds = paths;
+            if let Err(error) = config.save() {
+                editor.message = format!("Could not save settings: {error}");
+            }
+        }
+        Err(error) => editor.message = error,
+    }
 }
 
 /// Asks for the game folder that holds `gameinfo.txt`, mounts it and remembers it.
@@ -853,7 +968,11 @@ fn choose_game_dir(editor: &mut Editor) {
     };
     match editor.set_game_dir(&folder) {
         Ok(_) => {
-            let config = Config { game_dir: Some(folder) };
+            // Another game's FGD override would not fit, so the new game uses its own.
+            let config = Config {
+                game_dir: Some(folder),
+                fgds: Vec::new(),
+            };
             if let Err(error) = config.save() {
                 editor.message = format!("Could not save settings: {error}");
             }
@@ -1021,6 +1140,7 @@ fn run(action: Action, editor: &mut Editor) {
         }
         Action::CenterViews2D => editor.fit_2d(),
         Action::CenterView3D => editor.fit_3d(),
+        Action::Properties => editor.properties_open = true,
         _ => {}
     }
 }

@@ -3,9 +3,10 @@
 use std::path::PathBuf;
 
 use glam::{DVec2, DVec3};
+use mallet_content::{ClassKind, EntityClass};
 use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
-use mallet_vmf::{Entity, EntityItem};
+use mallet_vmf::{Connection, Entity, EntityItem};
 use serde_json::{json, Value};
 
 use eframe::egui::Pos2;
@@ -179,6 +180,61 @@ pub fn definitions() -> Value {
             &["classname", "origin"],
         ),
         tool(
+            "set_entity_outputs",
+            "Replace all outputs (I/O connections) of an entity. Undoable. Each output fires `input` on the \
+             entities named `target` when `output` happens.",
+            json!({
+                "id": id,
+                "outputs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "output": { "type": "string" },
+                            "target": { "type": "string" },
+                            "input": { "type": "string" },
+                            "parameter": { "type": "string" },
+                            "delay": { "type": "number" },
+                            "refires": { "type": "integer", "description": "-1 (default) fires every time." }
+                        },
+                        "required": ["output", "target", "input"]
+                    }
+                }
+            }),
+            &["id", "outputs"],
+        ),
+        tool(
+            "describe_entity_class",
+            "Describe an entity class from the loaded FGD files: its keyvalues with types, defaults, help and \
+             choices, its spawnflags, inputs and outputs, and editor size, colour and model.",
+            json!({ "classname": { "type": "string" } }),
+            &["classname"],
+        ),
+        tool(
+            "list_entity_classes",
+            "List entity class names from the loaded FGD files.",
+            json!({
+                "kind": { "type": "string", "enum": ["point", "solid"], "description": "Default point." },
+                "filter": { "type": "string", "description": "Only names containing this text." }
+            }),
+            &[],
+        ),
+        tool(
+            "set_fgds",
+            "Read entity classes from these FGD files instead of the game's default FGD, and remember the choice.",
+            json!({ "paths": { "type": "array", "items": { "type": "string" } } }),
+            &["paths"],
+        ),
+        tool(
+            "show_properties",
+            "Open or close the Object Properties window for the current selection, as Alt+Enter does.",
+            json!({
+                "open": { "type": "boolean", "description": "Default true." },
+                "tab": { "type": "string", "enum": ["keyvalues", "outputs", "inputs", "flags"] }
+            }),
+            &[],
+        ),
+        tool(
             "send_input",
             "Feed keyboard and mouse input to the editor window, frame by frame, as if a user did it, then \
              wait until it has been handled. Use it to test tools and shortcuts. The window must not be \
@@ -259,8 +315,8 @@ pub fn definitions() -> Value {
             json!({
                 "viewport": {
                     "type": "string",
-                    "enum": ["all", "camera", "top", "front", "side"],
-                    "description": "Which viewport to render; default all four."
+                    "enum": ["all", "camera", "top", "front", "side", "window"],
+                    "description": "Which viewport to render; default all four. \"window\" captures the whole editor window with its menus, panels and dialogs such as Object Properties; it needs the window to be visible."
                 }
             }),
             &[],
@@ -294,6 +350,7 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
             let mounts = editor.set_game_dir(&path)?;
             let config = Config {
                 game_dir: Some(path.clone()),
+                fgds: Vec::new(),
             };
             config.save()?;
             Ok(ToolResult::text(format!(
@@ -353,7 +410,81 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
                 .all_entities()
                 .find(|entity| entity.id() == Some(id))
                 .ok_or_else(|| format!("no entity has id {id}"))?;
-            Ok(ToolResult::json(&entity_details(entity)))
+            let mut details = entity_details(entity);
+            let class = editor.entity_class(entity.classname());
+            details["fgd_class"] = json!(class.map(|class| class.name.clone()));
+            details["outputs"] = Value::Array(entity.connections().iter().map(connection_json).collect());
+            details["inputs"] = Value::Array(
+                editor
+                    .inputs_to(id)
+                    .iter()
+                    .map(|link| {
+                        let mut value = connection_json(&link.connection);
+                        value["source"] = json!(link.source);
+                        value["source_name"] = json!(link.source_name);
+                        value
+                    })
+                    .collect(),
+            );
+            Ok(ToolResult::json(&details))
+        }
+        "set_entity_outputs" => {
+            let id = id_arg(args)?;
+            let outputs = args
+                .get("outputs")
+                .and_then(Value::as_array)
+                .ok_or("\"outputs\" must be an array")?
+                .iter()
+                .enumerate()
+                .map(|(index, value)| connection_arg(value).map_err(|error| format!("output {index}: {error}")))
+                .collect::<Result<Vec<_>, _>>()?;
+            edited(editor.set_outputs(id, outputs))
+        }
+        "describe_entity_class" => {
+            let name = string_arg(args, "classname")?;
+            let class = editor
+                .entity_class(name)
+                .ok_or_else(|| format!("no FGD class \"{name}\"; is a game folder with FGD files set?"))?;
+            Ok(ToolResult::json(&class_json(class)))
+        }
+        "list_entity_classes" => {
+            let data = editor.game_data.as_deref().ok_or("no FGD files are loaded")?;
+            let kind = match optional_string(args, "kind")?.unwrap_or("point") {
+                "point" => ClassKind::Point,
+                "solid" => ClassKind::Solid,
+                other => return Err(format!("unknown kind \"{other}\"")),
+            };
+            let filter = optional_string(args, "filter")?.unwrap_or("").to_ascii_lowercase();
+            let names: Vec<&str> = data
+                .class_names(kind)
+                .into_iter()
+                .filter(|name| name.to_ascii_lowercase().contains(&filter))
+                .collect();
+            Ok(ToolResult::json(&json!({ "count": names.len(), "classes": names })))
+        }
+        "set_fgds" => {
+            let paths: Vec<PathBuf> = args
+                .get("paths")
+                .and_then(Value::as_array)
+                .ok_or("\"paths\" must be an array of strings")?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(PathBuf::from)
+                .collect();
+            let count = editor.set_fgds(&paths)?;
+            let mut config = Config::load();
+            config.fgds = paths;
+            config.save()?;
+            Ok(ToolResult::text(format!("Read {count} entity classes.")))
+        }
+        "show_properties" => {
+            editor.properties_open = args.get("open").and_then(Value::as_bool).unwrap_or(true);
+            editor.properties_tab = optional_string(args, "tab")?.map(str::to_owned);
+            Ok(ToolResult::text(if editor.properties_open {
+                "Object Properties is open."
+            } else {
+                "Object Properties is closed."
+            }))
         }
         "set_entity_key" => edited(editor.apply_edit(&Edit::SetKey {
             entity: id_arg(args)?,
@@ -497,6 +628,7 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
                 "top" => ShotTarget::Top,
                 "front" => ShotTarget::Front,
                 "side" => ShotTarget::Side,
+                "window" => return Err("window screenshots are taken by the window itself".to_owned()),
                 other => return Err(format!("unknown viewport \"{other}\"")),
             };
             Ok(ToolResult::png(editor.render_png(target)?))
@@ -568,6 +700,11 @@ fn status_json(editor: &Editor) -> Value {
             Tool::Entity => "entity",
         },
         "entity_class": editor.entity_class,
+        "fgd": editor.game_data.as_deref().map(|data| json!({
+            "files": data.files.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+            "classes": data.len(),
+        })),
+        "properties_open": editor.properties_open,
         "entity_marker": editor.overlay.entity.map(|point| [point.x, point.y, point.z]),
         "selected": editor.selection.len(),
         "material": editor.material,
@@ -753,6 +890,85 @@ fn entity_summary(entity: &Entity) -> Value {
         "targetname": entity.get("targetname"),
         "origin": entity.origin().map(|origin| origin.to_array()),
         "solids": entity.solids().count(),
+    })
+}
+
+fn connection_json(connection: &Connection) -> Value {
+    json!({
+        "output": connection.output,
+        "target": connection.target,
+        "input": connection.input,
+        "parameter": connection.parameter,
+        "delay": connection.delay,
+        "refires": connection.refires,
+    })
+}
+
+fn connection_arg(value: &Value) -> Result<Connection, String> {
+    let text = |key: &str| value.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
+    let connection = Connection {
+        output: text("output"),
+        target: text("target"),
+        input: text("input"),
+        parameter: text("parameter"),
+        delay: value.get("delay").and_then(Value::as_f64).unwrap_or(0.0),
+        refires: value.get("refires").and_then(Value::as_i64).unwrap_or(-1) as i32,
+    };
+    if connection.output.is_empty() || connection.input.is_empty() {
+        return Err("\"output\" and \"input\" are required".to_owned());
+    }
+    Ok(connection)
+}
+
+fn class_json(class: &EntityClass) -> Value {
+    let properties: Vec<Value> = class
+        .properties
+        .iter()
+        .map(|property| {
+            let mut value = json!({
+                "name": property.name,
+                "type": property.kind,
+                "display": property.display,
+                "default": property.default,
+                "description": property.description,
+            });
+            if !property.choices.is_empty() {
+                value["choices"] = property
+                    .choices
+                    .iter()
+                    .map(
+                        |choice| json!({ "value": choice.value, "name": choice.name, "default_on": choice.default_on }),
+                    )
+                    .collect();
+            }
+            if property.read_only {
+                value["read_only"] = json!(true);
+            }
+            value
+        })
+        .collect();
+    let ports = |ports: &[mallet_content::Port]| -> Vec<Value> {
+        ports
+            .iter()
+            .map(|port| json!({ "name": port.name, "type": port.kind, "description": port.description }))
+            .collect()
+    };
+    json!({
+        "name": class.name,
+        "kind": match class.kind {
+            ClassKind::Base => "base",
+            ClassKind::Point => "point",
+            ClassKind::Solid => "solid",
+        },
+        "description": class.description,
+        "bases": class.bases,
+        "size": class.size,
+        "color": class.color,
+        "model": class.studio,
+        "uses_model_key": class.studio_from_model,
+        "properties": properties,
+        "inputs": ports(&class.inputs),
+        "outputs": ports(&class.outputs),
     })
 }
 

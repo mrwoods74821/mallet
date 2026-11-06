@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use eframe::egui::Color32;
 use glam::{DMat3, DMat4, DVec2, DVec3};
-use mallet_content::Model;
+use mallet_content::{EntityClass, GameData, Model};
 use mallet_vmf::geometry::{faces_bounds, solid_faces, Bounds, Plane};
 use mallet_vmf::{parse_vec3, Entity, Side, Solid, TexAxis, Vmf};
 
@@ -19,7 +19,18 @@ const DEFAULT_COLOR: Color32 = Color32::from_rgb(220, 220, 220);
 /// Half-size of the box drawn for point entities until FGD sizes are loaded.
 const POINT_ENTITY_HALF_SIZE: f64 = 8.0;
 
-/// The box of a point entity relative to its origin, as the Half-Life 2 FGD gives it:
+/// The model the 3D view shows for an entity: its own `model` key when that is a studio
+/// model, or else the editor model its FGD class names with `studio("...")`, such as
+/// the player figure of `info_player_start`.
+pub fn entity_model<'a>(entity: &'a Entity, class: Option<&'a EntityClass>) -> Option<&'a str> {
+    entity
+        .get("model")
+        .filter(|path| path.to_ascii_lowercase().ends_with(".mdl"))
+        .or_else(|| class?.studio.as_deref())
+}
+
+/// The box of a point entity without an FGD size, relative to its origin, as the
+/// Half-Life 2 FGD gives it:
 /// the standing player hull for spawn points and NPCs, a small cube otherwise.
 fn point_entity_box(classname: &str) -> (DVec3, DVec3) {
     let classname = classname.to_ascii_lowercase();
@@ -211,8 +222,9 @@ impl Scene {
     ///
     /// World brushes use their own editor colour; brushes of brush entities use the
     /// entity's colour, matching Hammer's 2D views. Entities with a loaded `model` get the
-    /// model, outlined by its rotated bounding box; others get a small box.
-    pub fn build(vmf: &Vmf, models: &ModelCache) -> Self {
+    /// model, outlined by its rotated bounding box; others get the box their FGD class
+    /// gives, or a small box. Point entities without their own colour use the class's.
+    pub fn build(vmf: &Vmf, models: &ModelCache, game_data: Option<&GameData>) -> Self {
         let mut scene = Self {
             geometry_generation: next_generation(),
             selection_generation: next_generation(),
@@ -223,7 +235,8 @@ impl Scene {
             if !is_world {
                 scene.entity_count += 1;
             }
-            let entity_color = entity.editor_color();
+            let class = game_data.and_then(|data| data.class(entity.classname()));
+            let entity_color = entity.editor_color().or_else(|| class.and_then(|class| class.color));
             let entity_owner = entity.id().map(Owner::Entity);
             let mut has_solids = false;
             for solid in entity.solids() {
@@ -242,9 +255,7 @@ impl Scene {
             if has_solids || is_world {
                 continue;
             }
-            let loaded = entity
-                .get("model")
-                .filter(|path| path.to_ascii_lowercase().ends_with(".mdl"))
+            let loaded = entity_model(entity, class)
                 .map(model_key)
                 .and_then(|key| Some((models.get(&key)?.clone()?, key)));
             if let (Some(origin), Some((model, key))) = (entity.origin(), loaded) {
@@ -274,7 +285,10 @@ impl Scene {
                 scene.bounds.add_bounds(&mesh.bounds);
                 scene.meshes.push(mesh);
             } else if let Some(origin) = entity.origin() {
-                let (min, max) = point_entity_box(entity.classname());
+                let (min, max) = match class.and_then(|class| class.size) {
+                    Some((min, max)) => (DVec3::from_array(min), DVec3::from_array(max)),
+                    None => point_entity_box(entity.classname()),
+                };
                 let bounds = Bounds {
                     min: origin + min,
                     max: origin + max,

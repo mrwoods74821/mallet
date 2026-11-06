@@ -10,7 +10,7 @@ maps through a built-in MCP server.
 | --- | --- |
 | `mallet-kv` | Reads and writes Valve KeyValues text. Keeps every key, block and duplicate in order and writes Hammer's exact layout (tabs, CRLF). |
 | `mallet-vmf` | Typed VMF model on top of `mallet-kv`, brush geometry, and the edit/undo layer. No UI dependencies. |
-| `mallet-content` | Game content: `gameinfo.txt` search paths, VPK archives, VMT materials, VTF textures and MDL models. |
+| `mallet-content` | Game content: `gameinfo.txt` search paths, VPK archives, VMT materials, VTF textures, MDL models and FGD entity classes. |
 | `mallet` | The editor application: window, viewports, key bindings and the MCP server. |
 
 ## Lossless loading and saving
@@ -89,6 +89,31 @@ model's `$cdmaterials` folders in order, as the engine does. The parser panics o
 features it lacks (animations in separate blocks), so a panic counts as a failed load.
 The editor loads every model a map uses in parallel when the map opens and keeps them in
 a cache shared by all tabs, with the error for each model that failed.
+
+## Entity classes
+
+`GameData` reads FGD files, following `@include`, and merges each class with its base
+classes: keyvalues with types, defaults, help and choices, spawnflags, inputs and outputs,
+and the `size()`, `color()`, `studio()` and `iconsprite()` helpers. Base classes have their
+own namespace, since `base.fgd` has both a `Light` base class and a `light` point class.
+Mallet reads the FGD in the game's `bin` folder named after the game folder (such as
+`garrysmod.fgd`) unless Tools > Game Data Files picks others. The scene uses a class's
+size and colour for point entities and shows its `studio()` model, such as the player
+figure of `info_player_start`. New entities start with their class's defaults.
+
+Outputs are `Connection`s read from and written to an entity's `connections` block, keeping
+the separator the map uses, and change through the undoable `Edit::SetConnections`.
+
+## Object Properties
+
+Alt+Enter, Edit > Properties or a double-click opens one window for the selected entities
+(the world for world brushes). It edits every selected entity at once and shows
+"(different)" where they disagree. Tabs: Keyvalues, with an editor per FGD type
+(choices, colour pickers, target names from the map) and a Raw keys mode; Outputs, with
+named-target checks and pickers for the class's outputs and the target's inputs; Inputs,
+listing the outputs elsewhere that name this entity; and Flags. Help for the hovered key
+shows at the bottom. Text fields commit when they lose focus, and every change is an
+undoable edit, so there is no Apply button.
 
 ## Drawing
 
@@ -175,7 +200,11 @@ Tools:
 | `set_grid`, `center_views` | Grid size and framing |
 | `set_viewport_type` | Switch a viewport slot between 3D and 2D types |
 | `set_camera`, `set_view_2d` | Aim the 3D camera, pan and zoom the 2D views |
-| `screenshot` | PNG of one or all viewports, rendered offscreen |
+| `screenshot` | PNG of one or all viewports, rendered offscreen, or of the whole window (`window`) |
+| `set_entity_outputs` | Replace an entity's outputs |
+| `describe_entity_class`, `list_entity_classes` | Entity classes from the FGD files |
+| `set_fgds` | Read entity classes from chosen FGD files |
+| `show_properties` | Open or close Object Properties on a tab |
 | `send_input` | Key presses, clicks and drags fed into the window as if a user made them |
 
 `send_input` queues synthetic egui events that `MalletApp::raw_input_hook` feeds into the
@@ -191,8 +220,8 @@ make any map change through `Editor::apply_edit` so it stays undoable.
 
 ## Roadmap
 
-1. Rotate handles, texture application, an object properties dialog and FGD classes,
-   all as `Edit`s with matching MCP tools.
+1. Rotate handles and texture application, as `Edit`s with matching MCP tools; the
+   Model and VisGroup tabs of Object Properties.
 2. A texture browser, model skins and bodygroups, and a model browser for prop
    entities.
 3. Clip, vertex and displacement tools.

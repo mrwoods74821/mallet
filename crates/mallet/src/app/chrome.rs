@@ -311,8 +311,18 @@ impl MalletApp {
                 } else {
                     let (size, centre) = (bounds.size(), bounds.center());
                     ui.label(format!("{} selected", editor.selection.len()));
-                    ui.label(format!("Size {} x {} x {}", size.x, size.y, size.z));
-                    ui.label(format!("Centre {} {} {}", centre.x, centre.y, centre.z));
+                    ui.label(format!(
+                        "Size {} x {} x {}",
+                        short(size.x),
+                        short(size.y),
+                        short(size.z)
+                    ));
+                    ui.label(format!(
+                        "Centre {} {} {}",
+                        short(centre.x),
+                        short(centre.y),
+                        short(centre.z)
+                    ));
                 }
                 ui.separator();
 
@@ -439,4 +449,16 @@ fn texture_preview(
     });
     previews.insert(name, preview.clone());
     preview
+}
+
+/// A coordinate with at most two decimals and no trailing zeros, so float noise such as
+/// 29.000000953674316 reads as 29.
+fn short(value: f64) -> String {
+    let text = format!("{value:.2}");
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" {
+        "0".to_owned()
+    } else {
+        text.to_owned()
+    }
 }

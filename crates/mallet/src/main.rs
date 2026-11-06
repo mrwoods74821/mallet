@@ -14,6 +14,7 @@ mod input;
 mod keymap;
 mod mcp;
 mod netgraph;
+mod properties;
 mod render3d;
 mod scene;
 mod tools;

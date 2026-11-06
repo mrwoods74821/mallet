@@ -43,6 +43,7 @@ These follow Hammer's defaults.
 | Ctrl+W / Ctrl+Tab / Ctrl+Shift+Tab | Close tab (asks about unsaved changes) / next tab / previous tab |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Shift+S / Shift+B / Shift+E | Selection tool / Block tool / Entity tool |
+| Alt+Enter or double-click | Object Properties for the selection: keyvalues, outputs, inputs and flags from the game's FGD |
 | Click | In 2D, click a brush's centre × or its outline to select it; in 3D, click it (or aim the crosshair at it in mouselook). Entities are selected whole; Ctrl+click toggles |
 | Drag on empty space | Select everything fully inside the rectangle (Ctrl adds) |
 | Drag the selection | Move it so its corner snaps to the grid, with texture lock; hold Shift on release to clone |

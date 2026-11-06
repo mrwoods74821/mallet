@@ -21,6 +21,7 @@ pub enum Action {
     SelectionTool,
     BlockTool,
     EntityTool,
+    Properties,
     SelectAll,
     ClearSelection,
     DeleteSelection,
@@ -70,6 +71,14 @@ impl Chord {
     pub const fn shift(key: Key) -> Self {
         Self {
             shift: true,
+            ..Self::key(key)
+        }
+    }
+
+    /// Alt plus the key.
+    pub const fn alt(key: Key) -> Self {
+        Self {
+            alt: true,
             ..Self::key(key)
         }
     }
@@ -127,6 +136,7 @@ impl KeyMap {
                 (Action::SelectionTool, Chord::shift(Key::S)),
                 (Action::BlockTool, Chord::shift(Key::B)),
                 (Action::EntityTool, Chord::shift(Key::E)),
+                (Action::Properties, Chord::alt(Key::Enter)),
                 (Action::SelectAll, Chord::ctrl(Key::A)),
                 (Action::ClearSelection, Chord::key(Key::Escape)),
                 (Action::DeleteSelection, Chord::key(Key::Delete)),
