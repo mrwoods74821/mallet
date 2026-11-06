@@ -15,7 +15,7 @@ use eframe::wgpu::{self, util::DeviceExt};
 use glam::{DVec3, Mat4, Vec3, Vec4};
 use mallet_content::{parallel_map, AlphaMode, Material, Materials};
 
-use crate::scene::{box_edges, Overlay, Remap, Scene, SceneFace, WireMesh, HANDLE_COLOR, SELECTED_COLOR, TOOL_COLOR};
+use crate::scene::{box_edges, Overlay, Owner, Remap, Scene, SceneFace, WireMesh, HANDLE_COLOR, SELECTED_COLOR, TOOL_COLOR};
 use crate::view2d::View2D;
 use crate::view3d::Camera3D;
 
@@ -66,6 +66,9 @@ struct TranslucentFace {
     center: Vec3,
     key: String,
     vertices: Vec<FaceVertex>,
+    /// What the face belongs to, so a selected brush's cached copy can be left out while
+    /// its tinted copy is drawn.
+    owner: Option<Owner>,
 }
 
 /// Every face of the map: opaque and alpha-tested faces in chunked GPU buffers, and
@@ -322,8 +325,14 @@ impl Renderer3D {
             self.ensure_edges(scene);
         }
         let selected: Vec<&WireMesh> = scene.meshes.iter().filter(|mesh| mesh.selected).collect();
-        let tinted = (style == CameraStyle::Textured)
-            .then(|| self.face_mesh(selected.iter().copied(), overlay.transform.as_ref(), SELECTION_TINT, false).0);
+        let (tinted, tinted_translucent) = if style == CameraStyle::Textured {
+            let (opaque, translucent) =
+                self.face_mesh(selected.iter().copied(), overlay.transform.as_ref(), SELECTION_TINT, false);
+            (Some(opaque), translucent)
+        } else {
+            (None, Vec::new())
+        };
+        let selected_owners: HashSet<Owner> = selected.iter().filter_map(|mesh| mesh.owner).collect();
         let mut outline = Vec::new();
         for mesh in &selected {
             push_edges(&mut outline, &mesh.edges, overlay.transform.as_ref(), SELECTED_COLOR);
@@ -337,7 +346,13 @@ impl Renderer3D {
         let matrix = view_projection(camera, aspect);
         let planes = frustum_planes(matrix);
         let translucent = match (&self.faces, style) {
-            (Some(faces), CameraStyle::Textured) => self.sorted_translucent(&faces.translucent, camera, &planes),
+            (Some(faces), CameraStyle::Textured) => {
+                let unselected = faces
+                    .translucent
+                    .iter()
+                    .filter(|face| face.owner.is_none_or(|owner| !selected_owners.contains(&owner)));
+                self.sorted_translucent(unselected.chain(&tinted_translucent), camera, &planes)
+            }
             _ => None,
         };
         let target = self.targets[slot].as_ref().expect("target was just created");
@@ -405,15 +420,14 @@ impl Renderer3D {
     /// Builds this frame's buffer of translucent faces in view, farthest first, with runs
     /// of the same texture merged into one draw.
     #[allow(clippy::type_complexity)]
-    fn sorted_translucent(
+    fn sorted_translucent<'a>(
         &self,
-        faces: &[TranslucentFace],
+        faces: impl Iterator<Item = &'a TranslucentFace>,
         camera: &Camera3D,
         planes: &[Vec4; 6],
     ) -> Option<(wgpu::Buffer, Vec<(String, Range<u32>)>)> {
         let eye = camera.position.as_vec3();
         let mut visible: Vec<&TranslucentFace> = faces
-            .iter()
             .filter(|face| box_visible(planes, face.center, face.center))
             .collect();
         if visible.is_empty() {
@@ -608,8 +622,8 @@ impl Renderer3D {
     }
 
     /// Builds a vertex buffer for the faces of `meshes`. With `chunked`, brushes are
-    /// grouped by which world cube their centre is in, so whole chunks can be culled, and
-    /// translucent faces are returned separately for sorting.
+    /// grouped by which world cube their centre is in, so whole chunks can be culled.
+    /// Translucent faces are always returned separately, for sorting.
     fn face_mesh<'a>(
         &self,
         meshes: impl Iterator<Item = &'a WireMesh>,
@@ -641,12 +655,13 @@ impl Renderer3D {
             for face in &mesh.faces {
                 let key = face.material.as_deref().map_or_else(|| WHITE_KEY.to_owned(), material_key);
                 let texture = self.texture_for(&key);
-                if chunked && matches!(texture.alpha, AlphaMode::Blend(_)) {
+                if matches!(texture.alpha, AlphaMode::Blend(_)) {
                     let mut vertices = Vec::new();
                     triangulate(face, texture, tint, highlight, remap, &mut vertices);
                     let center = face.vertices.iter().sum::<DVec3>() / face.vertices.len().max(1) as f64;
                     translucent.push(TranslucentFace {
                         center: center.as_vec3(),
+                        owner: mesh.owner,
                         key,
                         vertices,
                     });
