@@ -1039,10 +1039,7 @@ fn recent_maps_menu(ui: &mut egui::Ui, maps: &[PathBuf], choice: &mut RecentChoi
                     || path.display().to_string(),
                     |name| name.to_string_lossy().into_owned(),
                 );
-                let folder = path
-                    .parent()
-                    .map(|folder| folder.display().to_string())
-                    .unwrap_or_default();
+                let folder = path.parent().map(short_folder).unwrap_or_default();
                 let exists = path.is_file();
                 missing |= !exists;
                 let label = if index < 9 {
@@ -1050,7 +1047,11 @@ fn recent_maps_menu(ui: &mut egui::Ui, maps: &[PathBuf], choice: &mut RecentChoi
                 } else {
                     format!("    {name}")
                 };
-                let button = egui::Button::new(label).shortcut_text(folder);
+                // One line per map: the menu widens to fit instead of squeezing the name
+                // beside a long folder, which wrapped it a letter per line.
+                let button = egui::Button::new(label)
+                    .shortcut_text(folder)
+                    .wrap_mode(egui::TextWrapMode::Extend);
                 let response = ui.add_enabled(exists, button);
                 if exists {
                     if response.on_hover_text(path.display().to_string()).clicked() {
@@ -1072,6 +1073,44 @@ fn recent_maps_menu(ui: &mut egui::Ui, maps: &[PathBuf], choice: &mut RecentChoi
             }
         });
     });
+}
+
+/// Longest folder File > Recent Maps shows beside a map, in characters.
+const RECENT_FOLDER_CHARS: usize = 48;
+
+/// A folder short enough for a menu: the drive, then as many of the last folders as fit,
+/// such as `C:\…\maps_rp_city24\maps`. The full path shows when hovering.
+fn short_folder(folder: &Path) -> String {
+    let full = folder.display().to_string();
+    if full.chars().count() <= RECENT_FOLDER_CHARS {
+        return full;
+    }
+    let separator = std::path::MAIN_SEPARATOR;
+    let root: String = folder
+        .components()
+        .take_while(|part| matches!(part, std::path::Component::Prefix(_) | std::path::Component::RootDir))
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let names: Vec<String> = folder
+        .components()
+        .filter_map(|part| match part {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    let mut tail = String::new();
+    for name in names.iter().rev() {
+        let longer = if tail.is_empty() {
+            name.clone()
+        } else {
+            format!("{name}{separator}{tail}")
+        };
+        if root.chars().count() + 2 + longer.chars().count() > RECENT_FOLDER_CHARS && !tail.is_empty() {
+            break;
+        }
+        tail = longer;
+    }
+    format!("{root}…{separator}{tail}")
 }
 
 /// Copies the viewport settings from Mallet Options onto the camera every frame, so
@@ -1476,5 +1515,25 @@ fn menu_item(ui: &mut egui::Ui, keymap: &KeyMap, text: &str, action: Action, cho
     {
         *chosen = Some(action);
         ui.close_menu();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn long_folders_keep_the_drive_and_their_last_folders() {
+        let folder = Path::new(
+            r"C:\Program Files (x86)\Steam\steamapps\common\GarrysMod\garrysmod\addons\maps_rp_city24_v4_resilience\maps",
+        );
+        let short = short_folder(folder);
+        assert_eq!(short, r"C:\…\addons\maps_rp_city24_v4_resilience\maps");
+        assert!(short.chars().count() <= RECENT_FOLDER_CHARS);
+        assert_eq!(short_folder(Path::new(r"D:\maps")), r"D:\maps");
+        // A single folder longer than the limit is still shown whole.
+        let long = format!(r"C:\{}", "x".repeat(60));
+        assert_eq!(short_folder(Path::new(&long)), format!(r"C:\…\{}", "x".repeat(60)));
     }
 }
