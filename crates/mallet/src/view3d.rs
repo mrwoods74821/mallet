@@ -6,7 +6,7 @@ use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::Canvas;
 use crate::keymap::{Action, KeyMap};
-use crate::scene::{box_edges, Overlay, Scene, TOOL_COLOR};
+use crate::scene::{box_edges, Overlay, Remap, Scene, TOOL_COLOR};
 
 /// World units per second, matching Hammer's default forward speed.
 const MOVE_SPEED: f64 = 1000.0;
@@ -172,10 +172,11 @@ impl Camera3D {
                 center.y - (camera.y / camera.z * focal) as f32,
             )
         };
-        let draw_edges = |canvas: &mut dyn Canvas, edges: &[[DVec3; 2]], offset: DVec3, color: Color32| {
+        let draw_edges = |canvas: &mut dyn Canvas, edges: &[[DVec3; 2]], remap: Option<&Remap>, color: Color32| {
+            let map = |point: DVec3| remap.map_or(point, |remap| remap.apply(point));
             let mut segments = Vec::with_capacity(edges.len());
             for [a, b] in edges {
-                let (mut a, mut b) = (to_camera(*a + offset), to_camera(*b + offset));
+                let (mut a, mut b) = (to_camera(map(*a)), to_camera(map(*b)));
                 if a.z < NEAR && b.z < NEAR {
                     continue;
                 }
@@ -192,15 +193,16 @@ impl Camera3D {
         let unselected = scene.meshes.iter().filter(|mesh| !mesh.selected);
         let selected = scene.meshes.iter().filter(|mesh| mesh.selected);
         for mesh in unselected.chain(selected) {
-            let (color, offset) = mesh.appearance(overlay);
-            let radius = mesh.bounds.size().length() * 0.5;
-            if to_camera(mesh.bounds.center() + offset).z + radius < NEAR {
+            let (color, remap) = mesh.appearance(overlay);
+            let bounds = mesh.mapped_bounds(remap.as_ref());
+            let radius = bounds.size().length() * 0.5;
+            if to_camera(bounds.center()).z + radius < NEAR {
                 continue;
             }
-            draw_edges(canvas, &mesh.edges, offset, color);
+            draw_edges(canvas, &mesh.edges, remap.as_ref(), color);
         }
         if let Some(block) = &overlay.block {
-            draw_edges(canvas, &box_edges(block), DVec3::ZERO, TOOL_COLOR);
+            draw_edges(canvas, &box_edges(block), None, TOOL_COLOR);
         }
 
         let label_color = if active { Color32::WHITE } else { Color32::GRAY };

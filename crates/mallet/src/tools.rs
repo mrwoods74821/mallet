@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use glam::{DVec2, DVec3};
 use mallet_vmf::edit::Edit;
+use mallet_vmf::geometry::Bounds;
 use mallet_vmf::{Entity, EntityItem};
 use serde_json::{json, Value};
 
@@ -115,6 +116,14 @@ pub fn definitions() -> Value {
              in Hammer. Undoable.",
             json!({ "offset": vec3 }),
             &["offset"],
+        ),
+        tool(
+            "resize_selection",
+            "Stretch the selection so its bounding box becomes min..max, like dragging Hammer's selection \
+             handles. Brushes scale along each axis; entity origins move proportionally; textures keep their \
+             world alignment. Undoable.",
+            json!({ "min": vec3, "max": vec3 }),
+            &["min", "max"],
         ),
         tool("delete_selection", "Delete the selected brushes and entities. Undoable.", json!({}), &[]),
         tool(
@@ -287,6 +296,14 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
         }
         "clone_selection" => {
             editor.clone_selection(required_vec3(args, "offset")?)?;
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
+        "resize_selection" => {
+            let to = Bounds {
+                min: required_vec3(args, "min")?,
+                max: required_vec3(args, "max")?,
+            };
+            editor.resize_selection(to)?;
             Ok(ToolResult::json(&selection_json(editor)))
         }
         "delete_selection" => {

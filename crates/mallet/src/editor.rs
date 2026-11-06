@@ -293,33 +293,66 @@ impl Editor {
 
     /// Moves the selection, with texture lock. Entity origins move with it.
     pub fn move_selection(&mut self, offset: DVec3) -> Result<(), String> {
+        let (solids, origins) = self.selection_parts()?;
+        let mut edits = vec![Edit::Translate { solids, offset }];
+        edits.extend(origin_edits(origins, |origin| origin + offset));
+        self.apply_edit(&Edit::Batch(edits))?;
+        self.message = format!("Moved selection by {}", format_vec3(offset));
+        Ok(())
+    }
+
+    /// Stretches the selection so its bounds become `to`, like dragging a selection handle.
+    /// Entity origins are moved proportionally.
+    pub fn resize_selection(&mut self, to: Bounds) -> Result<(), String> {
+        let from = self.scene.selection_bounds();
+        let (solids, origins) = self.selection_parts()?;
+        let mut edits = vec![Edit::Rescale { solids, from, to }];
+        edits.extend(origin_edits(origins, |origin| from.remap(&to, origin)));
+        self.apply_edit(&Edit::Batch(edits))?;
+        let size = to.size();
+        self.message = format!("Resized selection to {}w {}l {}h", size.x, size.y, size.z);
+        Ok(())
+    }
+
+    /// The brush ids and entity origins that moving or resizing the selection affects.
+    fn selection_parts(&self) -> Result<(Vec<u32>, EntityOrigins), String> {
         let vmf = &self.document.as_ref().ok_or("no map is open")?.vmf;
         if self.selection.is_empty() {
             return Err("nothing is selected".to_owned());
         }
         let mut solids = Vec::new();
-        let mut origin_edits = Vec::new();
+        let mut origins = Vec::new();
         for owner in &self.selection {
             match *owner {
                 Owner::Solid(id) => solids.push(id),
                 Owner::Entity(id) => {
                     let entity = find_entity(vmf, id)?;
                     solids.extend(entity.solids().filter_map(Solid::id));
-                    if let Some(origin) = entity.origin() {
-                        origin_edits.push(Edit::SetKey {
-                            entity: id,
-                            key: "origin".to_owned(),
-                            value: format_vec3(origin + offset),
-                        });
-                    }
+                    origins.extend(entity.origin().map(|origin| (id, origin)));
                 }
             }
         }
-        let mut edits = vec![Edit::Translate { solids, offset }];
-        edits.extend(origin_edits);
-        self.apply_edit(&Edit::Batch(edits))?;
-        self.message = format!("Moved selection by {}", format_vec3(offset));
-        Ok(())
+        Ok((solids, origins))
+    }
+
+    /// The box that gets resize handles: the pending block with the Block tool, otherwise
+    /// the selection, following any move or resize being dragged.
+    pub fn handle_box(&self) -> Option<Bounds> {
+        match self.tool {
+            Tool::Block => self.overlay.block,
+            Tool::Select => {
+                let bounds = self.scene.selection_bounds();
+                (!bounds.is_empty()).then(|| self.overlay.transform.map_or(bounds, |remap| remap.to))
+            }
+        }
+    }
+
+    /// The overlay to draw, including the resize handles.
+    pub fn display_overlay(&self) -> Overlay {
+        Overlay {
+            handles: self.handle_box(),
+            ..self.overlay
+        }
     }
 
     /// Copies the selection with fresh ids, moves the copies by `offset` and selects them.
@@ -489,12 +522,24 @@ impl Editor {
         let size = self.viewport_rects[index].size();
         let local = Rect::from_min_size(Pos2::ZERO, size);
         let mut canvas = canvas_for(size)?;
+        let overlay = self.display_overlay();
         match index {
-            0 => self.camera.draw(&mut canvas, local, &self.scene, false, &self.overlay),
-            _ => self.views[index - 1].draw(&mut canvas, local, &self.scene, self.grid, false, &self.overlay),
+            0 => self.camera.draw(&mut canvas, local, &self.scene, false, &overlay),
+            _ => self.views[index - 1].draw(&mut canvas, local, &self.scene, self.grid, false, &overlay),
         }
         Ok(canvas)
     }
+}
+
+/// Entity ids paired with their origins.
+type EntityOrigins = Vec<(u32, DVec3)>;
+
+fn origin_edits(origins: EntityOrigins, map: impl Fn(DVec3) -> DVec3) -> impl Iterator<Item = Edit> {
+    origins.into_iter().map(move |(entity, origin)| Edit::SetKey {
+        entity,
+        key: "origin".to_owned(),
+        value: format_vec3(map(origin)),
+    })
 }
 
 fn find_entity(vmf: &Vmf, id: u32) -> Result<&Entity, String> {

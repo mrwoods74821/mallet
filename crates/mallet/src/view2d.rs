@@ -5,7 +5,7 @@ use glam::{DVec2, DVec3};
 use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::Canvas;
-use crate::scene::{box_edges, Overlay, Scene, TOOL_COLOR};
+use crate::scene::{box_edges, Overlay, Remap, Scene, HANDLE_COLOR, HANDLE_HALF_SIZE, TOOL_COLOR};
 
 const MIN_SCALE: f64 = 1.0 / 256.0;
 const MAX_SCALE: f64 = 32.0;
@@ -59,6 +59,65 @@ impl Axis2D {
         world[horizontal] = offset.x;
         world[vertical] = offset.y;
         world
+    }
+}
+
+/// One of the eight resize handles on a box in a 2D view: -1, 0 or 1 along the view's
+/// horizontal and vertical axes, where -1 is the minimum edge and 1 the maximum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Handle {
+    pub x: i8,
+    pub y: i8,
+}
+
+impl Handle {
+    /// The four corners and four edge midpoints.
+    pub const ALL: [Handle; 8] = [
+        Handle { x: -1, y: -1 },
+        Handle { x: 0, y: -1 },
+        Handle { x: 1, y: -1 },
+        Handle { x: -1, y: 0 },
+        Handle { x: 1, y: 0 },
+        Handle { x: -1, y: 1 },
+        Handle { x: 0, y: 1 },
+        Handle { x: 1, y: 1 },
+    ];
+
+    /// Where the handle sits on a box, in the view's 2D world coordinates.
+    pub fn world_position(self, axis: Axis2D, bounds: &Bounds) -> DVec2 {
+        let (min, max) = (axis.project(bounds.min), axis.project(bounds.max));
+        let pick = |side: i8, low: f64, high: f64| match side {
+            -1 => low,
+            1 => high,
+            _ => (low + high) * 0.5,
+        };
+        DVec2::new(pick(self.x, min.x, max.x), pick(self.y, min.y, max.y))
+    }
+
+    /// The box after dragging this handle by `delta` in the view. Moved edges snap to the
+    /// grid and stop one grid step short of the opposite edge.
+    pub fn resize(self, axis: Axis2D, bounds: &Bounds, delta: DVec2, grid: f64) -> Bounds {
+        let [horizontal, vertical, _] = axis.axes();
+        let snap = |value: f64| (value / grid).round() * grid;
+        let mut resized = *bounds;
+        for (side, index, moved) in [(self.x, horizontal, delta.x), (self.y, vertical, delta.y)] {
+            match side {
+                -1 => resized.min[index] = snap(bounds.min[index] + moved).min(bounds.max[index] - grid),
+                1 => resized.max[index] = snap(bounds.max[index] + moved).max(bounds.min[index] + grid),
+                _ => {}
+            }
+        }
+        resized
+    }
+
+    /// The mouse cursor that shows which way this handle resizes.
+    pub fn cursor(self) -> egui::CursorIcon {
+        match (self.x, self.y) {
+            (0, _) => egui::CursorIcon::ResizeVertical,
+            (_, 0) => egui::CursorIcon::ResizeHorizontal,
+            (x, y) if x == y => egui::CursorIcon::ResizeNeSw,
+            _ => egui::CursorIcon::ResizeNwSe,
+        }
     }
 }
 
@@ -142,28 +201,36 @@ impl View2D {
 
     /// Draws the grid, every wireframe that overlaps the view, and the corner label.
     ///
-    /// Selected meshes are drawn last, in red, at the overlay's move offset; then the block
-    /// tool's box and this view's selection marquee.
+    /// Selected meshes are drawn last, in red, where the overlay is moving or resizing them;
+    /// then the block tool's box, the resize handles and this view's selection marquee.
     pub fn draw(&self, canvas: &mut dyn Canvas, rect: Rect, scene: &Scene, grid: f64, active: bool, overlay: &Overlay) {
         canvas.fill(rect, Color32::BLACK);
         self.draw_grid(canvas, rect, grid);
+        if let Some(handles) = &overlay.handles {
+            self.draw_handle_outline(canvas, rect, handles);
+        }
 
         let view_min = self.to_world(rect, rect.left_bottom());
         let view_max = self.to_world(rect, rect.right_top());
         let unselected = scene.meshes.iter().filter(|mesh| !mesh.selected);
         let selected = scene.meshes.iter().filter(|mesh| mesh.selected);
         for mesh in unselected.chain(selected) {
-            let (color, offset) = mesh.appearance(overlay);
-            let min = self.axis.project(mesh.bounds.min + offset);
-            let max = self.axis.project(mesh.bounds.max + offset);
+            let (color, remap) = mesh.appearance(overlay);
+            let bounds = mesh.mapped_bounds(remap.as_ref());
+            let (min, max) = (self.axis.project(bounds.min), self.axis.project(bounds.max));
             if max.x < view_min.x || min.x > view_max.x || max.y < view_min.y || min.y > view_max.y {
                 continue;
             }
-            self.draw_edges(canvas, rect, &mesh.edges, offset, color);
+            self.draw_edges(canvas, rect, &mesh.edges, remap.as_ref(), color);
         }
 
         if let Some(block) = &overlay.block {
-            self.draw_edges(canvas, rect, &box_edges(block), DVec3::ZERO, TOOL_COLOR);
+            self.draw_edges(canvas, rect, &box_edges(block), None, TOOL_COLOR);
+        }
+        if let Some(handles) = &overlay.handles {
+            for (_, at) in self.handle_positions(rect, handles) {
+                canvas.fill(Rect::from_center_size(at, egui::Vec2::splat(HANDLE_HALF_SIZE * 2.0)), HANDLE_COLOR);
+            }
         }
         if let Some((axis, a, b)) = overlay.marquee {
             if axis == self.axis {
@@ -179,10 +246,36 @@ impl View2D {
         canvas.label(rect.left_top() + egui::vec2(6.0, 4.0), self.axis.label(), label_color);
     }
 
-    fn draw_edges(&self, canvas: &mut dyn Canvas, rect: Rect, edges: &[[DVec3; 2]], offset: DVec3, color: Color32) {
+    /// Screen positions of the eight resize handles of a box in this view.
+    pub fn handle_positions(&self, rect: Rect, bounds: &Bounds) -> [(Handle, Pos2); 8] {
+        Handle::ALL.map(|handle| (handle, self.to_screen(rect, handle.world_position(self.axis, bounds))))
+    }
+
+    /// The handle of a box under a screen position, if any.
+    pub fn hit_handle(&self, rect: Rect, bounds: &Bounds, pointer: Pos2) -> Option<Handle> {
+        let reach = HANDLE_HALF_SIZE + 2.0;
+        self.handle_positions(rect, bounds)
+            .into_iter()
+            .find(|(_, at)| (at.x - pointer.x).abs() <= reach && (at.y - pointer.y).abs() <= reach)
+            .map(|(handle, _)| handle)
+    }
+
+    /// Draws the box the handles sit on. It goes under the brushes so a selected brush's
+    /// red outline stays visible where the two coincide.
+    fn draw_handle_outline(&self, canvas: &mut dyn Canvas, rect: Rect, bounds: &Bounds) {
+        let (min, max) = (self.axis.project(bounds.min), self.axis.project(bounds.max));
+        let corners = [min, DVec2::new(max.x, min.y), max, DVec2::new(min.x, max.y)];
+        let outline: Vec<[Pos2; 2]> = (0..4)
+            .map(|i| [self.to_screen(rect, corners[i]), self.to_screen(rect, corners[(i + 1) % 4])])
+            .collect();
+        canvas.lines(&outline, HANDLE_COLOR);
+    }
+
+    fn draw_edges(&self, canvas: &mut dyn Canvas, rect: Rect, edges: &[[DVec3; 2]], remap: Option<&Remap>, color: Color32) {
+        let map = |point: DVec3| remap.map_or(point, |remap| remap.apply(point));
         let segments: Vec<[Pos2; 2]> = edges
             .iter()
-            .map(|[a, b]| (self.axis.project(*a + offset), self.axis.project(*b + offset)))
+            .map(|[a, b]| (self.axis.project(map(*a)), self.axis.project(map(*b))))
             .filter(|(a, b)| a.distance_squared(*b) >= 1e-6)
             .map(|(a, b)| [self.to_screen(rect, a), self.to_screen(rect, b)])
             .collect();

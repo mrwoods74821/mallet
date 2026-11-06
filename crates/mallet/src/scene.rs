@@ -36,24 +36,67 @@ pub const SELECTED_COLOR: Color32 = Color32::from_rgb(255, 0, 0);
 /// Colour of the block tool's pending box and the selection marquee.
 pub const TOOL_COLOR: Color32 = Color32::from_rgb(255, 255, 255);
 
+/// Colour of the box and handles drawn around the selection or the pending block.
+pub const HANDLE_COLOR: Color32 = Color32::from_rgb(255, 255, 255);
+/// Half the side length, in pixels, of a selection handle.
+pub const HANDLE_HALF_SIZE: f32 = 3.5;
+
+/// A per-axis stretch and shift that maps the box `from` onto the box `to`; a plain move
+/// when both have the same size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Remap {
+    pub from: Bounds,
+    pub to: Bounds,
+}
+
+impl Remap {
+    /// Moves `bounds` by `offset` without resizing.
+    pub fn translate(bounds: Bounds, offset: DVec3) -> Self {
+        Self {
+            from: bounds,
+            to: Bounds {
+                min: bounds.min + offset,
+                max: bounds.max + offset,
+            },
+        }
+    }
+
+    pub fn apply(&self, point: DVec3) -> DVec3 {
+        self.from.remap(&self.to, point)
+    }
+}
+
 /// Temporary shapes drawn on top of the map while a tool is in use.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Overlay {
-    /// How far selected meshes are drawn from where they are, while being dragged.
-    pub move_offset: DVec3,
+    /// Where selected meshes are drawn while being moved or resized.
+    pub transform: Option<Remap>,
     /// The block tool's box, waiting for Enter.
     pub block: Option<Bounds>,
     /// A selection rectangle being dragged in one 2D view, as two world corners.
     pub marquee: Option<(Axis2D, DVec2, DVec2)>,
+    /// The box that gets resize handles in the 2D views: the selection or the pending block.
+    pub handles: Option<Bounds>,
 }
 
 impl WireMesh {
-    /// Colour and offset to draw this mesh with, given the current overlay.
-    pub fn appearance(&self, overlay: &Overlay) -> (Color32, DVec3) {
+    /// Colour to draw this mesh with and where to move it, given the current overlay.
+    pub fn appearance(&self, overlay: &Overlay) -> (Color32, Option<Remap>) {
         if self.selected {
-            (SELECTED_COLOR, overlay.move_offset)
+            (SELECTED_COLOR, overlay.transform)
         } else {
-            (self.color, DVec3::ZERO)
+            (self.color, None)
+        }
+    }
+
+    /// The mesh bounds after an optional remap.
+    pub fn mapped_bounds(&self, remap: Option<&Remap>) -> Bounds {
+        match remap {
+            Some(remap) => Bounds {
+                min: remap.apply(self.bounds.min),
+                max: remap.apply(self.bounds.max),
+            },
+            None => self.bounds,
         }
     }
 }

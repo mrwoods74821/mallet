@@ -7,11 +7,13 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Id, Modifiers, PointerButton, Pos2, Rect, Response, Sense, ViewportCommand};
 use glam::{DVec2, DVec3};
+use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::PainterCanvas;
 use crate::editor::{self, Editor, SelectMode, Tool, VIEWPORT_GAP};
 use crate::keymap::{Action, KeyMap};
-use crate::view2d::{Axis2D, View2D};
+use crate::scene::Remap;
+use crate::view2d::{Axis2D, Handle, View2D};
 use crate::{mcp, tools};
 
 /// Port the MCP server listens on unless `MALLET_MCP_PORT` says otherwise.
@@ -40,21 +42,33 @@ const KEY_ACTIONS: [Action; 15] = [
     Action::CenterView3D,
 ];
 
-/// A left-button drag in progress in one 2D view.
+/// A left-button drag in progress in one 2D view. `start` is the 2D world point where the
+/// button went down; `bounds` is the box being moved or resized as it was at that moment.
 #[derive(Clone, Copy, Debug)]
 enum Drag {
     /// Moving the selection, or cloning it when Shift is held at release.
-    Move { view: usize, start: DVec2 },
+    Move { view: usize, start: DVec2, bounds: Bounds },
+    /// Resizing the selection with one of its handles.
+    Resize { view: usize, start: DVec2, bounds: Bounds, handle: Handle },
     /// Drawing a selection rectangle.
     Marquee { view: usize, start: DVec2 },
     /// Drawing a new block, from a grid-snapped corner.
-    Block { view: usize, start: DVec2 },
+    NewBlock { view: usize, start: DVec2 },
+    /// Moving the pending block.
+    MoveBlock { view: usize, start: DVec2, bounds: Bounds },
+    /// Resizing the pending block with one of its handles.
+    ResizeBlock { view: usize, start: DVec2, bounds: Bounds, handle: Handle },
 }
 
 impl Drag {
     fn view(self) -> usize {
         match self {
-            Self::Move { view, .. } | Self::Marquee { view, .. } | Self::Block { view, .. } => view,
+            Self::Move { view, .. }
+            | Self::Resize { view, .. }
+            | Self::Marquee { view, .. }
+            | Self::NewBlock { view, .. }
+            | Self::MoveBlock { view, .. }
+            | Self::ResizeBlock { view, .. } => view,
         }
     }
 }
@@ -278,7 +292,7 @@ impl MalletApp {
         }
         let active = response.hovered() || moving;
         let canvas = &mut PainterCanvas(&ui.painter_at(rects[0]));
-        editor.camera.draw(canvas, rects[0], &editor.scene, active, &editor.overlay);
+        editor.camera.draw(canvas, rects[0], &editor.scene, active, &editor.display_overlay());
         if moving {
             ctx.request_repaint();
         }
@@ -291,13 +305,60 @@ impl MalletApp {
             let view = editor.views[index].clone();
             if !space_held {
                 self.use_tool_2d(index, &view, rect, &response, editor, &pointer);
+                if let Some(icon) = self.cursor_icon(index, &view, rect, &response, editor) {
+                    ctx.set_cursor_icon(icon);
+                }
             }
             let canvas = &mut PainterCanvas(&ui.painter_at(rect));
-            view.draw(canvas, rect, &editor.scene, editor.grid, response.hovered(), &editor.overlay);
+            view.draw(canvas, rect, &editor.scene, editor.grid, response.hovered(), &editor.display_overlay());
             if let Some(position) = response.hover_pos() {
                 self.cursor = Some(snap(view.to_world(rect, position), editor.grid));
             }
         }
+    }
+
+    /// Chooses the drag that a left-button press at `origin` starts with the active tool:
+    /// resizing from a handle, moving from inside the box, or starting a new marquee or block.
+    fn begin_drag(index: usize, view: &View2D, rect: Rect, origin: Pos2, editor: &Editor) -> Drag {
+        let start = view.to_world(rect, origin);
+        let target = editor.handle_box();
+        let handle = target.and_then(|bounds| view.hit_handle(rect, &bounds, origin));
+        let inside = target.is_some_and(|bounds| box_contains(view.axis, &bounds, start));
+        match (editor.tool, target, handle, inside) {
+            (Tool::Select, Some(bounds), Some(handle), _) => Drag::Resize { view: index, start, bounds, handle },
+            (Tool::Select, Some(bounds), None, true) => Drag::Move { view: index, start, bounds },
+            (Tool::Select, ..) => Drag::Marquee { view: index, start },
+            (Tool::Block, Some(bounds), Some(handle), _) => Drag::ResizeBlock { view: index, start, bounds, handle },
+            (Tool::Block, Some(bounds), None, true) => Drag::MoveBlock { view: index, start, bounds },
+            (Tool::Block, ..) => Drag::NewBlock {
+                view: index,
+                start: snap(start, editor.grid),
+            },
+        }
+    }
+
+    /// The resize or move cursor while hovering a handle or the inside of the box, or
+    /// while dragging one.
+    fn cursor_icon(
+        &self,
+        index: usize,
+        view: &View2D,
+        rect: Rect,
+        response: &Response,
+        editor: &Editor,
+    ) -> Option<egui::CursorIcon> {
+        match self.drag.filter(|drag| drag.view() == index) {
+            Some(Drag::Resize { handle, .. } | Drag::ResizeBlock { handle, .. }) => return Some(handle.cursor()),
+            Some(Drag::Move { .. } | Drag::MoveBlock { .. }) => return Some(egui::CursorIcon::Move),
+            Some(_) => return None,
+            None => {}
+        }
+        let pointer = response.hover_pos()?;
+        let bounds = editor.handle_box()?;
+        if let Some(handle) = view.hit_handle(rect, &bounds, pointer) {
+            return Some(handle.cursor());
+        }
+        box_contains(view.axis, &bounds, view.to_world(rect, pointer)).then_some(egui::CursorIcon::Move)
     }
 
     /// Runs the active tool for a left-button click or drag in one 2D view.
@@ -313,15 +374,7 @@ impl MalletApp {
         let grid = editor.grid;
         if response.drag_started_by(PointerButton::Primary) {
             if let Some(origin) = pointer.press_origin {
-                let start = view.to_world(rect, origin);
-                self.drag = Some(match editor.tool {
-                    Tool::Block => Drag::Block {
-                        view: index,
-                        start: snap(start, grid),
-                    },
-                    Tool::Select if selection_contains(editor, view.axis, start) => Drag::Move { view: index, start },
-                    Tool::Select => Drag::Marquee { view: index, start },
-                });
+                self.drag = Some(Self::begin_drag(index, view, rect, origin, editor));
             }
         }
 
@@ -339,45 +392,77 @@ impl MalletApp {
         if let Some(position) = pointer.position {
             let world = view.to_world(rect, position);
             match drag {
-                Drag::Move { start, .. } => editor.overlay.move_offset = view.axis.lift(snap(world - start, grid)),
+                Drag::Move { start, bounds, .. } => {
+                    let offset = snapped_offset(view.axis, &bounds, world - start, grid);
+                    editor.overlay.transform = Some(Remap::translate(bounds, offset));
+                }
+                Drag::Resize { start, bounds, handle, .. } => {
+                    let to = handle.resize(view.axis, &bounds, world - start, grid);
+                    editor.overlay.transform = Some(Remap { from: bounds, to });
+                }
                 Drag::Marquee { start, .. } => editor.overlay.marquee = Some((view.axis, start, world)),
-                Drag::Block { start, .. } => {
+                Drag::NewBlock { start, .. } => {
                     editor.overlay.block = editor.block_from_drag(view.axis, start, snap(world, grid));
+                }
+                Drag::MoveBlock { start, bounds, .. } => {
+                    let offset = snapped_offset(view.axis, &bounds, world - start, grid);
+                    editor.overlay.block = Some(Remap::translate(bounds, offset).to);
+                }
+                Drag::ResizeBlock { start, bounds, handle, .. } => {
+                    editor.overlay.block = Some(handle.resize(view.axis, &bounds, world - start, grid));
                 }
             }
         }
 
         if response.drag_stopped() {
             self.drag = None;
-            match drag {
-                Drag::Move { .. } => {
-                    let offset = std::mem::take(&mut editor.overlay.move_offset);
-                    if offset != DVec3::ZERO {
-                        let result = if pointer.modifiers.shift {
-                            editor.clone_selection(offset)
-                        } else {
-                            editor.move_selection(offset)
-                        };
-                        if let Err(error) = result {
-                            editor.message = error;
-                        }
-                    }
-                }
-                Drag::Marquee { .. } => {
-                    if let Some((axis, a, b)) = editor.overlay.marquee.take() {
-                        let owners = editor.scene.owners_inside(axis, a, b);
-                        let mode = if pointer.modifiers.ctrl {
-                            SelectMode::Add
-                        } else {
-                            SelectMode::Replace
-                        };
-                        editor.select(owners, mode);
-                    }
-                }
-                Drag::Block { .. } => {}
+            if let Err(error) = finish_drag(drag, editor, pointer.modifiers) {
+                editor.message = error;
             }
         }
     }
+}
+
+/// Applies a finished drag: moves, clones or resizes the selection, or selects what the
+/// marquee covers. Block drags only change the pending block, which Enter creates.
+fn finish_drag(drag: Drag, editor: &mut Editor, modifiers: Modifiers) -> Result<(), String> {
+    match drag {
+        Drag::Move { .. } => {
+            let Some(remap) = editor.overlay.transform.take() else {
+                return Ok(());
+            };
+            let offset = remap.to.min - remap.from.min;
+            match (offset == DVec3::ZERO, modifiers.shift) {
+                (true, _) => Ok(()),
+                (false, true) => editor.clone_selection(offset),
+                (false, false) => editor.move_selection(offset),
+            }
+        }
+        Drag::Resize { .. } => match editor.overlay.transform.take() {
+            Some(remap) if remap.to != remap.from => editor.resize_selection(remap.to),
+            _ => Ok(()),
+        },
+        Drag::Marquee { .. } => {
+            if let Some((axis, a, b)) = editor.overlay.marquee.take() {
+                let owners = editor.scene.owners_inside(axis, a, b);
+                let mode = if modifiers.ctrl { SelectMode::Add } else { SelectMode::Replace };
+                editor.select(owners, mode);
+            }
+            Ok(())
+        }
+        Drag::NewBlock { .. } | Drag::MoveBlock { .. } | Drag::ResizeBlock { .. } => Ok(()),
+    }
+}
+
+/// The world offset that moves a box by a dragged distance so its minimum corner lands on
+/// the grid, the way Hammer snaps moves.
+fn snapped_offset(axis: Axis2D, bounds: &Bounds, dragged: DVec2, grid: f64) -> DVec3 {
+    let corner = axis.project(bounds.min);
+    axis.lift(snap(corner + dragged, grid) - corner)
+}
+
+fn box_contains(axis: Axis2D, bounds: &Bounds, point: DVec2) -> bool {
+    point.cmpge(axis.project(bounds.min)).all() && point.cmple(axis.project(bounds.max)).all()
 }
 
 impl eframe::App for MalletApp {
@@ -443,12 +528,6 @@ fn open_or_new(editor: &mut Editor, path: Option<PathBuf>) {
 
 fn snap(point: DVec2, grid: f64) -> DVec2 {
     (point / grid).round() * grid
-}
-
-/// Whether a 2D world point lies inside the selection's projected bounds.
-fn selection_contains(editor: &Editor, axis: Axis2D, point: DVec2) -> bool {
-    let bounds = editor.scene.selection_bounds();
-    !bounds.is_empty() && point.cmpge(axis.project(bounds.min)).all() && point.cmple(axis.project(bounds.max)).all()
 }
 
 /// Applies a click: selects what was hit, or with Ctrl toggles it. Clicking empty space
