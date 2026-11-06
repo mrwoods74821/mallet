@@ -29,7 +29,7 @@ use crate::editor::{self, Editor, SelectMode, Tool, ViewMode, WindowShot, VIEWPO
 use crate::gizmo::{Change as GizmoChange, Gizmo, GizmoDrag, Part as GizmoPart};
 use crate::keymap::{Action, KeyMap};
 use crate::netgraph::{NetGraph, NetGraphExtra};
-use crate::render3d::{CameraStyle, Renderer3D};
+use crate::render3d::{CameraStyle, LightingInput, Renderer3D};
 use crate::scene::Remap;
 use crate::transform::{self, HandleMode};
 use crate::view2d::{Axis2D, Handle, View2D};
@@ -726,7 +726,7 @@ impl MalletApp {
                 let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
                 painter.image(texture, rect, full, egui::Color32::WHITE);
                 let label = match style {
-                    CameraStyle::Textured if editor.materials.is_none() => "camera (no game set)",
+                    CameraStyle::Textured | CameraStyle::Lit if editor.materials.is_none() => "camera (no game set)",
                     _ => editor.layout[slot].label(),
                 };
                 let color = if active {
@@ -737,7 +737,15 @@ impl MalletApp {
                 canvas.label(rect.left_top() + egui::vec2(6.0, 4.0), label, color);
                 Camera3D::draw_crosshair(&painter, rect);
                 self.draw_gizmo(&painter, slot, rect, response, editor);
-                if editor.config.view.net_graph && style == CameraStyle::Textured {
+                if style == CameraStyle::Lit {
+                    lighting_notice(&painter, rect, editor);
+                    let animated = editor.config.lighting.animate
+                        && editor.scene.lighting.lights.iter().any(|light| light.pattern.is_some());
+                    if animated {
+                        ctx.request_repaint_after(Duration::from_millis(100));
+                    }
+                }
+                if editor.config.view.net_graph && style != CameraStyle::Wireframe {
                     let extra = editor.gpu.as_ref().map(|gpu| NetGraphExtra {
                         stats: gpu.stats,
                         reused: gpu.reused.iter().filter(|reused| **reused).count(),
@@ -937,6 +945,10 @@ impl MalletApp {
     ) -> egui::TextureId {
         let overlay = editor.display_overlay();
         let size = editor.slot_pixels(slot);
+        let lighting = LightingInput {
+            options: &editor.config.lighting,
+            texture_lights: &editor.texture_lights,
+        };
         let renderer = editor
             .gpu
             .get_or_insert_with(|| Renderer3D::new(&render_state.device, &render_state.queue));
@@ -949,6 +961,7 @@ impl MalletApp {
             size,
             editor.materials.as_mut(),
             &editor.models,
+            lighting,
         );
         show_texture(render_state, &mut self.slot_textures[slot], view, recreated)
     }
@@ -1629,7 +1642,8 @@ fn open_or_new(editor: &mut Editor, path: Option<PathBuf>) {
 }
 
 /// Draws a viewport's label as a button: clicking it opens a menu to switch the slot
-/// between the 3D and 2D view types.
+/// between the 3D and 2D view types. A lighting preview also gets a sun button beside its
+/// label with the lighting settings used most.
 fn viewport_menu(ui: &mut egui::Ui, slot: usize, rect: Rect, editor: &mut Editor) {
     let mode = editor.layout[slot];
     let font = egui::FontId::proportional(13.0);
@@ -1659,7 +1673,9 @@ fn viewport_menu(ui: &mut egui::Ui, slot: usize, rect: Rect, editor: &mut Editor
     egui::popup::popup_below_widget(ui, popup, &response, egui::PopupCloseBehavior::CloseOnClick, |ui| {
         ui.set_min_width(140.0);
         for (index, choice) in ViewMode::ALL.into_iter().enumerate() {
-            if index == 2 {
+            let first_2d =
+                index > 0 && choice.view_index().is_some() && ViewMode::ALL[index - 1].view_index().is_none();
+            if first_2d {
                 ui.separator();
             }
             if ui.selectable_label(choice == mode, choice.menu_label()).clicked() {
@@ -1667,6 +1683,91 @@ fn viewport_menu(ui: &mut egui::Ui, slot: usize, rect: Rect, editor: &mut Editor
             }
         }
     });
+    if mode == ViewMode::Lighting {
+        lighting_button(ui, slot, rect, label, editor);
+    }
+}
+
+/// The sun button beside a lighting preview's label, which opens the lighting settings
+/// used most; Mallet Options > Lighting preview has every one.
+fn lighting_button(ui: &mut egui::Ui, slot: usize, rect: Rect, label: Rect, editor: &mut Editor) {
+    let button = Rect::from_min_size(label.right_top() + egui::vec2(2.0, 0.0), egui::vec2(20.0, 19.0));
+    let response = ui
+        .interact(button, Id::new(("lighting_button", slot)), Sense::click())
+        .on_hover_text("Lighting preview settings");
+    let painter = ui.painter_at(rect);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        painter.rect_stroke(
+            button,
+            2.0,
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    painter.text(
+        button.center(),
+        egui::Align2::CENTER_CENTER,
+        egui_phosphor::regular::SUN,
+        egui::FontId::proportional(14.0),
+        egui::Color32::from_rgb(255, 214, 120),
+    );
+    let popup = Id::new(("lighting_settings", slot));
+    if response.clicked() {
+        ui.memory_mut(|memory| memory.toggle_popup(popup));
+    }
+    egui::popup::popup_below_widget(
+        ui,
+        popup,
+        &response,
+        egui::PopupCloseBehavior::CloseOnClickOutside,
+        |ui| {
+            ui.set_min_width(250.0);
+            let before = editor.config.lighting.clone();
+            let mut more = false;
+            options::lighting_quick_settings(ui, editor, &mut more);
+            let stats = editor.gpu.as_ref().and_then(Renderer3D::lighting_stats);
+            if let Some(stats) = stats {
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{} lights ({} from textures), {} with shadows",
+                        stats.lights, stats.texture_lights, stats.shadowed
+                    ))
+                    .small()
+                    .color(egui::Color32::GRAY),
+                );
+            }
+            if more {
+                editor.options_open = true;
+                editor.options_section = Some("lighting".to_owned());
+                ui.memory_mut(|memory| memory.close_popup());
+            }
+            let busy = ui.input(|input| input.pointer.any_down());
+            if editor.config.lighting != before && !busy {
+                editor.save_config();
+            }
+        },
+    );
+}
+
+/// A hint at the bottom of a lighting preview whose map gives off no light at all.
+fn lighting_notice(painter: &egui::Painter, rect: Rect, editor: &Editor) {
+    let lighting = &editor.scene.lighting;
+    let dark = lighting.lights.is_empty()
+        && lighting.ambient.is_none()
+        && editor.texture_lights.is_empty()
+        && editor.config.lighting.fill <= 0.0;
+    if !dark || editor.document.is_none() {
+        return;
+    }
+    painter.text(
+        rect.left_bottom() + egui::vec2(8.0, -8.0),
+        egui::Align2::LEFT_BOTTOM,
+        "No lights: place one from the side panel's Lighting menu, or raise the fill light",
+        egui::FontId::proportional(12.0),
+        egui::Color32::from_gray(160),
+    );
 }
 
 /// Registers a GPU image with egui the first time, and refreshes egui's reference when the

@@ -43,6 +43,172 @@ pub struct Config {
     pub interface: InterfaceOptions,
     pub agents: AgentOptions,
     pub transform: TransformOptions,
+    pub lighting: LightingOptions,
+}
+
+/// How the 3D Lighting Preview viewport lights the map.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LightingOptions {
+    /// Read `_lightHDR`, `_ambientHDR` and the HDR scales, as an HDR compile does; off
+    /// reads the LDR values.
+    pub hdr: bool,
+    /// Brightness of the picture in stops, from -6 to 6: +1 doubles it.
+    pub exposure: f64,
+    /// How light brighter than full white looks.
+    pub tonemap: crate::lighting::Tonemap,
+    /// Light every surface gets, from 0 to 1, so unlit corners are not black.
+    pub fill: f64,
+    /// Fakes light bouncing off walls: each light also adds this share of its light,
+    /// without turning towards surfaces, wherever it reaches. 0 turns it off.
+    pub bounce: f64,
+    /// light_environment and light_directional sunlight.
+    pub sun: bool,
+    /// light_environment's ambient sky light.
+    pub sky_light: bool,
+    /// Directions sky light is traced from to find what can see the sky, from 0 to 32;
+    /// 0 lets sky light reach everywhere.
+    pub sky_samples: u32,
+    /// light_dynamic and env_projectedtexture.
+    pub dynamic_lights: bool,
+    /// Faces whose material is listed in `lights.rad` give off light, as VRAD's texture
+    /// lights do.
+    pub texture_lights: bool,
+    /// `$selfillum` materials glow.
+    pub self_illum: bool,
+    /// Show lights that start dark (the "Initially dark" flag) as if they were on.
+    pub dark_lights: bool,
+    /// Play lights' appearances (flicker, pulse, strobe and custom patterns).
+    pub animate: bool,
+    /// Shadows from the sun and directional lights.
+    pub sun_shadows: bool,
+    /// Pixels across the sun's shadow map, which covers the whole map: larger is sharper.
+    pub sun_shadow_size: u32,
+    /// Shadows from point, spot and projected lights.
+    pub light_shadows: bool,
+    /// How many of those lights cast shadows, those nearest and brightest around the
+    /// camera first.
+    pub shadowed_lights: u32,
+    /// Pixels across each light's shadow maps.
+    pub shadow_size: u32,
+    /// How soft shadow edges are, in shadow map pixels.
+    pub shadow_softness: f64,
+    /// Props cast shadows.
+    pub prop_shadows: bool,
+    /// What sky faces show.
+    pub sky: crate::lighting::SkyMode,
+    /// env_fog_controller's fog.
+    pub fog: bool,
+    /// Glow sprites, light glows, the sun's glow and spotlight beams.
+    pub glows: bool,
+    /// Hide faces that are invisible in the game: nodraw, clip, trigger, hint, skip and
+    /// the other tool textures.
+    pub hide_tools: bool,
+    /// Point entity boxes, and the editor models some classes show instead.
+    pub entity_boxes: bool,
+    /// Which lights show their range, cone or direction.
+    pub helpers: crate::lighting::HelperMode,
+    /// Lights end where they are dimmer than this share of full brightness: lower is more
+    /// exact but slower.
+    pub cutoff: f64,
+    /// The most lights that may light one spot; the brightest are kept.
+    pub lights_per_area: u32,
+}
+
+impl Default for LightingOptions {
+    fn default() -> Self {
+        Self {
+            hdr: true,
+            exposure: 0.0,
+            tonemap: crate::lighting::Tonemap::Clamp,
+            fill: 0.0,
+            bounce: 0.15,
+            sun: true,
+            sky_light: true,
+            sky_samples: 12,
+            dynamic_lights: true,
+            texture_lights: true,
+            self_illum: true,
+            dark_lights: false,
+            animate: false,
+            sun_shadows: true,
+            sun_shadow_size: 2048,
+            light_shadows: true,
+            shadowed_lights: 16,
+            shadow_size: 512,
+            shadow_softness: 1.0,
+            prop_shadows: true,
+            sky: crate::lighting::SkyMode::Skybox,
+            fog: true,
+            glows: true,
+            hide_tools: true,
+            entity_boxes: true,
+            helpers: crate::lighting::HelperMode::Selected,
+            cutoff: 0.004,
+            lights_per_area: 64,
+        }
+    }
+}
+
+impl LightingOptions {
+    /// The exposure as a multiplier, from 1/64 to 64.
+    pub fn exposure_scale(&self) -> f64 {
+        2f64.powf(finite_or(self.exposure, 0.0).clamp(-6.0, 6.0))
+    }
+
+    /// The fill light, from 0 to 1.
+    pub fn fill_light(&self) -> f64 {
+        finite_or(self.fill, 0.0).clamp(0.0, 1.0)
+    }
+
+    /// The fake bounce share, from 0 to 1.
+    pub fn bounce_share(&self) -> f64 {
+        finite_or(self.bounce, 0.0).clamp(0.0, 1.0)
+    }
+
+    /// Sky light directions, from 0 to 32.
+    pub fn sky_sample_count(&self) -> u32 {
+        self.sky_samples.min(32)
+    }
+
+    /// The sun's shadow map size, a power of two from 512 to 8192.
+    pub fn sun_map_size(&self) -> u32 {
+        self.sun_shadow_size.clamp(512, 8192).next_power_of_two().min(8192)
+    }
+
+    /// Lights with shadows, from 0 to 64.
+    pub fn shadowed_light_count(&self) -> usize {
+        self.shadowed_lights.min(64) as usize
+    }
+
+    /// Each light's shadow map size, a power of two from 128 to 2048.
+    pub fn light_map_size(&self) -> u32 {
+        self.shadow_size.clamp(128, 2048).next_power_of_two().min(2048)
+    }
+
+    /// Shadow softness in shadow map pixels, from 0 to 4.
+    pub fn softness(&self) -> f64 {
+        finite_or(self.shadow_softness, 1.0).clamp(0.0, 4.0)
+    }
+
+    /// The light cutoff, from 0.0005 to 0.05.
+    pub fn light_cutoff(&self) -> f64 {
+        finite_or(self.cutoff, 0.004).clamp(0.0005, 0.05)
+    }
+
+    /// Lights per spot, from 4 to 256.
+    pub fn lights_per_spot(&self) -> usize {
+        self.lights_per_area.clamp(4, 256) as usize
+    }
+}
+
+/// `value`, or `fallback` when it is not a number.
+fn finite_or(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// How selections are moved, rotated and scaled.

@@ -24,7 +24,8 @@ use crate::compile::{CompileJob, Preset};
 use crate::config::Config;
 use crate::document::Document;
 use crate::input::InputFrame;
-use crate::render3d::{CameraStyle, Renderer3D};
+use crate::lighting::{load_texture_lights, TextureLights};
+use crate::render3d::{CameraStyle, LightingInput, Renderer3D};
 use crate::scene::{entity_model, model_key, ModelCache, Overlay, Owner, Scene};
 use crate::view2d::{Axis2D, View2D};
 use crate::view3d::Camera3D;
@@ -101,19 +102,29 @@ const GAP_COLOR: Color32 = Color32::from_gray(30);
 pub enum ViewMode {
     Textured,
     Wireframe,
+    /// The textured camera lit by the map's lights, as Hammer++'s 3D Lighting Preview.
+    Lighting,
     Top,
     Front,
     Side,
 }
 
 impl ViewMode {
-    pub const ALL: [ViewMode; 5] = [Self::Textured, Self::Wireframe, Self::Top, Self::Front, Self::Side];
+    pub const ALL: [ViewMode; 6] = [
+        Self::Textured,
+        Self::Wireframe,
+        Self::Lighting,
+        Self::Top,
+        Self::Front,
+        Self::Side,
+    ];
 
     /// The label in the viewport's corner, as Hammer prints it.
     pub fn label(self) -> &'static str {
         match self {
             Self::Textured => "camera (textured)",
             Self::Wireframe => "camera (wireframe)",
+            Self::Lighting => "camera (lighting preview)",
             Self::Top => "top (x/y)",
             Self::Front => "front (y/z)",
             Self::Side => "side (x/z)",
@@ -125,6 +136,7 @@ impl ViewMode {
         match self {
             Self::Textured => "3D Textured",
             Self::Wireframe => "3D Wireframe",
+            Self::Lighting => "3D Lighting Preview",
             Self::Top => "2D Top (x/y)",
             Self::Front => "2D Front (y/z)",
             Self::Side => "2D Side (x/z)",
@@ -137,7 +149,7 @@ impl ViewMode {
             Self::Top => Some(0),
             Self::Front => Some(1),
             Self::Side => Some(2),
-            Self::Textured | Self::Wireframe => None,
+            Self::Textured | Self::Wireframe | Self::Lighting => None,
         }
     }
 
@@ -146,7 +158,20 @@ impl ViewMode {
         match self {
             Self::Textured => Some(CameraStyle::Textured),
             Self::Wireframe => Some(CameraStyle::Wireframe),
+            Self::Lighting => Some(CameraStyle::Lit),
             Self::Top | Self::Front | Self::Side => None,
+        }
+    }
+
+    /// The name MCP tools use for this mode.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Textured => "textured",
+            Self::Wireframe => "wireframe",
+            Self::Lighting => "lighting",
+            Self::Top => "top",
+            Self::Front => "front",
+            Self::Side => "side",
         }
     }
 }
@@ -308,6 +333,9 @@ pub struct Editor {
     pub texture_browser_filter: Option<String>,
     /// The GPU renderer for the textured camera view, created once the window has a GPU.
     pub gpu: Option<Renderer3D>,
+    /// The texture lights of the game's `lights.rad` and the map's own `.rad` file, for
+    /// the lighting preview.
+    pub texture_lights: Arc<TextureLights>,
     /// The last block created; new blocks reuse its depth.
     last_block: Bounds,
     /// Camera, top, front and side viewport rectangles from the latest window layout.
@@ -366,6 +394,7 @@ impl Default for Editor {
             texture_browser_filter: None,
             window_shot: WindowShot::Idle,
             gpu: None,
+            texture_lights: Arc::new(TextureLights::new()),
             last_block: DEFAULT_BLOCK,
             viewport_rects: quad_rects(Rect::from_min_size(Pos2::ZERO, DEFAULT_AREA), VIEWPORT_GAP),
             pixels_per_point: 1.0,
@@ -558,6 +587,15 @@ impl Editor {
         self.document = Some(document);
         self.selection.clear();
         self.overlay = Overlay::default();
+        self.reload_texture_lights();
+    }
+
+    /// Reads the texture lights again: the game's `lights.rad`, then the open map's own
+    /// `.rad` file beside it, as VRAD reads them.
+    pub fn reload_texture_lights(&mut self) {
+        let filesystem = self.materials.as_ref().map(Materials::filesystem);
+        let map = self.document.as_ref().and_then(|document| document.path.as_deref());
+        self.texture_lights = Arc::new(load_texture_lights(filesystem, map));
     }
 
     /// Like Hammer, keeps where the map was viewed from and its grid in the map, so it
@@ -1050,6 +1088,7 @@ impl Editor {
         }
         let fgd = default_fgd(game_dir);
         self.game_data = fgd.and_then(|fgd| GameData::load(&[fgd]).ok()).map(Arc::new);
+        self.reload_texture_lights();
         self.rebuild_scene();
         self.message = format!("Using game content from {} ({mounts} search paths)", game_dir.display());
         Ok(mounts)
@@ -1260,6 +1299,10 @@ impl Editor {
     fn render_camera_gpu(&mut self, slot: usize, style: CameraStyle) -> Option<PixmapCanvas> {
         let overlay = self.display_overlay();
         let size = self.slot_pixels(slot);
+        let lighting = LightingInput {
+            options: &self.config.lighting,
+            texture_lights: &self.texture_lights,
+        };
         let gpu = self.gpu.as_mut()?;
         gpu.render(
             slot,
@@ -1270,6 +1313,7 @@ impl Editor {
             size,
             self.materials.as_mut(),
             &self.models,
+            lighting,
         );
         if gpu.textures_loading() > 0 {
             gpu.finish_loading();
@@ -1282,6 +1326,7 @@ impl Editor {
                 size,
                 self.materials.as_mut(),
                 &self.models,
+                lighting,
             );
         }
         let (width, height, rgba) = gpu.read_pixels(slot)?;

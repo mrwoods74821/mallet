@@ -16,5 +16,5 @@ pub mod vtf;
 pub use error::ContentError;
 pub use fgd::{default_fgd, Choice, ClassKind, EntityClass, GameData, Port, Property};
 pub use filesystem::{mounted_games, GameFs, Source, SourceKind};
-pub use material::{parallel_map, AlphaMode, Material, MaterialInfo, MaterialLoader, Materials, Texture};
+pub use material::{parallel_map, AlphaMode, Material, MaterialInfo, MaterialLoader, Materials, Surface, Texture};
 pub use model::{load_model, Model, ModelMesh, ModelVertex};

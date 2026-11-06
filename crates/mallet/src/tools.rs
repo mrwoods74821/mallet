@@ -6,6 +6,7 @@ use glam::{DVec2, DVec3};
 use mallet_content::{ClassKind, EntityClass};
 use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
+use mallet_vmf::light::{Falloff, CATALOGUE};
 use mallet_vmf::{Connection, Entity, EntityItem};
 use serde_json::{json, Value};
 
@@ -369,7 +370,7 @@ pub fn definitions() -> Value {
             "Open or close Mallet Options, optionally on a section.",
             json!({
                 "open": { "type": "boolean" },
-                "section": { "type": "string", "enum": ["game", "tools", "compiling", "viewports", "colors", "editing", "files", "texture_browser", "interface", "keyboard", "agents"] }
+                "section": { "type": "string", "enum": ["game", "tools", "compiling", "viewports", "lighting", "colors", "editing", "files", "texture_browser", "interface", "keyboard", "agents"] }
             }),
             &[],
         ),
@@ -551,12 +552,28 @@ pub fn definitions() -> Value {
         tool(
             "set_viewport_type",
             "Change what one of the four viewports shows, like clicking its label. Slots are 0 top-left, \
-             1 top-right, 2 bottom-left, 3 bottom-right.",
+             1 top-right, 2 bottom-left, 3 bottom-right. lighting is the 3D Lighting Preview: the map lit by its \
+             lights with shadows, sky light, texture lights, the skybox and fog, set up in Mallet Options > \
+             Lighting preview (get_settings and set_settings under \"lighting\").",
             json!({
                 "slot": { "type": "integer", "minimum": 0, "maximum": 3 },
-                "type": { "type": "string", "enum": ["textured", "wireframe", "top", "front", "side"] }
+                "type": { "type": "string", "enum": ["textured", "wireframe", "lighting", "top", "front", "side"] }
             }),
             &["slot", "type"],
+        ),
+        tool(
+            "list_lights",
+            "The open map's lighting as the lighting preview reads it, with VRAD's maths: every light entity's \
+             class, id, kind, position, direction, colour and brightness for LDR and HDR compiles (1 shows a \
+             texture at full brightness), falloff, how far it reaches, cone, appearance, and whether it starts \
+             dark, casts shadows or is dynamic; light_environment's sky light, the fog, the sky, glows and \
+             spotlight beams; the materials of the map that lights.rad makes texture lights; and what the \
+             latest preview frame drew. With catalogue, also every lighting entity class Mallet knows.",
+            json!({
+                "classname": { "type": "string", "description": "Only lights of this class; light_* matches a prefix." },
+                "catalogue": { "type": "boolean", "description": "Also list the lighting entity classes." }
+            }),
+            &[],
         ),
         tool(
             "screenshot",
@@ -1206,18 +1223,16 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
                 .and_then(Value::as_u64)
                 .filter(|slot| *slot < 4)
                 .ok_or("\"slot\" must be 0 to 3")? as usize;
-            let mode = match string_arg(args, "type")? {
-                "textured" => ViewMode::Textured,
-                "wireframe" => ViewMode::Wireframe,
-                "top" => ViewMode::Top,
-                "front" => ViewMode::Front,
-                "side" => ViewMode::Side,
-                other => return Err(format!("unknown viewport type \"{other}\"")),
-            };
+            let name = string_arg(args, "type")?;
+            let mode = ViewMode::ALL
+                .into_iter()
+                .find(|mode| mode.key() == name)
+                .ok_or_else(|| format!("unknown viewport type \"{name}\""))?;
             editor.layout[slot] = mode;
             Ok(ToolResult::json(&layout_json(editor)))
         }
         "set_view_2d" => set_view_2d(editor, args),
+        "list_lights" => Ok(ToolResult::json(&lights_json(editor, args)?)),
         "screenshot" => {
             let target = match optional_string(args, "viewport")?.unwrap_or("all") {
                 "all" => ShotTarget::All,
@@ -1286,6 +1301,7 @@ fn status_json(editor: &Editor) -> Value {
             "props": gpu.stats.models,
             "props_drawn": gpu.stats.models_drawn,
         })),
+        "lighting_preview": editor.gpu.as_ref().and_then(|gpu| gpu.lighting_stats()).map(|stats| lighting_stats_json(&stats)),
         "models": {
             "loaded": editor.models.values().filter(|model| model.is_some()).count(),
             "failed": editor.model_errors.len(),
@@ -1527,6 +1543,140 @@ fn set_view_2d(editor: &mut Editor, args: &Value) -> Result<ToolResult, String> 
         "center": [view.center.x, view.center.y],
         "pixels_per_unit": view.scale,
     })))
+}
+
+/// What the lighting preview drew in its latest frame.
+fn lighting_stats_json(stats: &crate::render3d::LightingStats) -> Value {
+    json!({
+        "lights": stats.lights,
+        "texture_light_patches": stats.texture_lights,
+        "lit_everywhere": stats.everywhere,
+        "grid_cells": stats.grid_cells,
+        "most_lights_in_a_cell": stats.busiest_cell,
+        "shadowed_lights": stats.shadowed,
+        "shadow_map_layers": stats.shadow_layers,
+        "shadow_maps_drawn_last_frame": stats.shadow_maps_drawn,
+        "glows": stats.glows,
+    })
+}
+
+/// The `list_lights` tool: the map's lighting as the preview reads it.
+fn lights_json(editor: &Editor, args: &Value) -> Result<Value, String> {
+    let pattern = optional_string(args, "classname")?.unwrap_or("");
+    let options = &editor.config.lighting;
+    let lighting = &editor.scene.lighting;
+    let lights: Vec<Value> = lighting
+        .lights
+        .iter()
+        .filter(|light| pattern.is_empty() || classname_matches(pattern, &light.classname))
+        .map(|light| {
+            let falloff = match light.falloff {
+                Falloff::Inverse {
+                    constant,
+                    linear,
+                    quadratic,
+                    cap,
+                    fade_start,
+                    fade_end,
+                    max_distance,
+                } => json!({
+                    "type": "inverse",
+                    "constant": constant,
+                    "linear": linear,
+                    "quadratic": quadratic,
+                    "cap": cap.is_finite().then_some(cap),
+                    "fade": (fade_end > fade_start).then_some([fade_start, fade_end]),
+                    "max_distance": (max_distance > 0.0).then_some(max_distance),
+                }),
+                Falloff::Projected { far } => json!({ "type": "projected", "far": far }),
+                Falloff::Radius { radius } => json!({ "type": "radius", "radius": radius }),
+                Falloff::None => json!({ "type": "none" }),
+            };
+            json!({
+                "entity": light.entity,
+                "classname": light.classname,
+                "kind": format!("{:?}", light.kind).to_lowercase(),
+                "origin": light.origin.to_array(),
+                "direction": light.direction.to_array(),
+                "ldr": light.ldr.to_array(),
+                "hdr": light.hdr.to_array(),
+                "falloff": falloff,
+                "reach": light.reach(options.hdr, options.light_cutoff()),
+                "cone": light.cone.map(|cone| json!({
+                    "inner_degrees": cone.inner_degrees(),
+                    "outer_degrees": cone.outer_degrees(),
+                    "focus": cone.exponent,
+                })),
+                "appearance": light.pattern,
+                "starts_dark": light.starts_dark,
+                "casts_shadows": light.shadows,
+                "dynamic": light.dynamic,
+                "projection": light.projection.as_ref().map(|projection| json!({
+                    "texture": projection.texture,
+                    "fov": projection.fov,
+                    "near": projection.near,
+                })),
+                "sun_spread_degrees": (light.spread > 0.0).then_some(light.spread),
+            })
+        })
+        .collect();
+    let mut used: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for face in editor.scene.meshes.iter().flat_map(|mesh| &mesh.faces) {
+        let Some(material) = &face.material else {
+            continue;
+        };
+        let key = material.replace('\\', "/").to_ascii_lowercase();
+        if editor.texture_lights.contains_key(&key) {
+            *used.entry(key).or_default() += 1;
+        }
+    }
+    let texture_lights: Vec<Value> = used
+        .into_iter()
+        .map(|(material, faces)| {
+            let light = editor.texture_lights[&material];
+            json!({ "material": material, "faces": faces, "ldr": light.ldr.to_array(), "hdr": light.hdr.to_array() })
+        })
+        .collect();
+    let mut result = json!({
+        "hdr": options.hdr,
+        "lights": lights,
+        "sky_light": lighting.ambient.map(|ambient| json!({ "ldr": ambient.ldr.to_array(), "hdr": ambient.hdr.to_array() })),
+        "fog": lighting.fog.map(|fog| json!({
+            "color": fog.color.to_array(),
+            "start": fog.start,
+            "end": fog.end,
+            "max_density": fog.max_density,
+            "blend": fog.blend.map(|(color, direction)| json!({ "color": color.to_array(), "direction": direction.to_array() })),
+        })),
+        "sky": {
+            "name": lighting.sky.name,
+            "painted": lighting.sky.paint.is_some(),
+            "sun_glow": lighting.sky.sun.map(|(toward, color, size)| json!({
+                "toward": toward.to_array(),
+                "color": color.to_array(),
+                "size_degrees": size,
+            })),
+        },
+        "glows": lighting.glows.len(),
+        "beams": lighting.beams.len(),
+        "texture_lights_listed": editor.texture_lights.len(),
+        "texture_lights_in_map": texture_lights,
+        "preview": editor.gpu.as_ref().and_then(|gpu| gpu.lighting_stats()).map(|stats| lighting_stats_json(&stats)),
+    });
+    if args.get("catalogue").and_then(Value::as_bool) == Some(true) {
+        result["catalogue"] = CATALOGUE
+            .iter()
+            .map(|class| {
+                json!({
+                    "classname": class.classname,
+                    "group": class.group.label(),
+                    "description": class.description,
+                    "preview": class.preview,
+                })
+            })
+            .collect();
+    }
+    Ok(result)
 }
 
 fn classname_matches(pattern: &str, classname: &str) -> bool {

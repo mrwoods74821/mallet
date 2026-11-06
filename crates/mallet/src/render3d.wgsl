@@ -17,6 +17,7 @@ struct FaceIn {
     @location(2) color: vec4<f32>,
     @location(3) highlight: f32,
     @location(4) alpha: vec2<f32>,
+    @location(5) normal: vec3<f32>,
 };
 
 struct FaceOut {
@@ -27,12 +28,15 @@ struct FaceOut {
     @location(3) alpha: vec2<f32>,
 };
 
+// Faces are shaded by direction like Hammer's textured mode: those facing up are
+// brightest.
 @vertex
 fn vs_face(input: FaceIn) -> FaceOut {
+    let shade = clamp(0.6 + 0.4 * dot(input.normal, normalize(vec3<f32>(0.3, 0.5, 1.0))), 0.35, 1.0);
     var out: FaceOut;
     out.clip = uniforms.view_proj * vec4<f32>(input.position, 1.0);
     out.uv = input.uv;
-    out.color = input.color;
+    out.color = vec4<f32>(input.color.rgb * shade, input.color.a);
     out.highlight = input.highlight;
     out.alpha = input.alpha;
     return out;

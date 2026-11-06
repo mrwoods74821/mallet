@@ -12,6 +12,7 @@ use crate::compile::default_presets;
 use crate::config::{self, ToolKind};
 use crate::editor::Editor;
 use crate::keymap::KeyMap;
+use crate::lighting::{HelperMode, SkyMode, Tonemap};
 use crate::shell;
 use crate::view3d::MAX_LOOK_FRAMES;
 
@@ -28,6 +29,7 @@ pub(super) enum Section {
     Tools,
     Compiling,
     Viewports,
+    Lighting,
     Colors,
     Editing,
     Files,
@@ -38,11 +40,12 @@ pub(super) enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 11] = [
+    const ALL: [Section; 12] = [
         Section::Game,
         Section::Tools,
         Section::Compiling,
         Section::Viewports,
+        Section::Lighting,
         Section::Colors,
         Section::Editing,
         Section::Files,
@@ -58,6 +61,7 @@ impl Section {
             Section::Tools => (icon::WRENCH, "Compile tools"),
             Section::Compiling => (icon::HAMMER, "Compiling"),
             Section::Viewports => (icon::MONITOR, "Viewports"),
+            Section::Lighting => (icon::SUN, "Lighting preview"),
             Section::Colors => (icon::PALETTE, "Colours"),
             Section::Editing => (icon::CUBE, "Editing"),
             Section::Files => (icon::FILES, "Files"),
@@ -75,6 +79,7 @@ impl Section {
             "tools" => Section::Tools,
             "compiling" => Section::Compiling,
             "viewports" => Section::Viewports,
+            "lighting" => Section::Lighting,
             "colors" => Section::Colors,
             "editing" => Section::Editing,
             "files" => Section::Files,
@@ -154,6 +159,7 @@ impl MalletApp {
                                     Section::Tools => tools_section(ui, editor, content, &mut state.dirty),
                                     Section::Compiling => compiling_section(ui, editor, &mut state.dirty),
                                     Section::Viewports => viewports_section(ui, editor, &mut state.dirty),
+                                    Section::Lighting => lighting_section(ui, editor, &mut state.dirty),
                                     Section::Colors => colors_section(ui, editor, &mut state.dirty),
                                     Section::Editing => editing_section(ui, editor, &mut state.dirty),
                                     Section::Files => files_section(ui, editor, &mut state.dirty),
@@ -679,6 +685,330 @@ fn viewports_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
         };
         *dirty = true;
     }
+}
+
+/// Mallet Options > Lighting preview: every setting of the 3D Lighting Preview viewport.
+fn lighting_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
+    heading(
+        ui,
+        "Lighting preview",
+        "How the 3D Lighting Preview lights the map. Click a 3D viewport's label and pick 3D Lighting Preview to see it.",
+    );
+    ui.spacing_mut().slider_width = 220.0;
+    let texture_light_count = editor.texture_lights.len();
+    let mut reload = false;
+    let lighting = &mut editor.config.lighting;
+    let row = |ui: &mut egui::Ui, name: &str, hint: &str| {
+        ui.label(name).on_hover_text(hint);
+    };
+    ui.label(RichText::new("Light sources").strong());
+    egui::Grid::new("lighting_sources")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            row(ui, "HDR values", "Maps are usually compiled with HDR, which uses these values.");
+            *dirty |= ui
+                .checkbox(&mut lighting.hdr, "Use _lightHDR, _ambientHDR and the HDR scales")
+                .changed();
+            ui.end_row();
+            row(ui, "Sun", "Sunlight shines in through sky faces.");
+            *dirty |= ui
+                .checkbox(&mut lighting.sun, "Sunlight from light_environment and light_directional")
+                .changed();
+            ui.end_row();
+            row(ui, "Sky light", "Lights what can see the sky, as VRAD's ambient light does.");
+            *dirty |= ui
+                .checkbox(&mut lighting.sky_light, "Ambient sky light from light_environment")
+                .changed();
+            ui.end_row();
+            row(ui, "Dynamic lights", "Lights the engine adds while the game runs.");
+            *dirty |= ui
+                .checkbox(&mut lighting.dynamic_lights, "light_dynamic and env_projectedtexture")
+                .changed();
+            ui.end_row();
+            row(
+                ui,
+                "Texture lights",
+                "Faces whose material lights.rad lists give off light, split into patches as VRAD does. The map's own .rad file beside it is read too.",
+            );
+            ui.horizontal(|ui| {
+                *dirty |= ui
+                    .checkbox(&mut lighting.texture_lights, "Materials in lights.rad give off light")
+                    .changed();
+                ui.label(RichText::new(format!("{texture_light_count} listed")).color(MUTED));
+                reload = ui
+                    .small_button(format!("{} Reload", icon::ARROW_CLOCKWISE))
+                    .on_hover_text("Read lights.rad and the map's .rad file again")
+                    .clicked();
+            });
+            ui.end_row();
+            row(ui, "Self-illumination", "Where the texture's alpha says, $selfillum materials glow.");
+            *dirty |= ui
+                .checkbox(&mut lighting.self_illum, "$selfillum materials glow")
+                .changed();
+            ui.end_row();
+            row(ui, "Lights that start dark", "Named lights with the Initially dark flag are off when the map starts.");
+            *dirty |= ui
+                .checkbox(&mut lighting.dark_lights, "Show them as if they were turned on")
+                .changed();
+            ui.end_row();
+            row(ui, "Appearances", "Flicker, pulse, strobe and custom patterns, ten letters a second.");
+            *dirty |= ui
+                .checkbox(&mut lighting.animate, "Play light appearances")
+                .changed();
+            ui.end_row();
+        });
+    ui.add_space(10.0);
+    ui.label(RichText::new("Shadows").strong());
+    egui::Grid::new("lighting_shadows")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            row(ui, "Sun shadows", "One shadow map covers the whole map; larger is sharper.");
+            ui.horizontal(|ui| {
+                *dirty |= ui.checkbox(&mut lighting.sun_shadows, "On").changed();
+                *dirty |= size_choice(
+                    ui,
+                    "sun_shadow_size",
+                    &mut lighting.sun_shadow_size,
+                    &[1024, 2048, 4096, 8192],
+                );
+            });
+            ui.end_row();
+            row(
+                ui,
+                "Light shadows",
+                "Point, spot, projected and texture lights. The lights nearest and brightest around the camera get shadow maps; the rest shine through walls.",
+            );
+            ui.horizontal(|ui| {
+                *dirty |= ui.checkbox(&mut lighting.light_shadows, "On").changed();
+                *dirty |= size_choice(
+                    ui,
+                    "light_shadow_size",
+                    &mut lighting.shadow_size,
+                    &[256, 512, 1024, 2048],
+                );
+            });
+            ui.end_row();
+            row(ui, "Lights with shadows", "More looks right further away but uses more video memory.");
+            *dirty |= ui
+                .add(egui::Slider::new(&mut lighting.shadowed_lights, 0..=64).suffix(" lights"))
+                .changed();
+            ui.end_row();
+            row(ui, "Softness", "How soft shadow edges are, in shadow map pixels.");
+            *dirty |= ui
+                .add(egui::Slider::new(&mut lighting.shadow_softness, 0.0..=4.0).suffix(" px"))
+                .changed();
+            ui.end_row();
+            row(ui, "Prop shadows", "Prop models block light.");
+            *dirty |= ui
+                .checkbox(&mut lighting.prop_shadows, "Props cast shadows")
+                .changed();
+            ui.end_row();
+            row(
+                ui,
+                "Sky light directions",
+                "Sky light is traced from this many directions to find what can see the sky. 0 lets it reach everywhere, indoors too.",
+            );
+            *dirty |= ui
+                .add(egui::Slider::new(&mut lighting.sky_samples, 0..=32))
+                .changed();
+            ui.end_row();
+        });
+    ui.add_space(10.0);
+    ui.label(RichText::new("Look").strong());
+    egui::Grid::new("lighting_look")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            lighting_look_rows(ui, "lighting_options", lighting, dirty);
+            row(ui, "Hide tool textures", "Faces the game never draws: nodraw, clip, trigger, hint, skip and the like.");
+            *dirty |= ui
+                .checkbox(&mut lighting.hide_tools, "Hide them, as in the game")
+                .changed();
+            ui.end_row();
+            row(
+                ui,
+                "Entity boxes",
+                "The boxes of point entities, drawn without lighting, and the editor models some classes show, such as AI nodes.",
+            );
+            *dirty |= ui
+                .checkbox(&mut lighting.entity_boxes, "Show entity boxes and editor models")
+                .changed();
+            ui.end_row();
+        });
+    ui.add_space(10.0);
+    ui.label(RichText::new("Speed").strong());
+    egui::Grid::new("lighting_speed")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            row(
+                ui,
+                "Light cutoff",
+                "Each light ends where it is dimmer than this share of full brightness. Lower is more exact but slower.",
+            );
+            let mut percent = lighting.cutoff * 100.0;
+            let slider = egui::Slider::new(&mut percent, 0.05..=5.0)
+                .logarithmic(true)
+                .suffix("%");
+            if ui.add(slider).changed() {
+                lighting.cutoff = percent / 100.0;
+                *dirty = true;
+            }
+            ui.end_row();
+            row(ui, "Lights per spot", "The most lights that light one spot; the brightest are kept.");
+            *dirty |= ui
+                .add(egui::Slider::new(&mut lighting.lights_per_area, 4..=256).logarithmic(true))
+                .changed();
+            ui.end_row();
+        });
+    ui.add_space(8.0);
+    if ui
+        .button(format!(
+            "{} Reset lighting preview options",
+            icon::ARROW_COUNTER_CLOCKWISE
+        ))
+        .clicked()
+    {
+        *lighting = config::LightingOptions::default();
+        *dirty = true;
+    }
+    if reload {
+        editor.reload_texture_lights();
+        editor.message = format!("Read {} texture lights", editor.texture_lights.len());
+    }
+}
+
+/// The settings for how the lighting preview looks, shared by Mallet Options and the
+/// viewport's sun button. Each is a grid row.
+fn lighting_look_rows(ui: &mut egui::Ui, id: &str, lighting: &mut config::LightingOptions, dirty: &mut bool) {
+    ui.label("Exposure")
+        .on_hover_text("Brightness of the picture in stops: +1 doubles it.");
+    *dirty |= ui
+        .add(
+            egui::Slider::new(&mut lighting.exposure, -6.0..=6.0)
+                .step_by(0.25)
+                .suffix(" stops"),
+        )
+        .changed();
+    ui.end_row();
+    ui.label("Tone mapping")
+        .on_hover_text("How light brighter than full white looks.");
+    egui::ComboBox::from_id_salt((id, "tonemap"))
+        .selected_text(lighting.tonemap.label())
+        .show_ui(ui, |ui| {
+            for tonemap in Tonemap::ALL {
+                *dirty |= ui
+                    .selectable_value(&mut lighting.tonemap, tonemap, tonemap.label())
+                    .changed();
+            }
+        });
+    ui.end_row();
+    ui.label("Fill light")
+        .on_hover_text("Light every surface gets, so unlit corners are not black.");
+    let mut percent = lighting.fill * 100.0;
+    if ui
+        .add(egui::Slider::new(&mut percent, 0.0..=50.0).suffix("%"))
+        .changed()
+    {
+        lighting.fill = percent / 100.0;
+        *dirty = true;
+    }
+    ui.end_row();
+    ui.label("Fake bounce").on_hover_text(
+        "Fakes light bouncing off walls, which the preview does not trace: each light also adds this share of its light without turning towards surfaces.",
+    );
+    let mut percent = lighting.bounce * 100.0;
+    if ui
+        .add(egui::Slider::new(&mut percent, 0.0..=100.0).suffix("%"))
+        .changed()
+    {
+        lighting.bounce = percent / 100.0;
+        *dirty = true;
+    }
+    ui.end_row();
+    ui.label("Sky").on_hover_text("What sky faces show.");
+    egui::ComboBox::from_id_salt((id, "sky"))
+        .selected_text(lighting.sky.label())
+        .show_ui(ui, |ui| {
+            for sky in SkyMode::ALL {
+                *dirty |= ui.selectable_value(&mut lighting.sky, sky, sky.label()).changed();
+            }
+        });
+    ui.end_row();
+    ui.label("Fog")
+        .on_hover_text("The first env_fog_controller with fog enabled.");
+    *dirty |= ui.checkbox(&mut lighting.fog, "env_fog_controller's fog").changed();
+    ui.end_row();
+    ui.label("Glows")
+        .on_hover_text("Glow sprites, env_lightglow, the sun's glow and spotlight beams.");
+    *dirty |= ui
+        .checkbox(&mut lighting.glows, "Sprites, light glows and spotlight beams")
+        .changed();
+    ui.end_row();
+    ui.label("Light helpers")
+        .on_hover_text("Lines showing how far lights reach, their cones and the sun's direction.");
+    egui::ComboBox::from_id_salt((id, "helpers"))
+        .selected_text(lighting.helpers.label())
+        .show_ui(ui, |ui| {
+            for helpers in HelperMode::ALL {
+                *dirty |= ui
+                    .selectable_value(&mut lighting.helpers, helpers, helpers.label())
+                    .changed();
+            }
+        });
+    ui.end_row();
+}
+
+/// The lighting settings used most, for the sun button of a lighting preview viewport.
+/// `more` is set when "All lighting settings" is clicked.
+pub(super) fn lighting_quick_settings(ui: &mut egui::Ui, editor: &mut Editor, more: &mut bool) {
+    ui.spacing_mut().slider_width = 130.0;
+    let lighting = &mut editor.config.lighting;
+    let mut dirty = false;
+    egui::Grid::new("lighting_quick")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| lighting_look_rows(ui, "lighting_quick", lighting, &mut dirty));
+    ui.separator();
+    egui::Grid::new("lighting_quick_toggles")
+        .num_columns(2)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            ui.checkbox(&mut lighting.sun, "Sun");
+            ui.checkbox(&mut lighting.sky_light, "Sky light");
+            ui.end_row();
+            ui.checkbox(&mut lighting.sun_shadows, "Sun shadows");
+            ui.checkbox(&mut lighting.light_shadows, "Light shadows");
+            ui.end_row();
+            ui.checkbox(&mut lighting.dynamic_lights, "Dynamic lights");
+            ui.checkbox(&mut lighting.texture_lights, "Texture lights");
+            ui.end_row();
+            ui.checkbox(&mut lighting.dark_lights, "Lights that start dark");
+            ui.checkbox(&mut lighting.animate, "Appearances");
+            ui.end_row();
+            ui.checkbox(&mut lighting.hdr, "HDR values");
+            ui.checkbox(&mut lighting.hide_tools, "Hide tool textures");
+            ui.end_row();
+        });
+    ui.add_space(4.0);
+    if ui.button(format!("{} All lighting settings...", icon::GEAR)).clicked() {
+        *more = true;
+    }
+}
+
+/// A menu of shadow map sizes in pixels. Returns whether it changed.
+fn size_choice(ui: &mut egui::Ui, id: &str, value: &mut u32, choices: &[u32]) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(format!("{value} px"))
+        .show_ui(ui, |ui| {
+            for size in choices {
+                changed |= ui.selectable_value(value, *size, format!("{size} px")).changed();
+            }
+        });
+    changed
 }
 
 /// A menu of grid spacings in units, with an entry for none. Returns whether it changed.

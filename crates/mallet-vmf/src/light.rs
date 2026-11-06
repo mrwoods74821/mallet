@@ -438,6 +438,12 @@ pub const QUADRATIC: Falloff = Falloff::Inverse {
 /// The farthest any light is taken to reach.
 pub const MAX_REACH: f64 = 65536.0;
 
+/// How the engine's shaders scale projected textures: a quarter in HDR and twice in LDR,
+/// both 2.5 times brighter on graphics cards that blend in linear colour, as all
+/// current ones do.
+pub const FLASHLIGHT_SCALE_HDR: f64 = 0.25 * 2.5;
+pub const FLASHLIGHT_SCALE_LDR: f64 = 2.0 * 2.5;
+
 impl Falloff {
     /// The share of a light's brightness that is left at a distance.
     pub fn at(&self, distance: f64) -> f64 {
@@ -887,8 +893,8 @@ impl MapLighting {
                     let fov = number(entity, "lightfov").unwrap_or(90.0).clamp(1.0, 179.0);
                     let far = number(entity, "farz").unwrap_or(750.0).max(1.0);
                     lighting.lights.push(Light {
-                        ldr: rgb * intensity,
-                        hdr: rgb * intensity,
+                        ldr: rgb * intensity * FLASHLIGHT_SCALE_LDR,
+                        hdr: rgb * intensity * FLASHLIGHT_SCALE_HDR,
                         falloff: Falloff::Projected { far },
                         cone: Some(Cone {
                             inner: (fov * 0.5).to_radians().cos(),
@@ -1023,9 +1029,7 @@ impl MapLighting {
 
     /// The first light_environment's sun.
     pub fn sun(&self) -> Option<&Light> {
-        self.lights
-            .iter()
-            .find(|light| light.classname == "light_environment")
+        self.lights.iter().find(|light| light.classname == "light_environment")
     }
 }
 
@@ -1228,7 +1232,10 @@ pub const PATTERN_RATE: f64 = 10.0;
 /// A light's appearance: its custom `pattern`, or the pattern of its `style`, unless it
 /// is steady.
 fn pattern(entity: &Entity) -> Option<String> {
-    let custom = entity.get("pattern").map(str::trim).filter(|pattern| !pattern.is_empty());
+    let custom = entity
+        .get("pattern")
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty());
     let pattern = match custom {
         Some(pattern) => pattern.to_ascii_lowercase(),
         None => {
@@ -1296,7 +1303,13 @@ pub fn parse_lights_rad(text: &str) -> HashMap<String, TextureLight> {
         .into_iter()
         .filter_map(|(name, (ldr, hdr))| {
             let ldr = ldr.or(hdr)?;
-            Some((name, TextureLight { ldr, hdr: hdr.unwrap_or(ldr) }))
+            Some((
+                name,
+                TextureLight {
+                    ldr,
+                    hdr: hdr.unwrap_or(ldr),
+                },
+            ))
         })
         .collect()
 }
@@ -1344,7 +1357,5 @@ fn flags(entity: &Entity) -> u32 {
 
 /// Lights only start dark when they have a name, since VRAD bakes unnamed lights in.
 fn named(entity: &Entity) -> bool {
-    entity
-        .get("targetname")
-        .is_some_and(|name| !name.trim().is_empty())
+    entity.get("targetname").is_some_and(|name| !name.trim().is_empty())
 }

@@ -31,12 +31,53 @@ pub enum AlphaMode {
     Blend(f32),
 }
 
+/// What a material's faces are to the compilers, from its `%compile` keys.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Surface {
+    /// An ordinary surface.
+    #[default]
+    Normal,
+    /// Sky (`%compilesky` or `%compile2Dsky`): the skybox shows through it and the sun
+    /// shines in through it.
+    Sky,
+    /// Never drawn but solid, so it still blocks light: `%compilenodraw` and
+    /// `%compileblocklight`.
+    Nodraw,
+    /// A tool face the compilers remove, invisible and letting light through: clip, hint,
+    /// skip, trigger, origin, areaportal, occluder, ladder and the like.
+    Tool,
+}
+
+/// `%compile` keys of tool materials whose faces the compilers remove.
+const TOOL_KEYS: [&str; 14] = [
+    "%compileclip",
+    "%compilehint",
+    "%compileskip",
+    "%compiletrigger",
+    "%compileorigin",
+    "%compileareaportal",
+    "%compileoccluder",
+    "%compilenpcclip",
+    "%playerclip",
+    "%compileplayerclip",
+    "%compileladder",
+    "%compileinvisible",
+    "%compilefog",
+    "%compileblocklos",
+];
+
 /// What the editor needs to draw a material.
 #[derive(Debug, Clone)]
 pub struct Material {
     /// The texture, or `None` when the material or its texture cannot be found or decoded.
     pub texture: Option<Texture>,
     pub alpha: AlphaMode,
+    pub surface: Surface,
+    /// For `$selfillum` materials, the glow's tint (`$selfillumtint`); the texture's
+    /// alpha says where it glows.
+    pub self_illum: Option<[f32; 3]>,
+    /// Drawn without lighting, as `UnlitGeneric` and sky materials are.
+    pub unlit: bool,
 }
 
 impl Material {
@@ -44,6 +85,9 @@ impl Material {
         Self {
             texture: None,
             alpha: AlphaMode::Opaque,
+            surface: Surface::Normal,
+            self_illum: None,
+            unlit: false,
         }
     }
 }
@@ -72,8 +116,12 @@ struct Properties {
     alpha_test_reference: Option<f32>,
     alpha: Option<f32>,
     self_illum: Option<bool>,
+    self_illum_tint: Option<[f32; 3]>,
     envmap: Option<bool>,
     keywords: Option<String>,
+    surface: Option<Surface>,
+    /// The shader the material uses, lower case, such as `lightmappedgeneric`.
+    shader: Option<String>,
 }
 
 /// What the texture browser's filters need to know about a material.
@@ -104,8 +152,30 @@ impl Properties {
             alpha_test_reference: number("$alphatestreference"),
             alpha: number("$alpha"),
             self_illum: flag("$selfillum"),
+            self_illum_tint: block.get("$selfillumtint").and_then(material_color),
             envmap: block.get("$envmap").map(|value| !value.trim().is_empty()),
             keywords: block.get("%keywords").map(str::to_owned),
+            surface: Self::surface(block),
+            shader: (!block.name.eq_ignore_ascii_case("patch")).then(|| block.name.to_ascii_lowercase()),
+        }
+    }
+
+    /// What the `%compile` keys make of the material's faces, if any is set.
+    fn surface(block: &Block) -> Option<Surface> {
+        let set = |key: &str| {
+            block
+                .get(key)
+                .and_then(|value| value.trim().parse::<f32>().ok())
+                .is_some_and(|value| value != 0.0)
+        };
+        if set("%compilesky") || set("%compile2dsky") {
+            Some(Surface::Sky)
+        } else if set("%compilenodraw") || set("%compileblocklight") {
+            Some(Surface::Nodraw)
+        } else if TOOL_KEYS.iter().any(|key| set(key)) {
+            Some(Surface::Tool)
+        } else {
+            None
         }
     }
 
@@ -118,8 +188,11 @@ impl Properties {
             alpha_test_reference: other.alpha_test_reference.or(self.alpha_test_reference),
             alpha: other.alpha.or(self.alpha),
             self_illum: other.self_illum.or(self.self_illum),
+            self_illum_tint: other.self_illum_tint.or(self.self_illum_tint),
             envmap: other.envmap.or(self.envmap),
             keywords: other.keywords.or(self.keywords),
+            surface: other.surface.or(self.surface),
+            shader: other.shader.or(self.shader),
         }
     }
 
@@ -195,10 +268,30 @@ impl MaterialLoader {
             .and_then(|name| self.filesystem.read(&format!("materials/{name}.vtf")))
             .and_then(|data| vtf::decode(&data, MAX_TEXTURE_SIDE).ok())
             .map(Arc::new);
+        let unlit = properties
+            .shader
+            .as_deref()
+            .is_some_and(|shader| matches!(shader, "unlitgeneric" | "unlittwotexture" | "sky" | "sprite"));
         Material {
             texture,
             alpha: properties.alpha_mode(),
+            surface: properties.surface.unwrap_or_default(),
+            self_illum: properties
+                .self_illum
+                .unwrap_or(false)
+                .then(|| properties.self_illum_tint.unwrap_or([1.0; 3])),
+            unlit,
         }
+    }
+
+    /// Loads a texture by its own name, such as `effects/flashlight001`, as projected
+    /// textures and skyboxes name them, at most `max_side` pixels across.
+    pub fn texture_image(&self, texture: &str, max_side: u32) -> Option<Image> {
+        let name = normalize(texture);
+        let name = name.strip_prefix("materials/").unwrap_or(&name);
+        let name = name.strip_suffix(".vtf").unwrap_or(name);
+        let data = self.filesystem.read(&format!("materials/{name}.vtf"))?;
+        vtf::decode(&data, max_side).ok()
     }
 
     /// Loads a material's texture at most `max_side` pixels across, for thumbnails.
@@ -314,6 +407,23 @@ pub fn parallel_map<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync
             .flat_map(|handle| handle.join().expect("texture worker panicked"))
             .collect()
     })
+}
+
+/// A material colour such as `[1 0.5 0.5]` or `{255 128 128}`: square brackets hold 0 to 1
+/// values, braces 0 to 255 ones.
+fn material_color(text: &str) -> Option<[f32; 3]> {
+    let bytes = text.trim().starts_with('{');
+    let values: Vec<f32> = text
+        .split(|c: char| c.is_whitespace() || matches!(c, '[' | ']' | '{' | '}'))
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<f32>().ok())
+        .collect::<Option<_>>()?;
+    let scale = if bytes { 1.0 / 255.0 } else { 1.0 };
+    match values.as_slice() {
+        [grey] => Some([grey * scale; 3]),
+        [r, g, b, ..] => Some([r * scale, g * scale, b * scale]),
+        _ => None,
+    }
 }
 
 /// The cache key for a material: lower case, forward slashes, without the `materials/`

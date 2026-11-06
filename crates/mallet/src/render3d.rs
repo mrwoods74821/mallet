@@ -1,22 +1,28 @@
-//! The viewports drawn with wgpu into offscreen images: the textured 3D camera view and
-//! the three 2D views.
+//! The viewports drawn with wgpu into offscreen images: the textured, wireframe and
+//! lighting preview 3D camera views and the three 2D views.
 //!
 //! The camera image is shown in the window and read back for MCP screenshots, so both
-//! always match. Faces are shaded by direction like Hammer's textured mode; selected
-//! brushes are tinted red with red outlines, and tool previews are drawn as lines on top.
-//! Geometry is cached on the GPU until it changes, so moving the camera or panning a 2D
-//! view costs almost nothing on the CPU.
+//! always match. Faces are shaded by direction like Hammer's textured mode, or lit by
+//! the map's lights in the lighting preview (`lit`); selected brushes are tinted red with
+//! red outlines, and tool previews are drawn as lines on top. Geometry is cached on the
+//! GPU until it changes, so moving the camera or panning a 2D view costs almost nothing
+//! on the CPU.
+
+mod lit;
+
+pub use lit::{LightingInput, LightingStats};
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 use eframe::wgpu::{self, util::DeviceExt};
 use glam::{DVec3, Mat4, Vec3, Vec4};
-use mallet_content::{parallel_map, AlphaMode, MaterialLoader, Materials};
+use mallet_content::{parallel_map, AlphaMode, MaterialLoader, Materials, Surface};
 
+use crate::lighting::TextureLights;
 use crate::scene::{box_edges, entity_marker_edges, ModelCache, Overlay, Owner, Remap, Scene, SceneFace, WireMesh};
 use crate::style::{self as view_style, ViewStyle};
 use crate::view2d::View2D;
@@ -29,22 +35,57 @@ const NEAR: f32 = 1.0;
 const MISSING_TEXTURE_SIZE: f32 = 128.0;
 /// How strongly selected faces are tinted red.
 const SELECTION_TINT: f32 = 0.4;
-/// Direction faces are lit from; faces pointing up are brightest, as in Hammer.
-const LIGHT_DIRECTION: DVec3 = DVec3::new(0.3, 0.5, 1.0);
 /// Key for the plain white texture used by point entity boxes.
 const WHITE_KEY: &str = "";
 /// Side length of the world cubes faces are grouped into for culling.
 const CHUNK_SIZE: f64 = 1024.0;
 
+/// One corner of a brush face on the GPU. The textured view shades it by its normal, as
+/// Hammer does; the lighting preview lights it.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct FaceVertex {
     position: [f32; 3],
+    /// The face's outward normal.
+    normal: [f32; 3],
     uv: [f32; 2],
+    /// The face's tint: white, or an entity box's colour.
     color: [f32; 4],
     highlight: f32,
     /// Alpha-test reference (0 for none) and blend opacity (0 for opaque).
     alpha: [f32; 2],
+}
+
+/// Where each [`FaceVertex`] field goes in the shaders, in field order.
+const FACE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![0 => Float32x3, 5 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Float32, 4 => Float32x2];
+const MODEL_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
+const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 5] =
+    wgpu::vertex_attr_array![3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4];
+
+/// The vertex buffer layout of brush faces.
+fn face_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<FaceVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &FACE_ATTRIBUTES,
+    }
+}
+
+/// The vertex buffer layouts of props: model vertices, then one placement per instance.
+fn model_buffer_layouts() -> [wgpu::VertexBufferLayout<'static>; 2] {
+    [
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ModelGpuVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &MODEL_ATTRIBUTES,
+        },
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ModelInstanceData>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &INSTANCE_ATTRIBUTES,
+        },
+    ]
 }
 
 /// One vertex of a prop model on the GPU, in model space.
@@ -81,13 +122,71 @@ struct LineVertex {
     color: [f32; 4],
 }
 
-/// A texture uploaded to the GPU, with the full size used for texture coordinates and the
-/// way its material uses alpha.
+/// A texture uploaded to the GPU, with the full size used for texture coordinates and
+/// what its material is: how it uses alpha, what the compilers make of it, and whether it
+/// glows or ignores light.
 struct GpuTexture {
     bind_group: wgpu::BindGroup,
     width: f32,
     height: f32,
     alpha: AlphaMode,
+    surface: Surface,
+    facts: MaterialFacts,
+    /// The material's uniform buffer, rewritten when its texture light changes.
+    material: wgpu::Buffer,
+}
+
+/// What a material is, besides its texture.
+#[derive(Clone, Copy, Debug)]
+struct MaterialFacts {
+    alpha: AlphaMode,
+    surface: Surface,
+    self_illum: Option<[f32; 3]>,
+    unlit: bool,
+}
+
+impl MaterialFacts {
+    fn opaque() -> Self {
+        Self {
+            alpha: AlphaMode::Opaque,
+            surface: Surface::Normal,
+            self_illum: None,
+            unlit: false,
+        }
+    }
+
+    /// The material uniform the shaders read: alpha-test reference, blend opacity and
+    /// lighting flags (1 self-illum, 2 sky, 4 unlit, 8 texture light), the self-illum
+    /// tint, and the colour of the texture light it is, if any.
+    fn uniform(&self, emissive: Option<DVec3>) -> [f32; 12] {
+        let (test, blend) = match self.alpha {
+            AlphaMode::Opaque => (0.0, 0.0),
+            AlphaMode::Test(reference) => (reference, 0.0),
+            AlphaMode::Blend(opacity) => (0.0, opacity.max(f32::EPSILON)),
+        };
+        let flags = u32::from(self.self_illum.is_some())
+            | (u32::from(self.surface == Surface::Sky) << 1)
+            | (u32::from(self.unlit) << 2)
+            | (u32::from(emissive.is_some()) << 3);
+        let [r, g, b] = self.self_illum.unwrap_or([1.0; 3]);
+        let glow = emissive.map_or([0.0; 3], |color| {
+            (color / color.max_element().max(1e-6)).as_vec3().to_array()
+        });
+        [
+            test,
+            blend,
+            flags as f32,
+            0.0,
+            r,
+            g,
+            b,
+            0.0,
+            glow[0],
+            glow[1],
+            glow[2],
+            0.0,
+        ]
+    }
 }
 
 /// A translucent face, kept on the CPU so it can be sorted back to front every frame.
@@ -121,10 +220,12 @@ struct CellFaces {
 }
 
 /// How the camera viewport draws the map.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CameraStyle {
     Textured,
     Wireframe,
+    /// Textured and lit by the map's lights, as the game would light it.
+    Lit,
 }
 
 /// How a pipeline uses the depth buffer.
@@ -157,6 +258,9 @@ struct Chunk {
     triangles: usize,
 }
 
+/// A vertex or instance buffer and the runs of it that share a texture or model.
+type Batches = (wgpu::Buffer, Vec<(String, Range<u32>)>);
+
 /// Lines in one vertex buffer.
 struct LineMesh {
     buffer: wgpu::Buffer,
@@ -184,8 +288,8 @@ pub struct RenderStats {
 }
 
 /// A texture decoded and mip-mapped on a worker thread, ready to upload: the mip levels,
-/// the texture's nominal size and its alpha mode.
-type Prepared = (Vec<Image>, (f32, f32), AlphaMode);
+/// the texture's nominal size and what its material is.
+type Prepared = (Vec<Image>, (f32, f32), MaterialFacts);
 
 /// A batch of textures being loaded in the background.
 type Incoming = mpsc::Receiver<Vec<(String, Option<Prepared>)>>;
@@ -230,6 +334,10 @@ pub struct Renderer3D {
     /// One image per viewport slot.
     targets: [Option<Target>; 4],
     pub stats: RenderStats,
+    /// The lighting preview's lights, shadow maps and pipelines, made when first used.
+    lit: Option<lit::LitState>,
+    /// The texture lights materials glow with in the lighting preview.
+    texture_lights: Arc<TextureLights>,
 }
 
 impl Renderer3D {
@@ -272,7 +380,7 @@ impl Renderer3D {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -302,35 +410,14 @@ impl Renderer3D {
             bind_group_layouts: &[&uniform_layout],
             push_constant_ranges: &[],
         });
-        let face_attributes =
-            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Float32, 4 => Float32x2];
         let line_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
-        let face_buffer = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<FaceVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &face_attributes,
-        };
+        let face_buffer = face_buffer_layout();
         let line_buffer = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<LineVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &line_attributes,
         };
-        let model_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
-        let instance_attributes = wgpu::vertex_attr_array![
-            3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4
-        ];
-        let model_buffers = [
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<ModelGpuVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &model_attributes,
-            },
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<ModelInstanceData>() as u64,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &instance_attributes,
-            },
-        ];
+        let model_buffers = model_buffer_layouts();
         let faces = |depth| {
             let topology = wgpu::PrimitiveTopology::TriangleList;
             let buffers = [face_buffer.clone()];
@@ -380,7 +467,7 @@ impl Renderer3D {
         let line_pipeline = lines(Depth::Ignore);
         let flat_line_pipeline = lines(Depth::None);
 
-        let upload = |image: &Image, width, height, alpha| {
+        let upload = |image: &Image, width, height, facts| {
             upload(
                 device,
                 queue,
@@ -388,21 +475,30 @@ impl Renderer3D {
                 &sampler,
                 &mip_chain(image),
                 (width, height),
-                alpha,
+                facts,
+                None,
             )
         };
         let missing = upload(
             &checkerboard(),
             MISSING_TEXTURE_SIZE,
             MISSING_TEXTURE_SIZE,
-            AlphaMode::Opaque,
+            MaterialFacts::opaque(),
         );
-        let white = upload(&Image::solid(Color32::WHITE), 1.0, 1.0, AlphaMode::Opaque);
+        let white = upload(
+            &Image::solid(Color32::WHITE),
+            1.0,
+            1.0,
+            MaterialFacts {
+                unlit: true,
+                ..MaterialFacts::opaque()
+            },
+        );
         let loading_texture = upload(
             &Image::solid(Color32::from_gray(90)),
             MISSING_TEXTURE_SIZE,
             MISSING_TEXTURE_SIZE,
-            AlphaMode::Opaque,
+            MaterialFacts::opaque(),
         );
         Self {
             device: device.clone(),
@@ -431,12 +527,16 @@ impl Renderer3D {
             textures_checked: 0,
             targets: [None, None, None, None],
             stats: RenderStats::default(),
+            lit: None,
+            texture_lights: Arc::new(TextureLights::new()),
         }
     }
 
-    /// Forgets every uploaded texture, for example after the game folder changed.
+    /// Forgets every uploaded texture, for example after the game folder changed, and the
+    /// lighting preview's skybox, projected textures and shadow maps with them.
     pub fn clear_textures(&mut self) {
         self.textures.retain(|key, _| key == WHITE_KEY);
+        self.lit = None;
         self.gpu_models.clear();
         self.loading.clear();
         self.incoming.clear();
@@ -445,9 +545,10 @@ impl Renderer3D {
         self.textures_version += 1;
     }
 
-    /// How many materials are still loading in the background.
+    /// How many materials, and skyboxes and projected textures of the lighting preview,
+    /// are still loading in the background.
     pub fn textures_loading(&self) -> usize {
-        self.loading.len()
+        self.loading.len() + self.lit.as_ref().map_or(0, lit::LitState::loading)
     }
 
     /// Waits for every background texture load and uploads the results, so a screenshot
@@ -458,6 +559,34 @@ impl Renderer3D {
                 self.upload_results(results);
             }
         }
+        if let Some(lit) = &mut self.lit {
+            lit.poll(&self.device, &self.queue, true);
+        }
+    }
+
+    /// What the latest lighting preview frame used, once one has been drawn.
+    pub fn lighting_stats(&self) -> Option<LightingStats> {
+        self.lit.as_ref().map(|lit| lit.stats)
+    }
+
+    /// Makes the materials `lights.rad` lists glow in the lighting preview, when the list
+    /// changed.
+    fn sync_texture_lights(&mut self, table: &Arc<TextureLights>) {
+        if Arc::ptr_eq(&self.texture_lights, table) {
+            return;
+        }
+        self.texture_lights = Arc::clone(table);
+        for (key, texture) in &self.textures {
+            if let Some(texture) = texture {
+                let emissive = table.get(key).map(|light| light.hdr.max(light.ldr));
+                self.queue.write_buffer(
+                    &texture.material,
+                    0,
+                    bytemuck::cast_slice(&texture.facts.uniform(emissive)),
+                );
+            }
+        }
+        self.textures_version += 1;
     }
 
     /// Uploads whatever background loads have finished, without waiting for the rest.
@@ -478,7 +607,8 @@ impl Renderer3D {
 
     fn upload_results(&mut self, results: Vec<(String, Option<Prepared>)>) {
         for (key, prepared) in results {
-            let texture = prepared.map(|(levels, size, alpha)| {
+            let emissive = self.texture_lights.get(&key).map(|light| light.hdr.max(light.ldr));
+            let texture = prepared.map(|(levels, size, facts)| {
                 upload(
                     &self.device,
                     &self.queue,
@@ -486,7 +616,8 @@ impl Renderer3D {
                     &self.sampler,
                     &levels,
                     size,
-                    alpha,
+                    facts,
+                    emissive,
                 )
             });
             self.loading.remove(&key);
@@ -504,7 +635,9 @@ impl Renderer3D {
     /// the camera's view are skipped. Faces are one-sided, so brushes look solid from
     /// outside and open from inside, as in Hammer. Translucent faces are drawn after the
     /// rest, sorted back to front. The selection is drawn again on top, tinted, at its
-    /// live position. Wireframe: every brush edge in its editor colour.
+    /// live position. Lit: the same, lit by the map's lights with shadows, the skybox,
+    /// glows and fog, as `lighting` sets it up. Wireframe: every brush edge in its editor
+    /// colour.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -516,18 +649,34 @@ impl Renderer3D {
         size: [u32; 2],
         materials: Option<&mut Materials>,
         models: &ModelCache,
+        lighting: LightingInput<'_>,
     ) -> (&wgpu::TextureView, bool) {
         let size = [size[0].max(1), size[1].max(1)];
         let recreated = ensure_target(&self.device, &self.uniform_layout, &mut self.targets[slot], size, true);
         self.poll_loading();
+        let lit = style == CameraStyle::Lit;
+        let textured = style != CameraStyle::Wireframe;
+        if lit {
+            self.sync_texture_lights(lighting.texture_lights);
+            let state = self.lit.get_or_insert_with(|| {
+                lit::LitState::new(&self.device, &self.queue, &self.uniform_layout, &self.texture_layout)
+            });
+            state.poll(&self.device, &self.queue, false);
+        }
+        let lit_fingerprint = self
+            .lit
+            .as_ref()
+            .filter(|_| lit)
+            .map(|state| state.fingerprint(scene, lighting));
         let look = view_style::current();
         let signature = signature(|hasher| {
-            (slot, style == CameraStyle::Textured, size).hash(hasher);
+            (slot, style, size).hash(hasher);
             look.hash(hasher);
             (
                 scene.geometry_generation,
                 scene.selection_generation,
                 self.textures_version,
+                lit_fingerprint,
             )
                 .hash(hasher);
             for value in [
@@ -548,7 +697,8 @@ impl Renderer3D {
             return (&self.targets[slot].as_ref().expect("target exists").color_view, false);
         }
         self.signatures[slot] = Some(signature);
-        if style == CameraStyle::Textured {
+        let loader = materials.as_deref().map(Materials::loader);
+        if textured {
             if self.textures_checked != scene.geometry_generation {
                 self.upload_models(scene, models);
                 self.load_textures(scene, materials, models);
@@ -566,7 +716,7 @@ impl Renderer3D {
         }
         let selected: Vec<&WireMesh> = scene.meshes.iter().filter(|mesh| mesh.selected).collect();
         let selected_faces = selected_face_meshes(scene);
-        let (tinted, tinted_translucent) = if style == CameraStyle::Textured {
+        let (tinted, tinted_translucent) = if textured {
             let (opaque, translucent) = self.face_mesh(
                 selected.iter().copied(),
                 overlay.transform.as_ref(),
@@ -579,7 +729,7 @@ impl Renderer3D {
         };
         // Faces picked with the texture tool get a lighter tint, so the texture being
         // lined up stays easy to see.
-        let face_tinted = (style == CameraStyle::Textured && !selected_faces.is_empty() && !overlay.hide_face_mask)
+        let face_tinted = (textured && !selected_faces.is_empty() && !overlay.hide_face_mask)
             .then(|| self.face_mesh(selected_faces.iter(), None, FACE_TINT, false).0);
         let selected_owners: HashSet<Owner> = selected.iter().filter_map(|mesh| mesh.owner).collect();
         let mut outline = Vec::new();
@@ -599,13 +749,12 @@ impl Renderer3D {
         if let Some(point) = overlay.entity {
             push_edges(&mut outline, &entity_marker_edges(point), None, look.tool);
         }
-        let outline = self.line_mesh(&outline);
 
         let aspect = size[0] as f32 / size[1] as f32;
         let matrix = view_projection(camera, aspect);
         let planes = frustum_planes(matrix);
-        let translucent = match (&self.faces, style) {
-            (Some(faces), CameraStyle::Textured) => {
+        let translucent = match (&self.faces, textured) {
+            (Some(faces), true) => {
                 let unselected = faces
                     .translucent
                     .iter()
@@ -615,18 +764,45 @@ impl Renderer3D {
             _ => None,
         };
         let mut stats = RenderStats::default();
-        let instances = if style == CameraStyle::Textured {
-            self.model_instances(scene, overlay, &planes, &mut stats)
+        let instances = if textured {
+            let helpers = !lit || lighting.options.entity_boxes;
+            self.model_instances(scene, overlay, &planes, helpers, &mut stats)
         } else {
             None
         };
-        let target = self.targets[slot].as_ref().expect("target was just created");
-        self.queue
-            .write_buffer(&target.uniform_buffer, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
-
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mallet camera"),
         });
+        let mut lit_state = if lit { self.lit.take() } else { None };
+        let mut glows = None;
+        if let Some(state) = &mut lit_state {
+            state.prepare(
+                self,
+                &mut encoder,
+                scene,
+                overlay,
+                camera,
+                &planes,
+                loader.as_ref(),
+                lighting,
+            );
+            for (edge, color) in state.helper_lines(scene, lighting.options) {
+                push_edges(&mut outline, &[edge], None, color);
+            }
+            let bytes = state.glow_vertices(scene, camera, lighting.options);
+            glows = (!bytes.is_empty()).then(|| {
+                let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mallet glows"),
+                    contents: &bytes,
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                (buffer, (bytes.len() / lit::GLOW_VERTEX_SIZE) as u32)
+            });
+        }
+        let outline = self.line_mesh(&outline);
+        let target = self.targets[slot].as_ref().expect("target was just created");
+        self.queue
+            .write_buffer(&target.uniform_buffer, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
         {
             let mut pass = begin_pass(&mut encoder, target, &look);
             pass.set_bind_group(0, &target.uniform_group, &[]);
@@ -672,6 +848,22 @@ impl Renderer3D {
                         self.draw_models(&mut pass, buffer, ranges, true, &mut stats);
                     }
                 }
+                (CameraStyle::Lit, Some(_)) => {
+                    if let Some(state) = &lit_state {
+                        let tinted_meshes: Vec<&FaceMesh> = [&tinted, &face_tinted].into_iter().flatten().collect();
+                        state.draw(
+                            self,
+                            &mut pass,
+                            &planes,
+                            lighting.options,
+                            &tinted_meshes,
+                            translucent.as_ref(),
+                            instances.as_ref(),
+                            glows.as_ref(),
+                            &mut stats,
+                        );
+                    }
+                }
                 (CameraStyle::Wireframe, _) => {
                     if let Some((_, edges)) = &self.edges {
                         pass.set_pipeline(&self.line_pipeline);
@@ -679,7 +871,7 @@ impl Renderer3D {
                         pass.draw(0..edges.count, 0..1);
                     }
                 }
-                (CameraStyle::Textured, None) => {}
+                (_, None) => {}
             }
             if let Some(lines) = &outline {
                 pass.set_pipeline(&self.line_pipeline);
@@ -688,8 +880,11 @@ impl Renderer3D {
             }
         }
         self.queue.submit([encoder.finish()]);
-        if style == CameraStyle::Textured {
+        if textured {
             self.stats = stats;
+        }
+        if let Some(state) = lit_state {
+            self.lit = Some(state);
         }
         (
             &self.targets[slot].as_ref().expect("target exists").color_view,
@@ -780,19 +975,21 @@ impl Renderer3D {
     }
 
     /// Builds this frame's instance buffer: every prop in view, grouped by model, with
-    /// selected props tinted and shown where a move or resize drag puts them. Returns the
-    /// buffer and each model's range of instances in it.
+    /// selected props tinted and shown where a move or resize drag puts them. Editor
+    /// models of point entities are left out unless `helpers` is set. Returns the buffer
+    /// and each model's range of instances in it.
     #[allow(clippy::type_complexity)]
     fn model_instances(
         &self,
         scene: &Scene,
         overlay: &Overlay,
         planes: &[Vec4; 6],
+        helpers: bool,
         stats: &mut RenderStats,
     ) -> Option<(wgpu::Buffer, Vec<(String, Range<u32>)>)> {
         let mut by_model: HashMap<&str, Vec<ModelInstanceData>> = HashMap::new();
         for mesh in &scene.meshes {
-            let Some(instance) = &mesh.model else {
+            let Some(instance) = mesh.model.as_ref().filter(|instance| helpers || !instance.helper) else {
                 continue;
             };
             if self.gpu_models.get(&instance.key).is_none_or(Option::is_none) {
@@ -1077,17 +1274,19 @@ impl Renderer3D {
             .spawn(move || {
                 let prepared = parallel_map(&keys, |key| {
                     let material = loader.load(key);
+                    let facts = MaterialFacts {
+                        alpha: material.alpha,
+                        surface: material.surface,
+                        self_illum: material.self_illum,
+                        unlit: material.unlit,
+                    };
                     let prepared = material.texture.as_ref().map(|image| {
                         let pixels = Image {
                             width: image.pixel_width,
                             height: image.pixel_height,
                             rgba: image.rgba.clone(),
                         };
-                        (
-                            mip_chain(&pixels),
-                            (image.width as f32, image.height as f32),
-                            material.alpha,
-                        )
+                        (mip_chain(&pixels), (image.width as f32, image.height as f32), facts)
                     });
                     (key.clone(), prepared)
                 });
@@ -1466,7 +1665,9 @@ impl Image {
 }
 
 /// Uploads a texture's mip levels, largest first. `width` and `height` are the texture's
-/// nominal size, used for texture coordinates.
+/// nominal size, used for texture coordinates; `emissive` is the light it gives off when
+/// `lights.rad` lists its material.
+#[allow(clippy::too_many_arguments)]
 fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1474,7 +1675,8 @@ fn upload(
     sampler: &wgpu::Sampler,
     levels: &[Image],
     (width, height): (f32, f32),
-    alpha: AlphaMode,
+    facts: MaterialFacts,
+    emissive: Option<DVec3>,
 ) -> GpuTexture {
     let image = &levels[0];
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1513,15 +1715,10 @@ fn upload(
         );
     }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let alpha_values: [f32; 4] = match alpha {
-        AlphaMode::Opaque => [0.0; 4],
-        AlphaMode::Test(reference) => [reference, 0.0, 0.0, 0.0],
-        AlphaMode::Blend(opacity) => [0.0, opacity.max(f32::EPSILON), 0.0, 0.0],
-    };
-    let alpha_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("mallet material alpha"),
-        contents: bytemuck::cast_slice(&alpha_values),
-        usage: wgpu::BufferUsages::UNIFORM,
+    let material = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("mallet material"),
+        contents: bytemuck::cast_slice(&facts.uniform(emissive)),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("mallet material"),
@@ -1537,7 +1734,7 @@ fn upload(
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: alpha_buffer.as_entire_binding(),
+                resource: material.as_entire_binding(),
             },
         ],
     });
@@ -1545,7 +1742,10 @@ fn upload(
         bind_group,
         width,
         height,
-        alpha,
+        alpha: facts.alpha,
+        surface: facts.surface,
+        facts,
+        material,
     }
 }
 
@@ -1604,7 +1804,8 @@ fn mip_chain(image: &Image) -> Vec<Image> {
 /// Fans a convex face into triangles wound counter-clockwise as seen from outside, so
 /// back-face culling hides faces seen from behind, as in Hammer. Texture coordinates follow
 /// Source:
-/// `u = (point · axis / scale + offset) / texture width`, and likewise for `v`.
+/// `u = (point · axis / scale + offset) / texture width`, and likewise for `v`. The normal
+/// turns with a remap, so a rotated preview is lit the way it faces.
 fn triangulate(
     face: &SceneFace,
     texture: &GpuTexture,
@@ -1613,14 +1814,20 @@ fn triangulate(
     remap: Option<&Remap>,
     out: &mut Vec<FaceVertex>,
 ) {
-    let shade = (0.6 + 0.4 * face.normal.dot(LIGHT_DIRECTION.normalize())).clamp(0.35, 1.0) as f32;
-    let color = [tint[0] * shade, tint[1] * shade, tint[2] * shade, 1.0];
+    let color = [tint[0], tint[1], tint[2], 1.0];
+    let normal = remap
+        .map_or(face.normal, |remap| {
+            remap.matrix.transform_vector3(face.normal).normalize_or(face.normal)
+        })
+        .as_vec3()
+        .to_array();
     let coordinate = |point: DVec3, axis: &mallet_vmf::TexAxis, size: f32| {
         let scale = if axis.scale == 0.0 { 1.0 } else { axis.scale };
         ((point.dot(axis.axis) / scale + axis.offset) as f32) / size
     };
     let vertex = |point: DVec3| FaceVertex {
         position: remap.map_or(point, |remap| remap.apply(point)).as_vec3().to_array(),
+        normal,
         uv: [
             coordinate(point, &face.uaxis, texture.width),
             coordinate(point, &face.vaxis, texture.height),

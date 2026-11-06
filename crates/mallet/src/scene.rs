@@ -9,6 +9,7 @@ use eframe::egui::Color32;
 use glam::{DMat3, DMat4, DVec2, DVec3};
 use mallet_content::{EntityClass, GameData, Model};
 use mallet_vmf::geometry::{faces_bounds, solid_faces, Bounds, Plane};
+use mallet_vmf::light::MapLighting;
 use mallet_vmf::{parse_vec3, Entity, Side, Solid, TexAxis, Vmf};
 
 use crate::view2d::Axis2D;
@@ -221,6 +222,13 @@ pub struct ModelInstance {
     pub key: String,
     /// Model space to world: origin, then angles, then `modelscale`.
     pub transform: DMat4,
+    /// Whether the model blocks light in the lighting preview: a prop's own model does
+    /// unless `disableshadows` is set, while the editor models FGD classes show, such as
+    /// a projected texture's lamp, are not in the game and do not.
+    pub casts_shadows: bool,
+    /// An editor model from the FGD class, such as an AI node's cube, rather than the
+    /// entity's own model.
+    pub helper: bool,
 }
 
 /// The geometry of one brush or point entity.
@@ -256,6 +264,8 @@ pub struct Scene {
     /// renderer that has drawn generation `from` of one can follow the chain to the
     /// current generation and update just those meshes.
     pub retextures: Vec<Retexture>,
+    /// The map's lights, sky, fog and glows, for the lighting preview.
+    pub lighting: MapLighting,
 }
 
 /// One step of [`Scene::retextures`]: these meshes changed from `from` to `to`.
@@ -280,6 +290,7 @@ impl Scene {
         let mut scene = Self {
             geometry_generation: next_generation(),
             selection_generation: next_generation(),
+            lighting: MapLighting::read(vmf),
             ..Self::default()
         };
         for entity in vmf.all_entities() {
@@ -324,6 +335,10 @@ impl Scene {
                 for point in edges.iter().flatten() {
                     bounds.add_point(*point);
                 }
+                let own_model = entity
+                    .get("model")
+                    .is_some_and(|path| path.trim().to_ascii_lowercase().ends_with(".mdl"));
+                let shadows_off = entity.get("disableshadows").is_some_and(|value| value.trim() == "1");
                 let mesh = WireMesh {
                     color: to_color(entity_color),
                     edges,
@@ -332,7 +347,12 @@ impl Scene {
                     bounds,
                     owner: entity_owner,
                     selected: false,
-                    model: Some(ModelInstance { key, transform }),
+                    model: Some(ModelInstance {
+                        key,
+                        transform,
+                        casts_shadows: own_model && !shadows_off,
+                        helper: !own_model,
+                    }),
                 };
                 scene.bounds.add_bounds(&mesh.bounds);
                 scene.meshes.push(mesh);
@@ -883,6 +903,8 @@ mod tests {
         prop.model = Some(ModelInstance {
             key: "fence.mdl".to_owned(),
             transform,
+            casts_shadows: true,
+            helper: false,
         });
         let models = ModelCache::from([("fence.mdl".to_owned(), Some(Arc::new(model)))]);
         (prop, models)

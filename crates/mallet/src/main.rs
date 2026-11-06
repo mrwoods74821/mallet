@@ -22,6 +22,7 @@ mod gizmo;
 mod handoff;
 mod input;
 mod keymap;
+mod lighting;
 mod mcp;
 mod netgraph;
 mod properties;
