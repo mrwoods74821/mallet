@@ -9,7 +9,7 @@ maps through a built-in MCP server.
 | Crate | Purpose |
 | --- | --- |
 | `mallet-kv` | Reads and writes Valve KeyValues text. Keeps every key, block and duplicate in order and writes Hammer's exact layout (tabs, CRLF). |
-| `mallet-vmf` | Typed VMF model on top of `mallet-kv`, brush geometry, and the edit/undo layer. No UI dependencies. |
+| `mallet-vmf` | Typed VMF model on top of `mallet-kv`, brush geometry, the edit/undo layer, and Source's lighting rules (`light`). No UI dependencies. |
 | `mallet-format` | The `.mallet` map format: the `Vmf` model as compact binary, with a checksum per section and room for the editor's own state. |
 | `mallet-content` | Game content: `gameinfo.txt` search paths, VPK archives, VMT materials, VTF textures, MDL models and FGD entity classes. |
 | `mallet` | The editor application: window, viewports, key bindings and the MCP server. |
@@ -235,8 +235,8 @@ SourceCubemap, on `PATH` and in the usual install folders.
 
 ## Drawing
 
-Each of the four viewport slots shows a `ViewMode`: 3D Textured, 3D Wireframe, or the 2D
-Top, Front or Side view, switched by clicking the slot's label. 3D slots share the one
+Each of the four viewport slots shows a `ViewMode`: 3D Textured, 3D Wireframe, 3D Lighting
+Preview, or the 2D Top, Front or Side view, switched by clicking the slot's label. 3D slots share the one
 camera; 2D slots showing the same view share its pan and zoom. MCP tools name viewports
 `camera`, `top`, `front` and `side` and act on the first slot showing that view.
 
@@ -251,8 +251,8 @@ Geometry is cached on the GPU and rebuilt only when the scene's `geometry_genera
 changes, never for selection changes or camera moves:
 
 - The camera's faces are fanned into triangles with Source's texture coordinates
-  (`point · axis / scale + offset`, divided by the texture size), shaded by direction like
-  Hammer's textured mode, and grouped into 2048-unit chunks. Each frame, chunks whose
+  (`point · axis / scale + offset`, divided by the texture size) and their normal, shaded
+  by direction in the shader like Hammer's textured mode, and grouped into chunks. Each frame, chunks whose
   bounds are outside the view frustum are skipped. Faces are one-sided, wound
   counter-clockwise from outside with back faces culled, so brushes look solid from
   outside and open from inside, as in Hammer.
@@ -286,6 +286,59 @@ and View > Net Graph shows the same numbers in the camera view's bottom-right co
 Brushes whose planes do not enclose a volume are skipped, as Hammer's Check Problems would
 report them.
 
+## Lighting
+
+`mallet_vmf::light` is Source's lighting written down, with no GPU in it. `CATALOGUE` lists
+every lighting entity class with its group, what it does, what the preview shows and the
+keyvalues Source's FGDs give it, which the Entity tool's Lighting menu and new entities
+without an FGD use. `MapLighting::read` turns a map's entities into `Light`s, plus the sky
+light, fog, sky, glows and beams:
+
+- Colours are read as VRAD's LightForString does: each 0 to 255 channel made linear with a
+  2.2 gamma, times the brightness over 255, so `255 255 255 200` is 0.78 and 1 shows a
+  texture at full brightness. `_lightHDR` replaces `_light` in HDR unless it is
+  `-1 -1 -1 1`, and the HDR scales apply.
+- Falloff follows SetLightFalloffParams: constant, linear and quadratic terms scaled so the
+  light has its brightness at 100 units, or a quadratic fitted through fifty and zero
+  percent distances with SolveInverseQuadraticMonotonic, capped and faded the way VRAD
+  does, with `_hardfalloff` and `_distance`. Spotlights fade between their cones raised to
+  the focus. Directions use SetupLightNormalFromProps (`pitch`, `angle`, `angles`, or the
+  `target`), and projected textures and beams the engine's AngleVectors.
+- Dynamic lights fade out over their radius, projected textures use the flashlight
+  shader's `100 / d` with its fade near the far plane and its HDR and LDR scale, and
+  appearances are the engine's light style patterns at ten letters a second.
+- `parse_lights_rad` reads `lights.rad` with its `ldr:` and `hdr:` lines;
+  `texture_light_scale` gives a face VRAD's brightness of one tile per texture repeat.
+
+`Scene::build` reads the map's lighting, and the editor reads the game's `lights.rad` and
+the map's own `.rad` when the game or map changes. Materials report what the compilers
+make of them (`Surface`: sky, nodraw, or a tool face they remove) from their `%compile`
+keys, and whether they are self-illuminated or unlit; the renderer keeps that with each
+texture in its material uniform.
+
+The 3D Lighting Preview is `CameraStyle::Lit`, drawn by `render3d::lit` from the same
+cached chunks and props as the textured view with its own shaders (`lit.wgsl`):
+
+- Lights are gathered from the scene with the settings applied (HDR, which kinds count,
+  lights that start dark), and texture lights are made from faces whose material
+  `lights.rad` lists, split into patches about 128 units apart. Suns and lights being
+  dragged go first and light every pixel; the rest are sorted into a grid of up to 64
+  cells a side, each listing the brightest lights that reach it, which pixels look up by
+  where they are. Dragged lights move with the drag without sorting the grid again.
+- Shadows are depth maps in texture arrays: one per sun covering the whole map, one per
+  direction sky light is traced from (sky light is the share of those directions that see
+  the sky, weighted by how much the surface faces them), and cube maps or single spot maps
+  for the lights nearest and brightest around the camera, kept while they stay chosen.
+  Every layer remembers what it was drawn from, so only changed layers are drawn again.
+  Sky and tool faces, translucent faces and editor models let light through.
+- Sky faces show the skybox's six faces, mapped as the engine's `st_to_vec` table does,
+  or Garry's Mod's painted sky; projected textures sample their texture in a texture
+  array. Both load on worker threads.
+- Self-illuminated materials glow by their alpha, texture light materials glow in their
+  light's colour, and the result is exposed, clamped or tone mapped and fogged.
+- Glows, spotlight beams and light helpers (reach spheres, cones, frusta and sun arrows)
+  are built each frame around the camera.
+
 ## MCP server
 
 The editor starts an MCP server at `http://127.0.0.1:7414/mcp` (Streamable HTTP transport,
@@ -303,7 +356,7 @@ Tools:
 
 | Tool | What it does |
 | --- | --- |
-| `get_status` | Open map, counts, bounds, grid, camera, 2D views, undo/redo state |
+| `get_status` | Open map, counts, bounds, grid, camera, 2D views, undo/redo state, and what the lighting preview drew last |
 | `set_game_dir` | Mount a game's content for textures and remember it |
 | `new_map`, `open_map`, `save_map` | Start an empty map or load a VMF or `.mallet` map in a new tab (`focus` also brings the window to the front); save in place or to a new path, the extension picking the format |
 | `export_map` | Write a copy of the map in either format without switching to it |
@@ -320,7 +373,8 @@ Tools:
 | `create_entity` | Point entity of any class at a position, with extra keyvalues, like the Entity tool |
 | `undo`, `redo` | Step the shared history |
 | `set_grid`, `center_views` | Grid size and framing |
-| `set_viewport_type` | Switch a viewport slot between 3D and 2D types |
+| `set_viewport_type` | Switch a viewport slot between 3D (textured, wireframe, lighting preview) and 2D types |
+| `list_lights` | The map's lights as the lighting preview reads them, the sky light, fog, sky, texture lights in use, the latest frame's lighting numbers and, optionally, the lighting entity catalogue |
 | `set_camera`, `set_view_2d` | Aim the 3D camera, pan and zoom the 2D views |
 | `screenshot` | PNG of one or all viewports, rendered offscreen, or of the whole window (`window`) |
 | `set_entity_outputs` | Replace an entity's outputs |
@@ -357,5 +411,6 @@ make any map change through `Editor::apply_edit` so it stays undoable.
 1. The Model and VisGroup tabs of Object Properties.
 2. Model skins and bodygroups, and a model browser for prop entities.
 3. Clip, vertex and displacement tools.
-4. Lighting: a real-time preview first, then a bake through VRAD with lightmaps read back.
+4. Lighting: a bake through VRAD with lightmaps read back, now that the real-time preview
+   is in.
 5. Entity I/O editor, instances, VisGroups and Check Problems.

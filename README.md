@@ -10,8 +10,9 @@ Mallet opens and saves VMF files without losing anything, has its own faster `.m
 map format, and shows maps in Hammer's four-viewport layout, with textured brushes and prop models in 3D. It has Hammer's
 Selection, Block and Entity tools with scale, rotate and skew handles and a Hammer++-style
 3D transform gizmo, Object Properties driven by the game's FGD, map tabs,
-a CompilePal-style compile window with presets, SourceCubemap and leak lines, and
-Hammer's texture tool with a texture browser that loads every mounted game's materials. A
+a CompilePal-style compile window with presets, SourceCubemap and leak lines,
+Hammer's texture tool with a texture browser that loads every mounted game's materials, and
+a Hammer++-style 3D Lighting Preview that lights the map with every Source light entity. A
 built-in MCP server lets AI agents inspect and edit maps, compile them and take
 screenshots. It is a work in progress: clipping, vertex editing and displacements are
 next.
@@ -95,7 +96,7 @@ These follow Hammer++'s default keybindings.
 | Mouse wheel | Zoom a 2D view around the cursor, or move the camera forward |
 | Middle-drag or Space+drag | Pan a 2D view |
 | Z | Toggle mouselook in the 3D view (Escape leaves it); the cursor stays in the view and returns afterwards |
-| Click a viewport's label | Switch that viewport between 3D Textured, 3D Wireframe and the 2D Top, Front and Side views |
+| Click a viewport's label | Switch that viewport between 3D Textured, 3D Wireframe, 3D Lighting Preview and the 2D Top, Front and Side views |
 | W A S D, arrow keys | Move the 3D camera; the arrow keys strafe left, right, up and down. A key pressed with Ctrl or Alt, such as the S of Ctrl+S, does not move it until released |
 | Ctrl (in mouselook) | Crouch: fly at a third of the camera speed. Ctrl with W A S D moves instead of saving |
 
@@ -125,6 +126,44 @@ with their brushes. Texture scale lock, beside it, also stretches them when brus
 scaled; without it they keep their scale and stay pinned to the brush's corner. Mallet
 Options > Editing holds both locks, the rotation snap step, arrow-key nudging and the
 gizmo.
+
+## Lighting
+
+Click the camera viewport's label and pick 3D Lighting Preview to see the map lit the
+way the game lights it, as in Hammer++. The preview reads every light entity with VRAD's
+own rules: `_light` colours and brightness (`_lightHDR` and the HDR scales when compiling
+with HDR), constant, linear and quadratic falloff, fifty and zero percent distances with
+hard falloff, `_distance`, spotlight cones and focus, `pitch`, `angles` and aim targets.
+
+| Light | In the preview |
+| --- | --- |
+| `light`, `light_spot` | Point and spot lights with VRAD's falloff; they cast shadows |
+| `light_environment` | Sunlight that shines in through sky faces, with shadows, and sky light that reaches what can see the sky |
+| `light_directional` | Light from one direction with shadows, like the sun without sky light |
+| `light_dynamic` | Lights out to its maximum distance, in its cone when it has one, without shadows as in the game |
+| `env_projectedtexture` | Projects its texture through its field of view out to its far distance, with shadows |
+| Texture lights | Faces whose material `lights.rad` lists give off light, split into patches like VRAD's, and glow; the map's own `.rad` file beside it counts too |
+| `$selfillum` materials | Glow where their texture's alpha says |
+| `point_spotlight`, `beam_spotlight`, `env_sprite`, `env_lightglow`, `env_sun` | Beams, halos and glows, and the sun's glow in the sky |
+| `env_fog_controller`, `env_skypaint` | Fog, and Garry's Mod's painted sky |
+
+Sky faces show the map's skybox, and tool textures that are invisible in the game
+(nodraw, clip, trigger, hint, skip and the like) are hidden. Lights that start dark are
+left off, and flickering or pulsing appearances can play. Shadows come from the sun,
+from sky light and from the lights nearest and brightest around the camera; the rest
+shine through walls. Bounced light is not traced, so a "fake bounce" adds a little
+light around each light instead.
+
+The sun button beside the viewport's label holds the settings used most: exposure, tone
+mapping, fill light, fake bounce, the sky, fog, glows, light helpers and which kinds of
+light count. Mallet Options > Lighting preview has all of them. Selected lights show how
+far they reach, their cones or the sun's direction, and a light being dragged lights the
+map from where it is.
+
+The side panel's Lighting menu, beside Common classes, lists every Source lighting entity
+for the Entity tool, grouped into baked lights, dynamic lights, glows, beams and sky, fog,
+tone mapping and shadow controls, and lighting helpers, each with what it does. New
+lighting entities get Source's default settings even without the game's FGD.
 
 ## Texturing
 
@@ -182,6 +221,12 @@ as you change it:
   how far the mouse wheel moves the camera, mouselook sensitivity and smoothing,
   how far the wheel zooms the 2D views, how close a click must be to select a brush, the
   grid of new maps, how dense the grid may get and how often grid lines are highlighted.
+- **Lighting preview**: HDR or LDR light values; the sun, sky light, dynamic lights, texture
+  lights, self-illumination, lights that start dark and appearances; sun and light
+  shadows with their sizes, softness, how many lights cast them and how many directions sky
+  light is traced from; exposure, tone mapping, fill light, fake bounce, the sky, fog, glows,
+  tool textures, entity boxes and light helpers; and how far lights reach and how many may
+  light one spot.
 - **Colours**: the background, grid, axis, selection, tool, handle and texture-face
   colours of the views, Hammer's by default.
 - **Editing**: the texture new brushes get, the Entity tool's class, how many recent
