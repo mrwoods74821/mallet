@@ -16,6 +16,14 @@ use glam::DVec3;
 
 use super::{Action, CommandLine, PlannedStep, StepKind};
 
+/// Why VBSP reports a leak when it finds no entity inside the map. Stock VBSP only says
+/// "leaked" then, and writes no leak line.
+const NO_ENTITIES_INSIDE: &str = concat!(
+    "The map leaked without a leak line, which means VBSP found no entity inside the map to start its ",
+    "leak check from. It skips entities at exactly 0 0 0, so move the info_player_start (or any entity) ",
+    "off the origin, even to 0 0 1, or add an entity inside the sealed area."
+);
+
 /// Lines kept in the log; older ones are dropped so a chatty compile cannot use up memory.
 const MAX_LINES: usize = 50_000;
 
@@ -105,6 +113,9 @@ pub struct JobState {
     pub outcome: Option<Outcome>,
     /// Whether VBSP found a leak; `pointfile` then shows where.
     pub leaked: bool,
+    /// Whether VBSP found no entity inside the map to start its leak check from, which
+    /// it reports as a leak without a leak line.
+    pub no_entities_inside: bool,
     pub pointfile: PathBuf,
     /// The text of the line the current program is still writing, such as `0...1...2`.
     pub partial: String,
@@ -185,8 +196,12 @@ impl JobState {
     fn output(&mut self, step: usize, text: &str) {
         let text = text.trim_end();
         let kind = classify(text);
-        if text.to_ascii_lowercase().contains("leaked") {
+        let lower = text.to_ascii_lowercase();
+        if lower.contains("leaked") {
             self.leaked = true;
+        }
+        if lower.contains("no entities in open") {
+            self.no_entities_inside = true;
         }
         if matches!(kind, LineKind::Error | LineKind::Warning) {
             self.problems.push(Problem {
@@ -213,7 +228,16 @@ pub struct CompileJob {
 
 impl CompileJob {
     /// Starts running `steps` on a background thread.
-    pub fn start(map: String, preset: String, steps: Vec<PlannedStep>, pointfile: PathBuf, low_priority: bool) -> Self {
+    /// Starts running `steps` on a background thread. `notes` are warnings found before
+    /// compiling, listed first with the place they name.
+    pub fn start(
+        map: String,
+        preset: String,
+        steps: Vec<PlannedStep>,
+        pointfile: PathBuf,
+        low_priority: bool,
+        notes: Vec<(String, Option<DVec3>)>,
+    ) -> Self {
         let state = JobState {
             map,
             preset,
@@ -236,10 +260,22 @@ impl CompileJob {
             finished: None,
             outcome: None,
             leaked: false,
+            no_entities_inside: false,
             pointfile,
             partial: String::new(),
             handled: false,
         };
+        let mut state = state;
+        for (text, position) in notes {
+            state.push(None, LineKind::Warning, text.clone());
+            state.problems.push(Problem {
+                step: 0,
+                severity: Severity::Warning,
+                text,
+                brush: None,
+                position,
+            });
+        }
         let state = Arc::new(Mutex::new(state));
         let cancel = Arc::new(AtomicBool::new(false));
         let (shared, cancelled) = (Arc::clone(&state), Arc::clone(&cancel));
@@ -293,7 +329,9 @@ fn run(state: &Mutex<JobState>, cancel: &AtomicBool, steps: &[PlannedStep], low_
             Action::Launch(command) => launch(command),
             Action::Copy { from, to } => copy(from, to),
         };
-        if step.kind == StepKind::Vbsp && result.is_ok() {
+        // VBSP++ exits with an error on a leak and stock VBSP does not, so look for one
+        // either way and explain it instead of the exit code.
+        if step.kind == StepKind::Vbsp {
             let fresh_pointfile = fs::metadata(&pointfile)
                 .and_then(|metadata| metadata.modified())
                 .is_ok_and(|modified| modified >= started_at);
@@ -301,9 +339,11 @@ fn run(state: &Mutex<JobState>, cancel: &AtomicBool, steps: &[PlannedStep], low_
             if fresh_pointfile {
                 state.leaked = true;
             }
-            if state.leaked {
+            if state.no_entities_inside || (state.leaked && !fresh_pointfile) {
+                result = Err(NO_ENTITIES_INSIDE.to_owned());
+            } else if state.leaked {
                 result = Err(
-                    "The map leaked: something inside can see the void. Mallet shows the leak line in the views."
+                    "The map leaked: an entity inside can see the void. The red leak line in the views shows the way out."
                         .to_owned(),
                 );
             }
@@ -650,6 +690,7 @@ mod tests {
             steps,
             PathBuf::from("none.lin"),
             false,
+            vec![("checked first".to_owned(), None)],
         );
         let deadline = Instant::now() + Duration::from_secs(20);
         while job.is_running() && Instant::now() < deadline {
@@ -662,8 +703,9 @@ mod tests {
             statuses,
             [StepStatus::Succeeded, StepStatus::Failed, StepStatus::Skipped]
         );
-        assert_eq!(state.warnings(), 1);
-        assert_eq!(state.problems[0].brush, Some(5));
+        assert_eq!(state.warnings(), 2);
+        assert_eq!(state.problems[0].text, "checked first");
+        assert_eq!(state.problems[1].brush, Some(5));
         assert!(state.lines.iter().any(|line| line.text.contains("exit code 3")));
     }
 }

@@ -382,7 +382,8 @@ pub fn definitions() -> Value {
         ),
         tool(
             "set_viewport_type",
-            "Change what one of the four viewports shows, like clicking its label. Slots are 0 top-left,              1 top-right, 2 bottom-left, 3 bottom-right.",
+            "Change what one of the four viewports shows, like clicking its label. Slots are 0 top-left, \
+             1 top-right, 2 bottom-left, 3 bottom-right.",
             json!({
                 "slot": { "type": "integer", "minimum": 0, "maximum": 3 },
                 "type": { "type": "string", "enum": ["textured", "wireframe", "top", "front", "side"] }

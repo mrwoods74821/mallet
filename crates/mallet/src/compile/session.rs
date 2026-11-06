@@ -10,7 +10,7 @@ use glam::DVec3;
 use mallet_vmf::geometry::Bounds;
 
 use super::runner::read_pointfile;
-use super::{plan, save_presets, CompileJob, Context, Outcome, Preset};
+use super::{plan, save_presets, CompileJob, Context, Outcome, Preset, StepKind};
 use crate::config::{self, ToolKind};
 use crate::editor::Editor;
 use crate::scene::{next_generation, WireMesh};
@@ -77,6 +77,15 @@ impl Editor {
         let context = self.compile_context()?;
         let steps = plan(&preset, &context, &|tool| self.tool_path(tool))?;
         let pointfile = context.vmf.with_extension("lin");
+        let notes = if preset
+            .steps
+            .iter()
+            .any(|step| step.enabled && step.kind == StepKind::Vbsp)
+        {
+            self.leak_check_notes()
+        } else {
+            Vec::new()
+        };
         self.clear_pointfile();
         self.compile_job = Some(CompileJob::start(
             context.map_name(),
@@ -84,6 +93,7 @@ impl Editor {
             steps,
             pointfile,
             self.config.compile.low_priority,
+            notes,
         ));
         if self.config.compile.last_preset != preset.name {
             self.config.compile.last_preset = preset.name.clone();
@@ -91,6 +101,40 @@ impl Editor {
         }
         self.message = format!("Compiling {} with {}", context.map_name(), preset.name);
         Ok(())
+    }
+
+    /// Problems VBSP's leak check will have, found before compiling: it needs a point
+    /// entity inside the map, and skips any at exactly 0 0 0.
+    pub fn leak_check_notes(&self) -> Vec<(String, Option<DVec3>)> {
+        let Some(document) = &self.document else {
+            return Vec::new();
+        };
+        let origins: Vec<(String, DVec3)> = document
+            .vmf
+            .entities()
+            .filter(|entity| entity.solids().next().is_none())
+            .filter_map(|entity| Some((entity.classname().to_owned(), entity.origin()?)))
+            .collect();
+        if origins.iter().any(|(_, origin)| *origin != DVec3::ZERO) {
+            return Vec::new();
+        }
+        match origins.first() {
+            None => vec![(
+                concat!(
+                    "The map has no point entities. VBSP needs one inside the map, such as an ",
+                    "info_player_start, or it reports a leak."
+                )
+                .to_owned(),
+                None,
+            )],
+            Some((classname, _)) => vec![(
+                format!(
+                    "The {classname} is at exactly 0 0 0, which VBSP's leak check skips, and no other entity is \
+                     placed, so VBSP will report a leak. Move it off the origin, even to 0 0 1."
+                ),
+                Some(DVec3::ZERO),
+            )],
+        }
     }
 
     pub fn cancel_compile(&mut self) -> bool {
