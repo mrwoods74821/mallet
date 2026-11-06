@@ -335,12 +335,111 @@ impl Entity {
         }
     }
 
+    /// The entity's outputs, from its `connections` blocks, in file order.
+    pub fn connections(&self) -> Vec<Connection> {
+        self.items
+            .iter()
+            .filter_map(connections_block)
+            .flat_map(Block::pairs)
+            .filter_map(Connection::from_pair)
+            .collect()
+    }
+
+    /// Replaces the entity's outputs. The `connections` block keeps its place, or is
+    /// added after the last key; it is removed when there are no outputs. The separator
+    /// the map already uses (comma, or the escape character newer Hammers write) is kept.
+    pub fn set_connections(&mut self, connections: &[Connection]) {
+        let escaped = self
+            .items
+            .iter()
+            .filter_map(connections_block)
+            .flat_map(Block::pairs)
+            .any(|pair| pair.value.contains(CONNECTION_ESCAPE));
+        let separator = if escaped { CONNECTION_ESCAPE } else { ',' };
+        let position = self.items.iter().position(|item| connections_block(item).is_some());
+        self.items.retain(|item| connections_block(item).is_none());
+        if connections.is_empty() {
+            return;
+        }
+        let mut block = Block::new("connections");
+        block.items = connections
+            .iter()
+            .map(|connection| Item::Pair(connection.to_pair(separator)))
+            .collect();
+        let at = position.unwrap_or_else(|| {
+            self.items
+                .iter()
+                .rposition(|item| matches!(item, EntityItem::Key(_)))
+                .map_or(0, |index| index + 1)
+        });
+        self.items.insert(at.min(self.items.len()), EntityItem::Other(block));
+    }
+
     /// Gives the entity, its brushes and their faces fresh ids, as needed for a copy.
     pub fn renumber(&mut self, ids: &mut IdAllocator) {
         self.set("id", ids.object().to_string());
         for solid in self.solids_mut() {
             solid.renumber(ids);
         }
+    }
+}
+
+fn connections_block(item: &EntityItem) -> Option<&Block> {
+    match item {
+        EntityItem::Other(block) if block.name.eq_ignore_ascii_case("connections") => Some(block),
+        _ => None,
+    }
+}
+
+/// The separator newer versions of Hammer write between the fields of an output, so
+/// parameters may contain commas.
+const CONNECTION_ESCAPE: char = '\u{1b}';
+
+/// One output of an entity: when `output` fires, `input` is sent to the entities named
+/// `target`, with `parameter`, after `delay` seconds, at most `refires` times (-1 for
+/// no limit).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Connection {
+    pub output: String,
+    pub target: String,
+    pub input: String,
+    pub parameter: String,
+    pub delay: f64,
+    pub refires: i32,
+}
+
+impl Connection {
+    /// Reads a `connections` pair such as `"OnTrigger" "door,Open,,0,-1"`.
+    pub fn from_pair(pair: &Pair) -> Option<Self> {
+        let separator = if pair.value.contains(CONNECTION_ESCAPE) {
+            CONNECTION_ESCAPE
+        } else {
+            ','
+        };
+        let fields: Vec<&str> = pair.value.split(separator).collect();
+        let [target, input, parameter, delay, refires] = fields.as_slice() else {
+            return None;
+        };
+        Some(Self {
+            output: pair.key.clone(),
+            target: (*target).to_owned(),
+            input: (*input).to_owned(),
+            parameter: (*parameter).to_owned(),
+            delay: delay.trim().parse().unwrap_or(0.0),
+            refires: refires.trim().parse().unwrap_or(-1),
+        })
+    }
+
+    /// Writes the connection as a `connections` pair with the given field separator.
+    pub fn to_pair(&self, separator: char) -> Pair {
+        let fields = [
+            self.target.clone(),
+            self.input.clone(),
+            self.parameter.clone(),
+            self.delay.to_string(),
+            self.refires.to_string(),
+        ];
+        Pair::new(self.output.clone(), fields.join(&separator.to_string()))
     }
 }
 

@@ -10,7 +10,7 @@ use std::fmt;
 use glam::DVec3;
 
 use crate::geometry::Bounds;
-use crate::{Entity, EntityItem, Solid, TopLevel, Vmf};
+use crate::{Connection, Entity, EntityItem, Solid, TopLevel, Vmf};
 
 /// One reversible change to a map.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +33,13 @@ pub enum Edit {
         entity: u32,
         /// Key name.
         key: String,
+    },
+    /// Replaces all outputs of the entity with the given id.
+    SetConnections {
+        /// Target entity id.
+        entity: u32,
+        /// The new outputs, in order.
+        connections: Vec<Connection>,
     },
     /// Adds a brush to the world or to a brush entity.
     AddSolid {
@@ -157,6 +164,15 @@ impl Edit {
                     entity: *entity,
                     key: key.clone(),
                     value: old,
+                })
+            }
+            Self::SetConnections { entity, connections } => {
+                let target = entity_mut(vmf, *entity)?;
+                let previous = target.connections();
+                target.set_connections(connections);
+                Ok(Self::SetConnections {
+                    entity: *entity,
+                    connections: previous,
                 })
             }
             Self::AddSolid { entity, index, solid } => {
@@ -381,5 +397,78 @@ impl History {
     /// Whether a redo step is available.
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MAP: &str = r#"
+world { "id" "1" "classname" "worldspawn" }
+entity
+{
+	"id" "2"
+	"classname" "logic_relay"
+	"targetname" "relay"
+	connections
+	{
+		"OnTrigger" "door,Open,,0,-1"
+		"OnTrigger" "lamp,SetColor,255 0 0,1.5,1"
+	}
+}
+entity { "id" "3" "classname" "info_target" }
+"#;
+
+    fn entity(vmf: &Vmf, id: u32) -> &Entity {
+        vmf.entities().find(|entity| entity.id() == Some(id)).unwrap()
+    }
+
+    #[test]
+    fn reads_connections() {
+        let vmf = Vmf::parse(MAP).unwrap();
+        let connections = entity(&vmf, 2).connections();
+        assert_eq!(connections.len(), 2);
+        assert_eq!(connections[1].parameter, "255 0 0");
+        assert_eq!(connections[1].delay, 1.5);
+        assert_eq!(connections[1].refires, 1);
+        assert!(entity(&vmf, 3).connections().is_empty());
+    }
+
+    #[test]
+    fn setting_connections_undoes_to_the_exact_text() {
+        let mut vmf = Vmf::parse(MAP).unwrap();
+        let original = vmf.to_text();
+        let mut history = History::default();
+        let mut connections = entity(&vmf, 2).connections();
+        connections.remove(0);
+        history
+            .apply(&mut vmf, &Edit::SetConnections { entity: 2, connections })
+            .unwrap();
+        assert_eq!(entity(&vmf, 2).connections().len(), 1);
+
+        let added = Connection {
+            output: "OnUser1".to_owned(),
+            target: "relay".to_owned(),
+            input: "Trigger".to_owned(),
+            parameter: String::new(),
+            delay: 0.0,
+            refires: -1,
+        };
+        history
+            .apply(
+                &mut vmf,
+                &Edit::SetConnections {
+                    entity: 3,
+                    connections: vec![added.clone()],
+                },
+            )
+            .unwrap();
+        assert_eq!(entity(&vmf, 3).connections(), [added]);
+        assert!(vmf.to_text().contains("\"OnUser1\" \"relay,Trigger,,0,-1\""));
+
+        assert!(history.undo(&mut vmf).unwrap());
+        assert!(history.undo(&mut vmf).unwrap());
+        assert_eq!(vmf.to_text(), original);
     }
 }
