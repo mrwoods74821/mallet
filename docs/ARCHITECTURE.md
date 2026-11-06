@@ -66,6 +66,11 @@ every CPU core. Materials that cannot be found render as Hammer's pink and black
 
 ## Drawing
 
+Each of the four viewport slots shows a `ViewMode`: 3D Textured, 3D Wireframe, or the 2D
+Top, Front or Side view, switched by clicking the slot's label. 3D slots share the one
+camera; 2D slots showing the same view share its pan and zoom. MCP tools name viewports
+`camera`, `top`, `front` and `side` and act on the first slot showing that view.
+
 All four viewports are drawn by `Renderer3D` with wgpu, using the device eframe already
 created, into their own offscreen images. The window shows those images through egui, and
 MCP screenshots read the same images back, so they match and work while the window is
@@ -79,7 +84,12 @@ changes, never for selection changes or camera moves:
 - The camera's faces are fanned into triangles with Source's texture coordinates
   (`point · axis / scale + offset`, divided by the texture size), shaded by direction like
   Hammer's textured mode, and grouped into 2048-unit chunks. Each frame, chunks whose
-  bounds are outside the view frustum are skipped.
+  bounds are outside the view frustum are skipped. Faces are one-sided, wound
+  counter-clockwise from outside with back faces culled, so brushes look solid from
+  outside and open from inside, as in Hammer.
+- Materials carry their alpha mode from the VMT: `$alphatest` faces are cut out in the
+  shader at `$alphatestreference`, and `$translucent` faces (or `$alpha` below 1) are kept
+  out of the chunks, sorted back to front each frame and blended without writing depth.
 - The 2D views share one buffer of every brush edge in world space; each view only sets an
   orthographic matrix, so panning and zooming cost almost nothing.
 - The selection, its red outline and tool previews are small and rebuilt every frame so
@@ -120,6 +130,7 @@ Tools:
 | `create_block` | Box brush between two corners, like the Block tool |
 | `undo`, `redo` | Step the shared history |
 | `set_grid`, `center_views` | Grid size and framing |
+| `set_viewport_type` | Switch a viewport slot between 3D and 2D types |
 | `set_camera`, `set_view_2d` | Aim the 3D camera, pan and zoom the 2D views |
 | `screenshot` | PNG of one or all viewports, rendered offscreen |
 | `send_input` | Key presses, clicks and drags fed into the window as if a user made them |

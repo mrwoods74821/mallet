@@ -40,7 +40,8 @@ These follow Hammer's defaults.
 | Ctrl+E / Ctrl+Shift+E | Centre 2D views / 3D view on the map |
 | Mouse wheel | Zoom a 2D view around the cursor, or move the camera forward |
 | Middle-drag or Space+drag | Pan a 2D view |
-| Z | Toggle mouselook in the 3D view (Escape leaves it) |
+| Z | Toggle mouselook in the 3D view (Escape leaves it); the cursor stays in the view and returns afterwards |
+| Click a viewport's label | Switch that viewport between 3D Textured, 3D Wireframe and the 2D Top, Front and Side views |
 | W A S D, arrow keys | Move and turn the 3D camera |
 
 View > Net Graph toggles a frame timing overlay in the 3D view's bottom-right corner:
