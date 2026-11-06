@@ -3,6 +3,8 @@
 //! Pass a `.vmf` or `.mallet` path as the first argument to open it on start, or drop one onto
 //! the window. When Mallet is already running, a map passed this way opens in a tab of that
 //! Mallet instead, which is what double-clicking a map in Explorer does.
+//! The window always opens centred on the main monitor, keeping the size and maximized state
+//! it had when Mallet last closed.
 //! AI agents can drive the editor through its MCP server; see `mcp`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -63,6 +65,7 @@ fn main() -> eframe::Result {
     let app_id = config::app_folder();
     let options = eframe::NativeOptions {
         persist_window: true,
+        centered: true,
         viewport: egui::ViewportBuilder::default()
             .with_title("Mallet")
             .with_app_id(app_id.clone())
