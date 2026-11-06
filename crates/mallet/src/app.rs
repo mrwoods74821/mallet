@@ -16,9 +16,10 @@ use crate::config::{self, Config};
 use crate::render3d::{CameraStyle, Renderer3D};
 use crate::editor::{self, Editor, SelectMode, Tool, ViewMode, VIEWPORT_GAP};
 use crate::keymap::{Action, KeyMap};
-use crate::netgraph::NetGraph;
+use crate::netgraph::{NetGraph, NetGraphExtra};
 use crate::scene::Remap;
 use crate::view2d::{Axis2D, Handle, View2D};
+use crate::view3d::Camera3D;
 use crate::{mcp, tools};
 
 /// Port the MCP server listens on unless `MALLET_MCP_PORT` says otherwise.
@@ -229,6 +230,10 @@ impl MalletApp {
                     if ui.checkbox(&mut show_net_graph, "Net Graph").clicked() {
                         ui.close_menu();
                     }
+                    ui.horizontal(|ui| {
+                        ui.label("3D draw distance");
+                        ui.add(egui::Slider::new(&mut editor.camera.far, 1024.0..=65536.0).logarithmic(true).integer());
+                    });
                     ui.separator();
                     menu_item(ui, &self.keymap, "Smaller Grid", Action::GridSmaller, &mut chosen);
                     menu_item(ui, &self.keymap, "Larger Grid", Action::GridLarger, &mut chosen);
@@ -377,12 +382,17 @@ impl MalletApp {
                 }
             }
         }
-        if response.clicked_by(PointerButton::Primary) && editor.tool == Tool::Select && !editor.camera.mouse_look() {
-            if let Some(position) = pointer.position {
-                let (origin, direction) = editor.camera.ray(rect, position);
-                let hit = editor.scene.pick_ray(origin, direction);
-                pick(editor, hit, pointer.modifiers);
-            }
+        let looking = editor.camera.mouse_look();
+        let clicked = if looking {
+            ui.input(|input| input.pointer.primary_pressed())
+        } else {
+            response.clicked_by(PointerButton::Primary)
+        };
+        let aim = if looking { Some(rect.center()) } else { pointer.position };
+        if let (true, Tool::Select, Some(aim)) = (clicked, editor.tool, aim) {
+            let (origin, direction) = editor.camera.ray(rect, aim);
+            let hit = editor.scene.pick_ray(origin, direction);
+            pick(editor, hit, pointer.modifiers);
         }
         let active = response.hovered() || moving;
         let painter = ui.painter_at(rect);
@@ -398,9 +408,17 @@ impl MalletApp {
                 };
                 let color = if active { egui::Color32::WHITE } else { egui::Color32::GRAY };
                 canvas.label(rect.left_top() + egui::vec2(6.0, 4.0), label, color);
+                Camera3D::draw_crosshair(&painter, rect);
                 if self.show_net_graph && style == CameraStyle::Textured {
-                    let stats = editor.gpu.as_ref().map(|gpu| gpu.stats).unwrap_or_default();
-                    self.net_graph.draw(&painter, rect, &stats);
+                    let extra = editor.gpu.as_ref().map(|gpu| NetGraphExtra {
+                        stats: gpu.stats,
+                        reused: gpu.reused.iter().filter(|reused| **reused).count(),
+                        loading: gpu.textures_loading(),
+                    });
+                    self.net_graph.draw(&painter, rect, &extra.unwrap_or_default());
+                }
+                if editor.gpu.as_ref().is_some_and(|gpu| gpu.textures_loading() > 0) {
+                    ctx.request_repaint_after(Duration::from_millis(50));
                 }
             }
             None => editor.camera.draw(canvas, rect, &editor.scene, active, &editor.display_overlay()),

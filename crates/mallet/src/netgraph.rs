@@ -8,9 +8,19 @@ use eframe::egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
 
 use crate::render3d::RenderStats;
 
+/// What the renderer reports for the overlay besides frame times.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NetGraphExtra {
+    pub stats: RenderStats,
+    /// Viewports that showed their previous image instead of drawing again.
+    pub reused: usize,
+    /// Materials still loading in the background.
+    pub loading: usize,
+}
+
 /// How many recent frames the graph shows.
 const HISTORY: usize = 120;
-const PANEL_SIZE: Vec2 = Vec2::new(236.0, 96.0);
+const PANEL_SIZE: Vec2 = Vec2::new(236.0, 110.0);
 const MARGIN: f32 = 6.0;
 const GRAPH_HEIGHT: f32 = 40.0;
 /// Frame time the graph's full height stands for, in milliseconds.
@@ -45,7 +55,8 @@ impl NetGraph {
     ///
     /// The frame rate counts only frames drawn back to back, because the editor redraws
     /// only when something changes. "max fps" is what the CPU time alone would allow.
-    pub fn draw(&self, painter: &Painter, viewport: Rect, stats: &RenderStats) {
+    pub fn draw(&self, painter: &Painter, viewport: Rect, extra: &NetGraphExtra) {
+        let stats = &extra.stats;
         let panel = Rect::from_min_size(viewport.max - PANEL_SIZE - Vec2::splat(MARGIN), PANEL_SIZE);
         if !viewport.contains_rect(panel) {
             return;
@@ -68,6 +79,11 @@ impl NetGraph {
                 stats.chunks,
                 thousands(stats.triangles_drawn)
             ),
+            if extra.loading > 0 {
+                format!("reused {}/4   loading {} textures", extra.reused, extra.loading)
+            } else {
+                format!("reused {}/4", extra.reused)
+            },
         ];
         for (row, line) in lines.into_iter().enumerate() {
             shadowed_text(painter, left + Vec2::new(0.0, 14.0 * row as f32), line);

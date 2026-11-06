@@ -226,20 +226,27 @@ impl Scene {
         self.meshes.iter().filter_map(|mesh| mesh.owner).collect()
     }
 
-    /// Picks what is under a 2D view point: the smallest mesh whose projected bounds,
-    /// grown by `tolerance` world units, contain it.
+    /// Picks what is under a 2D view point the way Hammer does: a brush's centre cross
+    /// first, then its outline. Clicking empty space inside a brush picks nothing, so a
+    /// selection rectangle can start there. Among several hits the smallest brush wins.
+    /// `tolerance` is how close, in world units, the point must be.
     pub fn pick_2d(&self, axis: Axis2D, point: DVec2, tolerance: f64) -> Option<Owner> {
-        self.meshes
-            .iter()
-            .filter_map(|mesh| {
-                let owner = mesh.owner?;
-                let min = axis.project(mesh.bounds.min) - DVec2::splat(tolerance);
-                let max = axis.project(mesh.bounds.max) + DVec2::splat(tolerance);
-                let inside = point.cmpge(min).all() && point.cmple(max).all();
-                inside.then(|| (owner, (max - min).x * (max - min).y))
-            })
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(owner, _)| owner)
+        let smallest = |hits: &mut dyn Iterator<Item = &WireMesh>| {
+            hits.filter_map(|mesh| Some((mesh.owner?, projected_area(axis, &mesh.bounds))))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(owner, _)| owner)
+        };
+        let on_centre = |mesh: &&WireMesh| (axis.project(mesh.bounds.center()) - point).abs().max_element() <= tolerance;
+        let on_outline = |mesh: &&WireMesh| {
+            let min = axis.project(mesh.bounds.min) - DVec2::splat(tolerance);
+            let max = axis.project(mesh.bounds.max) + DVec2::splat(tolerance);
+            point.cmpge(min).all()
+                && point.cmple(max).all()
+                && mesh.edges.iter().any(|[a, b]| {
+                    segment_distance(point, axis.project(*a), axis.project(*b)) <= tolerance
+                })
+        };
+        smallest(&mut self.meshes.iter().filter(on_centre)).or_else(|| smallest(&mut self.meshes.iter().filter(on_outline)))
     }
 
     /// Picks the nearest mesh hit by a ray.
@@ -267,6 +274,19 @@ impl Scene {
         }
         inside.difference(&outside).copied().collect()
     }
+}
+
+fn projected_area(axis: Axis2D, bounds: &Bounds) -> f64 {
+    let size = axis.project(bounds.size());
+    size.x * size.y
+}
+
+/// Shortest distance from a point to a line segment.
+fn segment_distance(point: DVec2, a: DVec2, b: DVec2) -> f64 {
+    let along = b - a;
+    let length = along.length_squared();
+    let t = if length > 0.0 { ((point - a).dot(along) / length).clamp(0.0, 1.0) } else { 0.0 };
+    point.distance(a + along * t)
 }
 
 /// Distance along the ray to where it enters a convex volume, or `None` on a miss.

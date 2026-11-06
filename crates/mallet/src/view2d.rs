@@ -12,6 +12,10 @@ const MAX_SCALE: f64 = 32.0;
 /// Grid lines closer than this many pixels are thinned out by doubling their spacing.
 const MIN_GRID_PIXELS: f64 = 4.0;
 const MAX_GRID_LINES: f64 = 4000.0;
+/// Half the size, in pixels, of the cross marking each brush's centre.
+const CROSS_PIXELS: f64 = 3.0;
+/// Brushes smaller than this on screen, in pixels, get no centre cross.
+const CROSS_MIN_PIXELS: f64 = 10.0;
 /// Scroll distance egui reports for one mouse wheel notch.
 const POINTS_PER_NOTCH: f64 = 50.0;
 const ZOOM_PER_NOTCH: f64 = 1.2;
@@ -224,10 +228,38 @@ impl View2D {
             self.draw_edges(canvas, rect, &mesh.edges, remap.as_ref(), color);
         }
 
+        for ([a, b], color) in self.centre_crosses(rect, scene, overlay) {
+            canvas.lines(&[[self.to_screen(rect, a), self.to_screen(rect, b)]], color);
+        }
         if let Some(block) = &overlay.block {
             self.draw_edges(canvas, rect, &box_edges(block), None, TOOL_COLOR);
         }
         self.draw_overlay(canvas, rect, overlay, active);
+    }
+
+    /// The small × Hammer draws at the centre of each brush and point entity in view,
+    /// as 2D world-space segments with colours. Clicking a cross selects its brush.
+    /// Brushes too small on screen to tell apart get none.
+    pub fn centre_crosses(&self, rect: Rect, scene: &Scene, overlay: &Overlay) -> Vec<([DVec2; 2], Color32)> {
+        let view_min = self.to_world(rect, rect.left_bottom());
+        let view_max = self.to_world(rect, rect.right_top());
+        let arm = CROSS_PIXELS / self.scale;
+        let mut crosses = Vec::new();
+        for mesh in &scene.meshes {
+            let (color, remap) = mesh.appearance(overlay);
+            let bounds = mesh.mapped_bounds(remap.as_ref());
+            let (min, max) = (self.axis.project(bounds.min), self.axis.project(bounds.max));
+            if (max - min).max_element() * self.scale < CROSS_MIN_PIXELS {
+                continue;
+            }
+            let centre = (min + max) * 0.5;
+            if centre.cmplt(view_min).any() || centre.cmpgt(view_max).any() {
+                continue;
+            }
+            crosses.push(([centre - DVec2::splat(arm), centre + DVec2::splat(arm)], color));
+            crosses.push(([centre + DVec2::new(-arm, arm), centre + DVec2::new(arm, -arm)], color));
+        }
+        crosses
     }
 
     /// Draws what sits on top of the map: the resize handles, this view's selection

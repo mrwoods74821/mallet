@@ -694,6 +694,10 @@ impl Editor {
         let size = self.slot_pixels(slot);
         let gpu = self.gpu.as_mut()?;
         gpu.render(slot, style, &self.scene, &overlay, &self.camera, size, self.materials.as_mut());
+        if gpu.textures_loading() > 0 {
+            gpu.finish_loading();
+            gpu.render(slot, style, &self.scene, &overlay, &self.camera, size, self.materials.as_mut());
+        }
         let (width, height, rgba) = gpu.read_pixels(slot)?;
         PixmapCanvas::from_rgba(width, height, rgba)
     }

@@ -194,7 +194,8 @@ pub fn definitions() -> Value {
                 "position": vec3,
                 "yaw": { "type": "number", "description": "Degrees." },
                 "pitch": { "type": "number", "description": "Degrees, clamped to -89..89." },
-                "look_at": { "allOf": [vec3], "description": "Aim at this point after moving; overrides yaw and pitch." }
+                "look_at": { "allOf": [vec3], "description": "Aim at this point after moving; overrides yaw and pitch." },
+                "draw_distance": { "type": "number", "description": "How far the 3D view draws, like Hammer's back clipping plane; default 8192." }
             }),
             &[],
         ),
@@ -472,6 +473,7 @@ fn status_json(editor: &Editor) -> Value {
             "yaw": editor.camera.yaw,
             "pitch": editor.camera.pitch,
             "fov": editor.camera.fov,
+            "draw_distance": editor.camera.far,
         },
         "views_2d": views,
         "can_undo": history.is_some_and(|history| history.can_undo()),
@@ -578,6 +580,9 @@ fn set_camera(editor: &mut Editor, args: &Value) -> Result<ToolResult, String> {
     if let Some(pitch) = optional_number(args, "pitch")? {
         camera.pitch = pitch.clamp(-MAX_PITCH, MAX_PITCH);
     }
+    if let Some(distance) = optional_number(args, "draw_distance")? {
+        camera.far = distance.clamp(256.0, 1_048_576.0);
+    }
     if let Some(target) = optional_numbers::<3>(args, "look_at")? {
         let direction = DVec3::from_array(target) - camera.position;
         if direction.length_squared() > 0.0 {
@@ -593,6 +598,7 @@ fn set_camera(editor: &mut Editor, args: &Value) -> Result<ToolResult, String> {
         "position": camera.position.to_array(),
         "yaw": camera.yaw,
         "pitch": camera.pitch,
+        "draw_distance": camera.far,
     })))
 }
 

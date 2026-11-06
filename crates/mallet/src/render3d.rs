@@ -8,12 +8,14 @@
 //! view costs almost nothing on the CPU.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::mpsc;
 use std::ops::Range;
 
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 use eframe::wgpu::{self, util::DeviceExt};
 use glam::{DVec3, Mat4, Vec3, Vec4};
-use mallet_content::{parallel_map, AlphaMode, Material, Materials};
+use mallet_content::{parallel_map, AlphaMode, MaterialLoader, Materials};
 
 use crate::scene::{box_edges, Overlay, Owner, Remap, Scene, SceneFace, WireMesh, HANDLE_COLOR, SELECTED_COLOR, TOOL_COLOR};
 use crate::view2d::View2D;
@@ -22,7 +24,6 @@ use crate::view3d::Camera3D;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const NEAR: f32 = 1.0;
-const FAR: f32 = 65536.0;
 /// Texture size assumed for texture coordinates when a material cannot be found.
 const MISSING_TEXTURE_SIZE: f32 = 128.0;
 /// How strongly selected faces are tinted red.
@@ -32,7 +33,7 @@ const LIGHT_DIRECTION: DVec3 = DVec3::new(0.3, 0.5, 1.0);
 /// Key for the plain white texture used by point entity boxes.
 const WHITE_KEY: &str = "";
 /// Side length of the world cubes faces are grouped into for culling.
-const CHUNK_SIZE: f64 = 2048.0;
+const CHUNK_SIZE: f64 = 1024.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -140,6 +141,13 @@ pub struct RenderStats {
     pub triangles_drawn: usize,
 }
 
+/// A texture decoded and mip-mapped on a worker thread, ready to upload: the mip levels,
+/// the texture's nominal size and its alpha mode.
+type Prepared = (Vec<Image>, (f32, f32), AlphaMode);
+
+/// A batch of textures being loaded in the background.
+type Incoming = mpsc::Receiver<Vec<(String, Option<Prepared>)>>;
+
 /// Renders the camera viewport and the three 2D viewports with wgpu.
 pub struct Renderer3D {
     device: wgpu::Device,
@@ -155,6 +163,18 @@ pub struct Renderer3D {
     /// Uploaded textures by material key; `None` when the material could not be loaded.
     textures: HashMap<String, Option<GpuTexture>>,
     missing: GpuTexture,
+    /// Flat grey stand-in drawn while a material's texture is still loading.
+    loading_texture: GpuTexture,
+    /// Materials being loaded in the background, and the batches on their way.
+    loading: HashSet<String>,
+    incoming: Vec<Incoming>,
+    /// Counts texture uploads, so cached viewport images know when to redraw.
+    textures_version: u64,
+    /// What each slot's image was last drawn from; an unchanged signature means the image
+    /// can be shown again without drawing.
+    signatures: [Option<u64>; 4],
+    /// Which slots reused their image in their latest draw.
+    pub reused: [bool; 4],
     /// Every face, cached until the geometry changes.
     faces: Option<StaticFaces>,
     /// Every edge, cached until the geometry changes; shared by the 2D views.
@@ -258,6 +278,7 @@ impl Renderer3D {
         };
         let missing = upload(&checkerboard(), MISSING_TEXTURE_SIZE, MISSING_TEXTURE_SIZE, AlphaMode::Opaque);
         let white = upload(&Image::solid(Color32::WHITE), 1.0, 1.0, AlphaMode::Opaque);
+        let loading_texture = upload(&Image::solid(Color32::from_gray(90)), MISSING_TEXTURE_SIZE, MISSING_TEXTURE_SIZE, AlphaMode::Opaque);
         Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -271,6 +292,12 @@ impl Renderer3D {
             sampler,
             textures: HashMap::from([(WHITE_KEY.to_owned(), Some(white))]),
             missing,
+            loading_texture,
+            loading: HashSet::new(),
+            incoming: Vec::new(),
+            textures_version: 0,
+            signatures: [None; 4],
+            reused: [false; 4],
             faces: None,
             edges: None,
             textures_checked: 0,
@@ -282,8 +309,54 @@ impl Renderer3D {
     /// Forgets every uploaded texture, for example after the game folder changed.
     pub fn clear_textures(&mut self) {
         self.textures.retain(|key, _| key == WHITE_KEY);
+        self.loading.clear();
+        self.incoming.clear();
         self.faces = None;
         self.textures_checked = 0;
+        self.textures_version += 1;
+    }
+
+    /// How many materials are still loading in the background.
+    pub fn textures_loading(&self) -> usize {
+        self.loading.len()
+    }
+
+    /// Waits for every background texture load and uploads the results, so a screenshot
+    /// shows real textures instead of loading placeholders.
+    pub fn finish_loading(&mut self) {
+        for batch in std::mem::take(&mut self.incoming) {
+            if let Ok(results) = batch.recv() {
+                self.upload_results(results);
+            }
+        }
+    }
+
+    /// Uploads whatever background loads have finished, without waiting for the rest.
+    fn poll_loading(&mut self) {
+        let mut pending = Vec::new();
+        for batch in std::mem::take(&mut self.incoming) {
+            match batch.try_recv() {
+                Ok(results) => self.upload_results(results),
+                Err(mpsc::TryRecvError::Empty) => pending.push(batch),
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+        self.incoming = pending;
+        if self.incoming.is_empty() {
+            self.loading.clear();
+        }
+    }
+
+    fn upload_results(&mut self, results: Vec<(String, Option<Prepared>)>) {
+        for (key, prepared) in results {
+            let texture = prepared.map(|(levels, size, alpha)| {
+                upload(&self.device, &self.queue, &self.texture_layout, &self.sampler, &levels, size, alpha)
+            });
+            self.loading.remove(&key);
+            self.textures.insert(key, texture);
+        }
+        self.faces = None;
+        self.textures_version += 1;
     }
 
     /// Draws the scene from the camera into viewport slot `slot`'s image of `size`
@@ -308,6 +381,20 @@ impl Renderer3D {
     ) -> (&wgpu::TextureView, bool) {
         let size = [size[0].max(1), size[1].max(1)];
         let recreated = ensure_target(&self.device, &self.uniform_layout, &mut self.targets[slot], size, true);
+        self.poll_loading();
+        let signature = signature(|hasher| {
+            (slot, style == CameraStyle::Textured, size).hash(hasher);
+            (scene.geometry_generation, scene.selection_generation, self.textures_version).hash(hasher);
+            for value in [camera.position.x, camera.position.y, camera.position.z, camera.yaw, camera.pitch, camera.fov, camera.far] {
+                value.to_bits().hash(hasher);
+            }
+            format!("{overlay:?}").hash(hasher);
+        });
+        self.reused[slot] = !recreated && self.signatures[slot] == Some(signature);
+        if self.reused[slot] {
+            return (&self.targets[slot].as_ref().expect("target exists").color_view, false);
+        }
+        self.signatures[slot] = Some(signature);
         if style == CameraStyle::Textured {
             if self.textures_checked != scene.geometry_generation {
                 self.load_textures(scene, materials);
@@ -484,6 +571,19 @@ impl Renderer3D {
     ) -> (&wgpu::TextureView, bool) {
         let pixels = [pixels[0].max(1), pixels[1].max(1)];
         let recreated = ensure_target(&self.device, &self.uniform_layout, &mut self.targets[slot], pixels, false);
+        let signature = signature(|hasher| {
+            (slot, view.axis.axes(), pixels).hash(hasher);
+            (scene.geometry_generation, scene.selection_generation).hash(hasher);
+            for value in [view.center.x, view.center.y, view.scale, grid, f64::from(points.x), f64::from(points.y)] {
+                value.to_bits().hash(hasher);
+            }
+            format!("{overlay:?}").hash(hasher);
+        });
+        self.reused[slot] = !recreated && self.signatures[slot] == Some(signature);
+        if self.reused[slot] {
+            return (&self.targets[slot].as_ref().expect("target exists").color_view, false);
+        }
+        self.signatures[slot] = Some(signature);
         self.ensure_edges(scene);
 
         let local = Rect::from_min_size(Pos2::ZERO, points);
@@ -496,6 +596,9 @@ impl Renderer3D {
             for [a, b] in view.handle_outline(handles) {
                 push_edges(&mut over, &[[view.axis.lift(a), view.axis.lift(b)]], None, HANDLE_COLOR);
             }
+        }
+        for ([a, b], color) in view.centre_crosses(local, scene, overlay) {
+            push_edges(&mut over, &[[view.axis.lift(a), view.axis.lift(b)]], None, color);
         }
         for mesh in scene.meshes.iter().filter(|mesh| mesh.selected) {
             push_edges(&mut over, &mesh.edges, overlay.transform.as_ref(), SELECTED_COLOR);
@@ -578,7 +681,8 @@ impl Renderer3D {
         Some((width, height, pixels))
     }
 
-    /// Uploads the textures of every material in the scene that has not been seen yet.
+    /// Starts loading, on a background thread, every material in the scene that has not
+    /// been seen yet. Faces show a grey stand-in until their texture arrives.
     fn load_textures(&mut self, scene: &Scene, materials: Option<&mut Materials>) {
         let wanted: HashSet<String> = scene
             .meshes
@@ -591,33 +695,44 @@ impl Renderer3D {
         if wanted.is_empty() {
             return;
         }
-        let keys: Vec<String> = wanted.into_iter().collect();
-        let names: Vec<&str> = keys.iter().map(String::as_str).collect();
-        let loaded: Vec<Material> = match materials {
-            Some(materials) => materials.materials(&names),
-            None => Vec::new(),
-        };
-        let prepared = parallel_map(&loaded, |material| {
-            material.texture.as_ref().map(|image| {
-                let pixels = Image {
-                    width: image.pixel_width,
-                    height: image.pixel_height,
-                    rgba: image.rgba.clone(),
-                };
-                (mip_chain(&pixels), (image.width as f32, image.height as f32), material.alpha)
-            })
-        });
-        let mut prepared = prepared.into_iter();
-        for key in keys {
-            let texture = prepared.next().flatten().map(|(levels, size, alpha)| {
-                upload(&self.device, &self.queue, &self.texture_layout, &self.sampler, &levels, size, alpha)
-            });
-            self.textures.insert(key, texture);
+        let keys: Vec<String> = wanted.into_iter().filter(|key| !self.loading.contains(key)).collect();
+        if keys.is_empty() {
+            return;
         }
-        self.faces = None;
+        let Some(materials) = materials else {
+            for key in keys {
+                self.textures.insert(key, None);
+            }
+            return;
+        };
+        let loader: MaterialLoader = materials.loader();
+        self.loading.extend(keys.iter().cloned());
+        let (sender, receiver) = mpsc::channel();
+        self.incoming.push(receiver);
+        std::thread::Builder::new()
+            .name("mallet textures".to_owned())
+            .spawn(move || {
+                let prepared = parallel_map(&keys, |key| {
+                    let material = loader.load(key);
+                    let prepared = material.texture.as_ref().map(|image| {
+                        let pixels = Image {
+                            width: image.pixel_width,
+                            height: image.pixel_height,
+                            rgba: image.rgba.clone(),
+                        };
+                        (mip_chain(&pixels), (image.width as f32, image.height as f32), material.alpha)
+                    });
+                    (key.clone(), prepared)
+                });
+                let _ = sender.send(prepared);
+            })
+            .expect("texture loading thread could not start");
     }
 
     fn texture_for(&self, key: &str) -> &GpuTexture {
+        if self.loading.contains(key) {
+            return &self.loading_texture;
+        }
         self.textures.get(key).and_then(Option::as_ref).unwrap_or(&self.missing)
     }
 
@@ -712,6 +827,13 @@ impl Renderer3D {
             count: vertices.len() as u32,
         })
     }
+}
+
+/// Hashes whatever `feed` writes, to fingerprint what a viewport image was drawn from.
+fn signature(feed: impl FnOnce(&mut DefaultHasher)) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    feed(&mut hasher);
+    hasher.finish()
 }
 
 /// Adds line-list vertices for edges, optionally remapped, in one colour.
@@ -1046,11 +1168,13 @@ fn triangulate(
 }
 
 /// The combined view and projection matrix for the camera, with the camera's horizontal
-/// field of view.
+/// field of view. Nothing beyond the camera's draw distance is drawn, and the frustum's
+/// far plane makes culling skip it too.
 fn view_projection(camera: &Camera3D, aspect: f32) -> Mat4 {
+    let far = (camera.far as f32).max(NEAR * 2.0);
     let horizontal = (camera.fov as f32).to_radians();
     let vertical = 2.0 * ((horizontal * 0.5).tan() / aspect).atan();
-    let projection = Mat4::perspective_rh(vertical, aspect, NEAR, FAR);
+    let projection = Mat4::perspective_rh(vertical, aspect, NEAR, far);
     let view = Mat4::look_to_rh(camera.position.as_vec3(), camera.forward().as_vec3(), Vec3::Z);
     projection * view
 }

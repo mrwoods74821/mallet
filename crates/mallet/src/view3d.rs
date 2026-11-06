@@ -1,4 +1,4 @@
-//! The 3D camera viewport. Draws wireframes for now; textured rendering comes with wgpu.
+//! The 3D camera: movement, mouselook and the CPU wireframe fallback drawing.
 
 use eframe::egui::{self, Color32, Pos2, Rect, ViewportCommand};
 use glam::DVec3;
@@ -17,6 +17,14 @@ const LOOK_SENSITIVITY: f64 = 0.2;
 /// World units the camera moves per mouse wheel notch.
 const WHEEL_STEP: f64 = 64.0;
 const POINTS_PER_NOTCH: f64 = 50.0;
+/// How quickly the camera reaches its target speed, per second; higher is snappier.
+const ACCELERATION: f64 = 14.0;
+/// Below this speed, in units per second, a coasting camera stops.
+const STOP_SPEED: f64 = 1.0;
+/// The longest frame time used for movement, so a stalled frame cannot fling the camera.
+const MAX_FRAME_SECONDS: f64 = 0.05;
+/// Default draw distance in world units.
+pub const DEFAULT_DRAW_DISTANCE: f64 = 8192.0;
 /// Distance of the near clipping plane.
 const NEAR: f64 = 1.0;
 const MAX_PITCH: f64 = 89.0;
@@ -30,7 +38,13 @@ pub struct Camera3D {
     pub pitch: f64,
     /// Horizontal field of view in degrees.
     pub fov: f64,
+    /// Draw distance: nothing farther away is drawn, like Hammer's back clipping plane.
+    pub far: f64,
     mouse_look: bool,
+    /// Current movement, eased towards what the movement keys ask for.
+    velocity: DVec3,
+    /// Raw mouse movement of the previous frame, for smoothing.
+    last_look: egui::Vec2,
 }
 
 impl Camera3D {
@@ -40,7 +54,10 @@ impl Camera3D {
             yaw: 45.0,
             pitch: -30.0,
             fov: 90.0,
+            far: DEFAULT_DRAW_DISTANCE,
             mouse_look: false,
+            velocity: DVec3::ZERO,
+            last_look: egui::Vec2::ZERO,
         }
     }
 
@@ -65,6 +82,7 @@ impl Camera3D {
 
     fn set_mouse_look(&mut self, ctx: &egui::Context, enabled: bool) {
         self.mouse_look = enabled;
+        self.last_look = egui::Vec2::ZERO;
         let grab = if enabled {
             egui::CursorGrab::Confined
         } else {
@@ -79,6 +97,11 @@ impl Camera3D {
     ///
     /// Input is only read while the viewport is hovered or mouselook is on, like Hammer,
     /// where Z toggles mouselook and Escape leaves it.
+    ///
+    /// To avoid jitter, movement uses the real time since the last frame, the camera eases
+    /// towards the speed the keys ask for instead of jumping to it, and raw mouse movement
+    /// is averaged with the previous frame's, like Source's `m_filter`, since raw mouse
+    /// data arrives in uneven bursts per frame.
     pub fn update(&mut self, ctx: &egui::Context, hovered: bool, keymap: &KeyMap) -> bool {
         if !hovered && !self.mouse_look {
             return false;
@@ -95,14 +118,20 @@ impl Camera3D {
 
         let mut active = self.mouse_look;
         ctx.input(|input| {
-            let dt = f64::from(input.stable_dt).min(0.1);
+            let dt = f64::from(input.unstable_dt).clamp(0.0, MAX_FRAME_SECONDS);
             if self.mouse_look {
-                for event in &input.events {
-                    if let egui::Event::MouseMoved(delta) = event {
-                        self.yaw -= f64::from(delta.x) * LOOK_SENSITIVITY;
-                        self.pitch -= f64::from(delta.y) * LOOK_SENSITIVITY;
-                    }
-                }
+                let raw: egui::Vec2 = input
+                    .events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::MouseMoved(delta) => Some(*delta),
+                        _ => None,
+                    })
+                    .fold(egui::Vec2::ZERO, |total, delta| total + delta);
+                let smoothed = (raw + self.last_look) * 0.5;
+                self.last_look = raw;
+                self.yaw -= f64::from(smoothed.x) * LOOK_SENSITIVITY;
+                self.pitch = (self.pitch - f64::from(smoothed.y) * LOOK_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH);
             }
 
             let turn = |positive: Action, negative: Action| {
@@ -119,17 +148,31 @@ impl Camera3D {
             let mut wish = DVec3::ZERO;
             wish += forward * turn(Action::MoveForward, Action::MoveBack);
             wish += right * turn(Action::StrafeRight, Action::StrafeLeft);
-            if wish != DVec3::ZERO {
-                self.position += wish.normalize() * MOVE_SPEED * dt;
+            let target = wish.normalize_or_zero() * MOVE_SPEED;
+            self.velocity += (target - self.velocity) * (ACCELERATION * dt).min(1.0);
+            if target == DVec3::ZERO && self.velocity.length() < STOP_SPEED {
+                self.velocity = DVec3::ZERO;
             }
+            self.position += self.velocity * dt;
 
             let scroll = f64::from(input.raw_scroll_delta.y);
             if (hovered || self.mouse_look) && scroll != 0.0 {
                 self.position += forward * WHEEL_STEP * scroll / POINTS_PER_NOTCH;
             }
-            active |= wish != DVec3::ZERO || yaw_input != 0.0 || pitch_input != 0.0;
+            active |= self.velocity != DVec3::ZERO || yaw_input != 0.0 || pitch_input != 0.0;
         });
         active
+    }
+
+    /// Draws the small crosshair at the centre of a 3D view. In mouselook, clicks select
+    /// what is under it.
+    pub fn draw_crosshair(painter: &egui::Painter, rect: Rect) {
+        let center = rect.center();
+        let arm = 5.0;
+        for (stroke, extra) in [(egui::Stroke::new(3.0_f32, Color32::from_black_alpha(160)), 1.0), (egui::Stroke::new(1.0_f32, Color32::WHITE), 0.0)] {
+            painter.line_segment([center - egui::vec2(arm + extra, 0.0), center + egui::vec2(arm + extra, 0.0)], stroke);
+            painter.line_segment([center - egui::vec2(0.0, arm + extra), center + egui::vec2(0.0, arm + extra)], stroke);
+        }
     }
 
     /// Whether mouselook is on.
