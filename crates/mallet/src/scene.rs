@@ -132,9 +132,11 @@ pub struct WireMesh {
 #[derive(Default)]
 pub struct Scene {
     pub meshes: Vec<WireMesh>,
-    /// Changes whenever the geometry or the selection changes, so renderers know when to
-    /// rebuild cached buffers.
-    pub generation: u64,
+    /// Changes whenever the geometry changes, so renderers know when to rebuild cached
+    /// buffers.
+    pub geometry_generation: u64,
+    /// Changes whenever the selection changes.
+    pub selection_generation: u64,
     pub bounds: Bounds,
     pub solid_count: usize,
     pub entity_count: usize,
@@ -147,7 +149,8 @@ impl Scene {
     /// entity's colour, matching Hammer's 2D views.
     pub fn build(vmf: &Vmf) -> Self {
         let mut scene = Self {
-            generation: next_generation(),
+            geometry_generation: next_generation(),
+            selection_generation: next_generation(),
             ..Self::default()
         };
         for entity in vmf.all_entities() {
@@ -206,7 +209,7 @@ impl Scene {
         for mesh in &mut self.meshes {
             mesh.selected = mesh.owner.is_some_and(|owner| selection.contains(&owner));
         }
-        self.generation = next_generation();
+        self.selection_generation = next_generation();
     }
 
     /// Bounds of every selected mesh; empty when nothing is selected.

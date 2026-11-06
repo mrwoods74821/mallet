@@ -1,18 +1,22 @@
-//! The textured 3D view, drawn with wgpu into an offscreen image.
+//! The viewports drawn with wgpu into offscreen images: the textured 3D camera view and
+//! the three 2D views.
 //!
-//! The same image is shown in the camera viewport and read back for MCP screenshots, so
-//! both always match. Faces are shaded by direction like Hammer's textured mode; selected
+//! The camera image is shown in the window and read back for MCP screenshots, so both
+//! always match. Faces are shaded by direction like Hammer's textured mode; selected
 //! brushes are tinted red with red outlines, and tool previews are drawn as lines on top.
+//! Geometry is cached on the GPU until it changes, so moving the camera or panning a 2D
+//! view costs almost nothing on the CPU.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use eframe::egui::Color32;
+use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 use eframe::wgpu::{self, util::DeviceExt};
-use glam::{DVec3, Mat4, Vec3};
+use glam::{DVec3, Mat4, Vec3, Vec4};
 use mallet_content::{parallel_map, Materials};
 
-use crate::scene::{box_edges, Overlay, Remap, Scene, SceneFace, WireMesh, SELECTED_COLOR, TOOL_COLOR};
+use crate::scene::{box_edges, Overlay, Remap, Scene, SceneFace, WireMesh, HANDLE_COLOR, SELECTED_COLOR, TOOL_COLOR};
+use crate::view2d::View2D;
 use crate::view3d::Camera3D;
 
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -27,6 +31,8 @@ const SELECTION_TINT: f32 = 0.4;
 const LIGHT_DIRECTION: DVec3 = DVec3::new(0.3, 0.5, 1.0);
 /// Key for the plain white texture used by point entity boxes.
 const WHITE_KEY: &str = "";
+/// Side length of the world cubes faces are grouped into for culling.
+const CHUNK_SIZE: f64 = 2048.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -51,44 +57,91 @@ struct GpuTexture {
     height: f32,
 }
 
-/// Faces in one vertex buffer, drawn in runs that share a texture.
-struct FaceMesh {
-    buffer: wgpu::Buffer,
-    batches: Vec<(String, Range<u32>)>,
+/// How a pipeline uses the depth buffer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Depth {
+    /// Normal 3D geometry: the nearest surface wins.
+    Test,
+    /// Drawn over geometry already at the same depth, for the selection tint.
+    Overdraw,
+    /// Always on top, in a pass that has a depth buffer.
+    Ignore,
+    /// For passes without a depth buffer.
+    None,
 }
 
+/// Faces in one vertex buffer, split into spatial chunks for culling, each drawn in runs
+/// that share a texture.
+struct FaceMesh {
+    buffer: wgpu::Buffer,
+    chunks: Vec<Chunk>,
+}
+
+/// The faces of the brushes whose centres fall in one cube of the world.
+struct Chunk {
+    min: Vec3,
+    max: Vec3,
+    batches: Vec<(String, Range<u32>)>,
+    triangles: usize,
+}
+
+/// Lines in one vertex buffer.
+struct LineMesh {
+    buffer: wgpu::Buffer,
+    count: u32,
+}
+
+/// An image a viewport is drawn into, with its own camera matrix.
 struct Target {
     size: [u32; 2],
     color: wgpu::Texture,
     color_view: wgpu::TextureView,
-    depth_view: wgpu::TextureView,
+    depth_view: Option<wgpu::TextureView>,
+    uniform_buffer: wgpu::Buffer,
+    uniform_group: wgpu::BindGroup,
 }
 
-/// Renders the camera viewport with wgpu.
+/// Draw counts from the latest camera frame, to show what culling saves.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderStats {
+    pub chunks: usize,
+    pub chunks_drawn: usize,
+    pub triangles_drawn: usize,
+}
+
+/// Renders the camera viewport and the three 2D viewports with wgpu.
 pub struct Renderer3D {
     device: wgpu::Device,
     queue: wgpu::Queue,
     face_pipeline: wgpu::RenderPipeline,
+    overdraw_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
-    uniform_buffer: wgpu::Buffer,
-    uniform_group: wgpu::BindGroup,
+    flat_line_pipeline: wgpu::RenderPipeline,
+    uniform_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     /// Uploaded textures by material key; `None` when the material could not be loaded.
     textures: HashMap<String, Option<GpuTexture>>,
     missing: GpuTexture,
-    static_mesh: Option<(u64, FaceMesh)>,
-    target: Option<Target>,
+    /// Every face, cached until the geometry changes.
+    faces: Option<(u64, FaceMesh)>,
+    /// Every edge, cached until the geometry changes; shared by the 2D views.
+    edges: Option<(u64, LineMesh)>,
+    /// The geometry generation whose materials have been loaded.
+    textures_checked: u64,
+    camera_target: Option<Target>,
+    view_targets: [Option<Target>; 3],
+    pub stats: RenderStats,
 }
 
 impl Renderer3D {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("mallet 3d shader"),
+            label: Some("mallet viewport shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("render3d.wgsl").into()),
         });
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("mallet 3d uniforms"),
+            label: Some("mallet uniforms"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX,
@@ -101,7 +154,7 @@ impl Renderer3D {
             }],
         });
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("mallet 3d texture"),
+            label: Some("mallet texture"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -121,22 +174,8 @@ impl Renderer3D {
                 },
             ],
         });
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mallet 3d uniforms"),
-            size: std::mem::size_of::<[[f32; 4]; 4]>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let uniform_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mallet 3d uniforms"),
-            layout: &uniform_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("mallet 3d sampler"),
+            label: Some("mallet sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
@@ -146,43 +185,39 @@ impl Renderer3D {
         });
 
         let face_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("mallet 3d faces"),
+            label: Some("mallet faces"),
             bind_group_layouts: &[&uniform_layout, &texture_layout],
             push_constant_ranges: &[],
         });
         let line_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("mallet 3d lines"),
+            label: Some("mallet lines"),
             bind_group_layouts: &[&uniform_layout],
             push_constant_ranges: &[],
         });
         let face_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Float32];
         let line_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
-        let face_pipeline = pipeline(
-            device,
-            &face_layout,
-            &shader,
-            ("vs_face", "fs_face"),
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<FaceVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &face_attributes,
-            },
-            wgpu::PrimitiveTopology::TriangleList,
-            true,
-        );
-        let line_pipeline = pipeline(
-            device,
-            &line_layout,
-            &shader,
-            ("vs_line", "fs_line"),
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<LineVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &line_attributes,
-            },
-            wgpu::PrimitiveTopology::LineList,
-            false,
-        );
+        let face_buffer = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<FaceVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &face_attributes,
+        };
+        let line_buffer = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<LineVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &line_attributes,
+        };
+        let faces = |depth| {
+            let topology = wgpu::PrimitiveTopology::TriangleList;
+            pipeline(device, &face_layout, &shader, ("vs_face", "fs_face"), face_buffer.clone(), topology, depth)
+        };
+        let lines = |depth| {
+            let topology = wgpu::PrimitiveTopology::LineList;
+            pipeline(device, &line_layout, &shader, ("vs_line", "fs_line"), line_buffer.clone(), topology, depth)
+        };
+        let face_pipeline = faces(Depth::Test);
+        let overdraw_pipeline = faces(Depth::Overdraw);
+        let line_pipeline = lines(Depth::Ignore);
+        let flat_line_pipeline = lines(Depth::None);
 
         let upload = |image: &Image, width, height| {
             upload(device, queue, &texture_layout, &sampler, &mip_chain(image), width, height)
@@ -193,27 +228,36 @@ impl Renderer3D {
             device: device.clone(),
             queue: queue.clone(),
             face_pipeline,
+            overdraw_pipeline,
             line_pipeline,
-            uniform_buffer,
-            uniform_group,
+            flat_line_pipeline,
+            uniform_layout,
             texture_layout,
             sampler,
             textures: HashMap::from([(WHITE_KEY.to_owned(), Some(white))]),
             missing,
-            static_mesh: None,
-            target: None,
+            faces: None,
+            edges: None,
+            textures_checked: 0,
+            camera_target: None,
+            view_targets: [None, None, None],
+            stats: RenderStats::default(),
         }
     }
 
     /// Forgets every uploaded texture, for example after the game folder changed.
     pub fn clear_textures(&mut self) {
         self.textures.retain(|key, _| key == WHITE_KEY);
-        self.static_mesh = None;
+        self.faces = None;
+        self.textures_checked = 0;
     }
 
     /// Draws the scene from the camera into a `width` × `height` image. Returns the
     /// image's view and whether the image was recreated, so callers holding a reference
     /// to the old one can refresh it.
+    ///
+    /// Static geometry comes from a cache split into chunks; chunks outside the camera's
+    /// view are skipped. The selection is drawn again on top, tinted, at its live position.
     pub fn render(
         &mut self,
         scene: &Scene,
@@ -223,81 +267,152 @@ impl Renderer3D {
         materials: Option<&mut Materials>,
     ) -> (&wgpu::TextureView, bool) {
         let size = [size[0].max(1), size[1].max(1)];
-        let recreated = self.ensure_target(size);
-        self.load_textures(scene, materials);
-
-        let up_to_date = self.static_mesh.as_ref().is_some_and(|(generation, _)| *generation == scene.generation);
-        if !up_to_date {
-            let unselected = scene.meshes.iter().filter(|mesh| !mesh.selected);
-            let mesh = self.face_mesh(unselected, None, 0.0);
-            self.static_mesh = Some((scene.generation, mesh));
+        let recreated = ensure_target(&self.device, &self.uniform_layout, &mut self.camera_target, size, true);
+        if self.textures_checked != scene.geometry_generation {
+            self.load_textures(scene, materials);
+            self.textures_checked = scene.geometry_generation;
+        }
+        if self.faces.as_ref().is_none_or(|(generation, _)| *generation != scene.geometry_generation) {
+            let mesh = self.face_mesh(scene.meshes.iter(), None, 0.0, true);
+            self.faces = Some((scene.geometry_generation, mesh));
         }
         let selected: Vec<&WireMesh> = scene.meshes.iter().filter(|mesh| mesh.selected).collect();
-        let dynamic = self.face_mesh(selected.iter().copied(), overlay.transform.as_ref(), SELECTION_TINT);
-        let lines = self.line_buffer(&selected, overlay);
+        let tinted = self.face_mesh(selected.iter().copied(), overlay.transform.as_ref(), SELECTION_TINT, false);
+        let mut outline = Vec::new();
+        for mesh in &selected {
+            push_edges(&mut outline, &mesh.edges, overlay.transform.as_ref(), SELECTED_COLOR);
+        }
+        if let Some(block) = &overlay.block {
+            push_edges(&mut outline, &box_edges(block), None, TOOL_COLOR);
+        }
+        let outline = self.line_mesh(&outline);
 
         let aspect = size[0] as f32 / size[1] as f32;
+        let matrix = view_projection(camera, aspect);
+        let planes = frustum_planes(matrix);
+        let target = self.camera_target.as_ref().expect("target was just created");
         self.queue
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&view_projection(camera, aspect).to_cols_array()));
+            .write_buffer(&target.uniform_buffer, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
 
-        let target = self.target.as_ref().expect("target was just created");
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("mallet 3d") });
+        let mut stats = RenderStats::default();
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("mallet camera") });
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("mallet 3d"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.color_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &target.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.face_pipeline);
-            pass.set_bind_group(0, &self.uniform_group, &[]);
-            let meshes = self.static_mesh.iter().map(|(_, mesh)| mesh).chain([&dynamic]);
-            for mesh in meshes {
+            let mut pass = begin_pass(&mut encoder, target);
+            pass.set_bind_group(0, &target.uniform_group, &[]);
+            if let Some((_, mesh)) = &self.faces {
+                pass.set_pipeline(&self.face_pipeline);
                 pass.set_vertex_buffer(0, mesh.buffer.slice(..));
-                for (key, range) in &mesh.batches {
-                    pass.set_bind_group(1, &self.texture_for(key).bind_group, &[]);
-                    pass.draw(range.clone(), 0..1);
+                stats.chunks = mesh.chunks.len();
+                for chunk in mesh.chunks.iter().filter(|chunk| box_visible(&planes, chunk.min, chunk.max)) {
+                    stats.chunks_drawn += 1;
+                    stats.triangles_drawn += chunk.triangles;
+                    for (key, range) in &chunk.batches {
+                        pass.set_bind_group(1, &self.texture_for(key).bind_group, &[]);
+                        pass.draw(range.clone(), 0..1);
+                    }
                 }
             }
-            if let Some((buffer, count)) = &lines {
+            pass.set_pipeline(&self.overdraw_pipeline);
+            pass.set_vertex_buffer(0, tinted.buffer.slice(..));
+            for (key, range) in tinted.chunks.iter().flat_map(|chunk| &chunk.batches) {
+                pass.set_bind_group(1, &self.texture_for(key).bind_group, &[]);
+                pass.draw(range.clone(), 0..1);
+            }
+            if let Some(lines) = &outline {
                 pass.set_pipeline(&self.line_pipeline);
-                pass.set_bind_group(0, &self.uniform_group, &[]);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..*count, 0..1);
+                pass.set_vertex_buffer(0, lines.buffer.slice(..));
+                pass.draw(0..lines.count, 0..1);
             }
         }
         self.queue.submit([encoder.finish()]);
-        (&self.target.as_ref().expect("target exists").color_view, recreated)
+        self.stats = stats;
+        (&self.camera_target.as_ref().expect("target exists").color_view, recreated)
     }
 
-    /// Copies the last rendered image back from the GPU as RGBA bytes, row by row.
-    pub fn read_pixels(&self) -> Option<(u32, u32, Vec<u8>)> {
-        let target = self.target.as_ref()?;
+    /// Draws one 2D view into an image of `pixels` size; `points` is the viewport's size
+    /// in layout points, which the view's zoom is measured in. Returns the image's view
+    /// and whether it was recreated.
+    ///
+    /// Brush edges come from a cache shared by all three views, so panning and zooming
+    /// only change a matrix. Handles' squares, the marquee and the label are left for the
+    /// caller to draw on top.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_2d(
+        &mut self,
+        index: usize,
+        view: &View2D,
+        points: Vec2,
+        pixels: [u32; 2],
+        scene: &Scene,
+        overlay: &Overlay,
+        grid: f64,
+    ) -> (&wgpu::TextureView, bool) {
+        let pixels = [pixels[0].max(1), pixels[1].max(1)];
+        let recreated = ensure_target(&self.device, &self.uniform_layout, &mut self.view_targets[index], pixels, false);
+        if self.edges.as_ref().is_none_or(|(generation, _)| *generation != scene.geometry_generation) {
+            let mut vertices = Vec::new();
+            for mesh in &scene.meshes {
+                push_edges(&mut vertices, &mesh.edges, None, mesh.color);
+            }
+            self.edges = self.line_mesh(&vertices).map(|mesh| (scene.geometry_generation, mesh));
+        }
+
+        let local = Rect::from_min_size(Pos2::ZERO, points);
+        let mut under = Vec::new();
+        for ([a, b], color) in view.grid_lines(local, grid) {
+            push_edges(&mut under, &[[view.axis.lift(a), view.axis.lift(b)]], None, color);
+        }
+        let mut over = Vec::new();
+        if let Some(handles) = &overlay.handles {
+            for [a, b] in view.handle_outline(handles) {
+                push_edges(&mut over, &[[view.axis.lift(a), view.axis.lift(b)]], None, HANDLE_COLOR);
+            }
+        }
+        for mesh in scene.meshes.iter().filter(|mesh| mesh.selected) {
+            push_edges(&mut over, &mesh.edges, overlay.transform.as_ref(), SELECTED_COLOR);
+        }
+        if let Some(block) = &overlay.block {
+            push_edges(&mut over, &box_edges(block), None, TOOL_COLOR);
+        }
+        let under = self.line_mesh(&under);
+        let over = self.line_mesh(&over);
+
+        let target = self.view_targets[index].as_ref().expect("target was just created");
+        let matrix = orthographic(view, points);
+        self.queue
+            .write_buffer(&target.uniform_buffer, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("mallet 2d") });
+        {
+            let mut pass = begin_pass(&mut encoder, target);
+            pass.set_pipeline(&self.flat_line_pipeline);
+            pass.set_bind_group(0, &target.uniform_group, &[]);
+            let static_edges = self.edges.as_ref().map(|(_, mesh)| mesh);
+            for lines in [under.as_ref(), static_edges, over.as_ref()].into_iter().flatten() {
+                pass.set_vertex_buffer(0, lines.buffer.slice(..));
+                pass.draw(0..lines.count, 0..1);
+            }
+        }
+        self.queue.submit([encoder.finish()]);
+        (&self.view_targets[index].as_ref().expect("target exists").color_view, recreated)
+    }
+
+    /// Copies the last rendered image of the camera (`None`) or of a 2D view (its index)
+    /// back from the GPU as RGBA bytes, row by row.
+    pub fn read_pixels(&self, view: Option<usize>) -> Option<(u32, u32, Vec<u8>)> {
+        let target = match view {
+            None => self.camera_target.as_ref()?,
+            Some(index) => self.view_targets.get(index)?.as_ref()?,
+        };
         let [width, height] = target.size;
         let row = width * 4;
         let padded_row = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mallet 3d readback"),
+            label: Some("mallet readback"),
             size: u64::from(padded_row * height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("mallet 3d readback") });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("mallet readback") });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &target.color,
@@ -337,46 +452,6 @@ impl Renderer3D {
         Some((width, height, pixels))
     }
 
-    fn ensure_target(&mut self, size: [u32; 2]) -> bool {
-        if self.target.as_ref().is_some_and(|target| target.size == size) {
-            return false;
-        }
-        let extent = wgpu::Extent3d {
-            width: size[0],
-            height: size[1],
-            depth_or_array_layers: 1,
-        };
-        let color = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("mallet 3d color"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: COLOR_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("mallet 3d depth"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        self.target = Some(Target {
-            size,
-            color_view: color.create_view(&wgpu::TextureViewDescriptor::default()),
-            depth_view: depth.create_view(&wgpu::TextureViewDescriptor::default()),
-            color,
-        });
-        true
-    }
-
     /// Uploads the textures of every material in the scene that has not been seen yet.
     fn load_textures(&mut self, scene: &Scene, materials: Option<&mut Materials>) {
         let wanted: HashSet<String> = scene
@@ -412,18 +487,38 @@ impl Renderer3D {
             });
             self.textures.insert(key, texture);
         }
-        self.static_mesh = None;
+        self.faces = None;
     }
 
     fn texture_for(&self, key: &str) -> &GpuTexture {
         self.textures.get(key).and_then(Option::as_ref).unwrap_or(&self.missing)
     }
 
-    fn face_mesh<'a>(&self, meshes: impl Iterator<Item = &'a WireMesh>, remap: Option<&Remap>, highlight: f32) -> FaceMesh {
-        let mut by_texture: HashMap<String, Vec<FaceVertex>> = HashMap::new();
+    /// Builds a vertex buffer for the faces of `meshes`. With `chunked`, brushes are
+    /// grouped by which world cube their centre is in, so whole chunks can be culled.
+    fn face_mesh<'a>(
+        &self,
+        meshes: impl Iterator<Item = &'a WireMesh>,
+        remap: Option<&Remap>,
+        highlight: f32,
+        chunked: bool,
+    ) -> FaceMesh {
+        type ChunkFaces = (Vec3, Vec3, HashMap<String, Vec<FaceVertex>>);
+        let mut chunks: HashMap<[i32; 3], ChunkFaces> = HashMap::new();
         for mesh in meshes {
+            let bounds = mesh.mapped_bounds(remap);
+            let cell = if chunked {
+                (bounds.center() / CHUNK_SIZE).floor().as_ivec3().to_array()
+            } else {
+                [0; 3]
+            };
+            let chunk = chunks
+                .entry(cell)
+                .or_insert_with(|| (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY), HashMap::new()));
+            chunk.0 = chunk.0.min(bounds.min.as_vec3());
+            chunk.1 = chunk.1.max(bounds.max.as_vec3());
             let tint = if mesh.faces.iter().any(|face| face.material.is_none()) {
-                let [r, g, b, _] = mesh.color.to_normalized_gamma_f32();
+                let [r, g, b, _] = egui::Rgba::from(mesh.color).to_array();
                 [r, g, b]
             } else {
                 [1.0, 1.0, 1.0]
@@ -431,58 +526,194 @@ impl Renderer3D {
             for face in &mesh.faces {
                 let key = face.material.as_deref().map_or_else(|| WHITE_KEY.to_owned(), material_key);
                 let texture = self.texture_for(&key);
-                let vertices = by_texture.entry(key).or_default();
-                triangulate(face, texture, tint, highlight, remap, vertices);
+                triangulate(face, texture, tint, highlight, remap, chunk.2.entry(key).or_default());
             }
         }
-        let mut keys: Vec<String> = by_texture.keys().cloned().collect();
-        keys.sort();
+
         let mut all = Vec::new();
-        let mut batches = Vec::with_capacity(keys.len());
-        for key in keys {
-            let vertices = &by_texture[&key];
-            let start = all.len() as u32;
-            all.extend_from_slice(vertices);
-            batches.push((key, start..all.len() as u32));
+        let mut built = Vec::with_capacity(chunks.len());
+        for (_, (min, max, by_texture)) in chunks {
+            let mut keys: Vec<String> = by_texture.keys().cloned().collect();
+            keys.sort();
+            let mut batches = Vec::with_capacity(keys.len());
+            let first = all.len();
+            for key in keys {
+                let start = all.len() as u32;
+                all.extend_from_slice(&by_texture[&key]);
+                batches.push((key, start..all.len() as u32));
+            }
+            built.push(Chunk {
+                min,
+                max,
+                batches,
+                triangles: (all.len() - first) / 3,
+            });
         }
         let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mallet 3d faces"),
+            label: Some("mallet faces"),
             contents: if all.is_empty() { &[0u8; 4] } else { bytemuck::cast_slice(&all) },
             usage: wgpu::BufferUsages::VERTEX,
         });
-        FaceMesh { buffer, batches }
+        FaceMesh { buffer, chunks: built }
     }
 
-    fn line_buffer(&self, selected: &[&WireMesh], overlay: &Overlay) -> Option<(wgpu::Buffer, u32)> {
-        let mut vertices = Vec::new();
-        let mut push = |edges: &[[DVec3; 2]], remap: Option<&Remap>, color: Color32| {
-            let color = color.to_normalized_gamma_f32();
-            for [a, b] in edges {
-                for point in [a, b] {
-                    let point = remap.map_or(*point, |remap| remap.apply(*point));
-                    vertices.push(LineVertex {
-                        position: point.as_vec3().to_array(),
-                        color,
-                    });
-                }
-            }
-        };
-        for mesh in selected {
-            push(&mesh.edges, overlay.transform.as_ref(), SELECTED_COLOR);
-        }
-        if let Some(block) = &overlay.block {
-            push(&box_edges(block), None, TOOL_COLOR);
-        }
+    fn line_mesh(&self, vertices: &[LineVertex]) -> Option<LineMesh> {
         if vertices.is_empty() {
             return None;
         }
         let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mallet 3d lines"),
-            contents: bytemuck::cast_slice(&vertices),
+            label: Some("mallet lines"),
+            contents: bytemuck::cast_slice(vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
-        Some((buffer, vertices.len() as u32))
+        Some(LineMesh {
+            buffer,
+            count: vertices.len() as u32,
+        })
     }
+}
+
+/// Adds line-list vertices for edges, optionally remapped, in one colour.
+fn push_edges(out: &mut Vec<LineVertex>, edges: &[[DVec3; 2]], remap: Option<&Remap>, color: Color32) {
+    let color = egui::Rgba::from(color).to_array();
+    for [a, b] in edges {
+        for point in [a, b] {
+            let point = remap.map_or(*point, |remap| remap.apply(*point));
+            out.push(LineVertex {
+                position: point.as_vec3().to_array(),
+                color,
+            });
+        }
+    }
+}
+
+/// Creates or resizes a viewport's image. Returns whether it was recreated.
+fn ensure_target(
+    device: &wgpu::Device,
+    uniform_layout: &wgpu::BindGroupLayout,
+    slot: &mut Option<Target>,
+    size: [u32; 2],
+    with_depth: bool,
+) -> bool {
+    if slot.as_ref().is_some_and(|target| target.size == size) {
+        return false;
+    }
+    let extent = wgpu::Extent3d {
+        width: size[0],
+        height: size[1],
+        depth_or_array_layers: 1,
+    };
+    let color = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mallet viewport color"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: COLOR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let depth_view = with_depth.then(|| {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("mallet viewport depth"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default())
+    });
+    let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("mallet viewport matrix"),
+        size: std::mem::size_of::<[[f32; 4]; 4]>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let uniform_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mallet viewport matrix"),
+        layout: uniform_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform_buffer.as_entire_binding(),
+        }],
+    });
+    *slot = Some(Target {
+        size,
+        color_view: color.create_view(&wgpu::TextureViewDescriptor::default()),
+        color,
+        depth_view,
+        uniform_buffer,
+        uniform_group,
+    });
+    true
+}
+
+fn begin_pass<'a>(encoder: &'a mut wgpu::CommandEncoder, target: &'a Target) -> wgpu::RenderPass<'a> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("mallet viewport"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &target.color_view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: target.depth_view.as_ref().map(|view| wgpu::RenderPassDepthStencilAttachment {
+            view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    })
+}
+
+/// The six clipping planes of a view-projection matrix, each as `normal.xyz, distance`,
+/// with normals pointing into the visible volume. wgpu's depth runs from 0 to 1.
+fn frustum_planes(matrix: Mat4) -> [Vec4; 6] {
+    let row = |index| matrix.row(index);
+    [
+        row(3) + row(0),
+        row(3) - row(0),
+        row(3) + row(1),
+        row(3) - row(1),
+        row(2),
+        row(3) - row(2),
+    ]
+}
+
+/// Whether any part of a box can be inside the frustum.
+fn box_visible(planes: &[Vec4; 6], min: Vec3, max: Vec3) -> bool {
+    planes.iter().all(|plane| {
+        let farthest = Vec3::select(plane.truncate().cmpge(Vec3::ZERO), max, min);
+        plane.truncate().dot(farthest) + plane.w >= 0.0
+    })
+}
+
+/// Maps a 2D view's visible area onto clip space: its two axes become x and y, and the
+/// depth axis is ignored.
+fn orthographic(view: &View2D, points: Vec2) -> Mat4 {
+    let [horizontal, vertical, _] = view.axis.axes();
+    let scale_x = (2.0 * view.scale / f64::from(points.x.max(1.0))) as f32;
+    let scale_y = (2.0 * view.scale / f64::from(points.y.max(1.0))) as f32;
+    let mut columns = [[0.0f32; 4]; 4];
+    columns[horizontal][0] = scale_x;
+    columns[vertical][1] = scale_y;
+    columns[3] = [
+        -(view.center.x as f32) * scale_x,
+        -(view.center.y as f32) * scale_y,
+        0.5,
+        1.0,
+    ];
+    Mat4::from_cols_array_2d(&columns)
 }
 
 /// Plain RGBA pixels.
@@ -672,8 +903,22 @@ fn pipeline(
     (vertex_entry, fragment_entry): (&str, &str),
     buffer: wgpu::VertexBufferLayout<'_>,
     topology: wgpu::PrimitiveTopology,
-    depth_test: bool,
+    depth: Depth,
 ) -> wgpu::RenderPipeline {
+    let depth_stencil = match depth {
+        Depth::None => None,
+        Depth::Test | Depth::Overdraw | Depth::Ignore => Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: depth != Depth::Ignore,
+            depth_compare: match depth {
+                Depth::Test => wgpu::CompareFunction::Less,
+                Depth::Overdraw => wgpu::CompareFunction::LessEqual,
+                _ => wgpu::CompareFunction::Always,
+            },
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+    };
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(vertex_entry),
         layout: Some(layout),
@@ -688,17 +933,7 @@ fn pipeline(
             cull_mode: None,
             ..Default::default()
         },
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: depth_test,
-            depth_compare: if depth_test {
-                wgpu::CompareFunction::Less
-            } else {
-                wgpu::CompareFunction::Always
-            },
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
+        depth_stencil,
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: shader,

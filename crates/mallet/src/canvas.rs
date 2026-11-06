@@ -70,18 +70,6 @@ impl PixmapCanvas {
         self.pixmap.fill(tiny_skia::Color::from_rgba8(r, g, b, a));
     }
 
-    /// Copies another canvas's image into this one with its top-left corner at `(x, y)`.
-    pub fn draw_canvas(&mut self, other: &PixmapCanvas, x: i32, y: i32) {
-        self.pixmap.draw_pixmap(
-            x,
-            y,
-            other.pixmap.as_ref(),
-            &PixmapPaint::default(),
-            Transform::identity(),
-            None,
-        );
-    }
-
     /// Encodes the image as PNG.
     pub fn encode_png(&self) -> Result<Vec<u8>, String> {
         self.pixmap.encode_png().map_err(|error| error.to_string())

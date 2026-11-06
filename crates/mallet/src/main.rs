@@ -13,6 +13,7 @@ mod editor;
 mod input;
 mod keymap;
 mod mcp;
+mod netgraph;
 mod render3d;
 mod scene;
 mod tools;

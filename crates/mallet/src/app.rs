@@ -16,6 +16,7 @@ use crate::config::{self, Config};
 use crate::render3d::Renderer3D;
 use crate::editor::{self, Editor, SelectMode, Tool, VIEWPORT_GAP};
 use crate::keymap::{Action, KeyMap};
+use crate::netgraph::NetGraph;
 use crate::scene::Remap;
 use crate::view2d::{Axis2D, Handle, View2D};
 use crate::{mcp, tools};
@@ -94,6 +95,11 @@ pub struct MalletApp {
     drag: Option<Drag>,
     /// The GPU camera image as registered with egui, once the 3D view has been drawn.
     camera_texture: Option<egui::TextureId>,
+    /// The GPU images of the top, front and side views as registered with egui.
+    view_textures: [Option<egui::TextureId>; 3],
+    /// Frame timing overlay in the camera viewport's bottom-right corner.
+    net_graph: NetGraph,
+    show_net_graph: bool,
 }
 
 impl MalletApp {
@@ -110,6 +116,9 @@ impl MalletApp {
             mcp_url: None,
             drag: None,
             camera_texture: None,
+            view_textures: [None; 3],
+            net_graph: NetGraph::default(),
+            show_net_graph: true,
         };
         app.start_mcp(&cc.egui_ctx);
         let mut editor = editor::lock(&app.editor);
@@ -185,10 +194,11 @@ impl MalletApp {
         }
     }
 
-    fn menu_bar(&self, ctx: &egui::Context, editor: &mut Editor) {
+    fn menu_bar(&mut self, ctx: &egui::Context, editor: &mut Editor) {
         let mut chosen = None;
         let mut save_as = false;
         let mut choose_game = false;
+        let mut show_net_graph = self.show_net_graph;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -216,6 +226,10 @@ impl MalletApp {
                     menu_item(ui, &self.keymap, "Center 2D Views", Action::CenterViews2D, &mut chosen);
                     menu_item(ui, &self.keymap, "Center 3D View", Action::CenterView3D, &mut chosen);
                     ui.separator();
+                    if ui.checkbox(&mut show_net_graph, "Net Graph").clicked() {
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     menu_item(ui, &self.keymap, "Smaller Grid", Action::GridSmaller, &mut chosen);
                     menu_item(ui, &self.keymap, "Larger Grid", Action::GridLarger, &mut chosen);
                 });
@@ -240,6 +254,7 @@ impl MalletApp {
         if choose_game {
             choose_game_dir(editor);
         }
+        self.show_net_graph = show_net_graph;
     }
 
     fn tool_bar(&self, ctx: &egui::Context, editor: &mut Editor) {
@@ -310,6 +325,7 @@ impl MalletApp {
             }
         }
         let active = response.hovered() || moving;
+        let camera_started = Instant::now();
         let painter = ui.painter_at(rects[0]);
         let canvas = &mut PainterCanvas(&painter);
         match frame.wgpu_render_state() {
@@ -320,13 +336,19 @@ impl MalletApp {
                 let label = if editor.materials.is_some() { "camera (textured)" } else { "camera (no game set)" };
                 let color = if active { egui::Color32::WHITE } else { egui::Color32::GRAY };
                 canvas.label(rects[0].left_top() + egui::vec2(6.0, 4.0), label, color);
+                if self.show_net_graph {
+                    let stats = editor.gpu.as_ref().map(|gpu| gpu.stats).unwrap_or_default();
+                    self.net_graph.draw(&painter, rects[0], &stats);
+                }
             }
             None => editor.camera.draw(canvas, rects[0], &editor.scene, active, &editor.display_overlay()),
         }
         if moving {
             ctx.request_repaint();
         }
+        editor.timings.camera_ms = elapsed_ms(camera_started);
 
+        let views_started = Instant::now();
         self.cursor = None;
         for index in 0..editor.views.len() {
             let rect = rects[index + 1];
@@ -339,12 +361,23 @@ impl MalletApp {
                     ctx.set_cursor_icon(icon);
                 }
             }
-            let canvas = &mut PainterCanvas(&ui.painter_at(rect));
-            view.draw(canvas, rect, &editor.scene, editor.grid, response.hovered(), &editor.display_overlay());
+            let painter = ui.painter_at(rect);
+            let canvas = &mut PainterCanvas(&painter);
+            let overlay = editor.display_overlay();
+            match frame.wgpu_render_state() {
+                Some(render_state) => {
+                    let texture = self.render_view(render_state, editor, index, rect);
+                    let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                    painter.image(texture, rect, full, egui::Color32::WHITE);
+                    view.draw_overlay(canvas, rect, &overlay, response.hovered());
+                }
+                None => view.draw(canvas, rect, &editor.scene, editor.grid, response.hovered(), &overlay),
+            }
             if let Some(position) = response.hover_pos() {
                 self.cursor = Some(snap(view.to_world(rect, position), editor.grid));
             }
         }
+        editor.timings.views_2d_ms = elapsed_ms(views_started);
     }
 
     /// Renders the textured camera view on the GPU and returns it as an egui texture.
@@ -355,20 +388,26 @@ impl MalletApp {
             .gpu
             .get_or_insert_with(|| Renderer3D::new(&render_state.device, &render_state.queue));
         let (view, recreated) = renderer.render(&editor.scene, &overlay, &editor.camera, size, editor.materials.as_mut());
-        let mut egui_renderer = render_state.renderer.write();
-        let filter = eframe::wgpu::FilterMode::Linear;
-        match self.camera_texture {
-            Some(id) if !recreated => id,
-            Some(id) => {
-                egui_renderer.update_egui_texture_from_wgpu_texture(&render_state.device, view, filter, id);
-                id
-            }
-            None => {
-                let id = egui_renderer.register_native_texture(&render_state.device, view, filter);
-                self.camera_texture = Some(id);
-                id
-            }
-        }
+        show_texture(render_state, &mut self.camera_texture, view, recreated)
+    }
+
+    /// Renders one 2D view on the GPU and returns it as an egui texture.
+    fn render_view(
+        &mut self,
+        render_state: &egui_wgpu::RenderState,
+        editor: &mut Editor,
+        index: usize,
+        rect: Rect,
+    ) -> egui::TextureId {
+        let overlay = editor.display_overlay();
+        let pixels = rect.size() * editor.pixels_per_point();
+        let pixels = [pixels.x.round() as u32, pixels.y.round() as u32];
+        let renderer = editor
+            .gpu
+            .get_or_insert_with(|| Renderer3D::new(&render_state.device, &render_state.queue));
+        let (view, recreated) =
+            renderer.render_2d(index, &editor.views[index], rect.size(), pixels, &editor.scene, &overlay, editor.grid);
+        show_texture(render_state, &mut self.view_textures[index], view, recreated)
     }
 
     /// Chooses the drag that a left-button press at `origin` starts with the active tool:
@@ -521,8 +560,12 @@ fn box_contains(axis: Axis2D, bounds: &Bounds, point: DVec2) -> bool {
 
 impl eframe::App for MalletApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let update_started = Instant::now();
         let shared = Arc::clone(&self.editor);
         let mut editor = editor::lock(&shared);
+        editor.timings.previous_frame_cpu_ms = frame.info().cpu_usage.map_or(0.0, |seconds| seconds * 1000.0);
+        let interval = ctx.input(|input| input.unstable_dt);
+        self.net_graph.record(editor.timings.previous_frame_cpu_ms, interval);
         self.handle_input(ctx, &mut editor);
         self.update_title(ctx, &editor);
         self.menu_bar(ctx, &mut editor);
@@ -531,6 +574,7 @@ impl eframe::App for MalletApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(egui::Color32::from_gray(30)))
             .show(ctx, |ui| self.viewports(ui, &mut editor, frame));
+        editor.timings.update_ms = elapsed_ms(update_started);
         editor.frames_drawn += 1;
     }
 
@@ -615,6 +659,34 @@ fn open_or_new(editor: &mut Editor, path: Option<PathBuf>) {
         editor.new_map();
         editor.message = failure;
     }
+}
+
+/// Registers a GPU image with egui the first time, and refreshes egui's reference when the
+/// image was recreated.
+fn show_texture(
+    render_state: &egui_wgpu::RenderState,
+    slot: &mut Option<egui::TextureId>,
+    view: &eframe::wgpu::TextureView,
+    recreated: bool,
+) -> egui::TextureId {
+    let mut egui_renderer = render_state.renderer.write();
+    let filter = eframe::wgpu::FilterMode::Nearest;
+    match *slot {
+        Some(id) if !recreated => id,
+        Some(id) => {
+            egui_renderer.update_egui_texture_from_wgpu_texture(&render_state.device, view, filter, id);
+            id
+        }
+        None => {
+            let id = egui_renderer.register_native_texture(&render_state.device, view, filter);
+            *slot = Some(id);
+            id
+        }
+    }
+}
+
+fn elapsed_ms(started: Instant) -> f32 {
+    started.elapsed().as_secs_f32() * 1000.0
 }
 
 fn snap(point: DVec2, grid: f64) -> DVec2 {

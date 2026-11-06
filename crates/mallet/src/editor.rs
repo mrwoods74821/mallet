@@ -82,6 +82,19 @@ impl ShotTarget {
     }
 }
 
+/// How long the parts of recent frames took, for finding slowdowns.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameTimings {
+    /// Time in the app's update for the latest frame.
+    pub update_ms: f32,
+    /// Time drawing the camera viewport in the latest frame.
+    pub camera_ms: f32,
+    /// Time drawing the three 2D viewports in the latest frame.
+    pub views_2d_ms: f32,
+    /// CPU time of the whole previous frame, including egui's tessellation and painting.
+    pub previous_frame_cpu_ms: f32,
+}
+
 /// Everything about the open map and how it is being viewed.
 pub struct Editor {
     pub document: Option<Document>,
@@ -103,6 +116,8 @@ pub struct Editor {
     pub input_queue: VecDeque<InputFrame>,
     /// Frames the window has finished, used to wait for synthetic input to take effect.
     pub frames_drawn: u64,
+    /// Where the time of recent frames went.
+    pub timings: FrameTimings,
     /// Textures from the configured game, when one is set.
     pub materials: Option<Materials>,
     /// The GPU renderer for the textured camera view, created once the window has a GPU.
@@ -135,6 +150,7 @@ impl Default for Editor {
             material: DEFAULT_MATERIAL.to_owned(),
             input_queue: VecDeque::new(),
             frames_drawn: 0,
+            timings: FrameTimings::default(),
             materials: None,
             gpu: None,
             last_block: DEFAULT_BLOCK,
@@ -506,6 +522,11 @@ impl Editor {
         self.materials.as_ref().map(|materials| materials.filesystem().game_dir())
     }
 
+    /// Physical pixels per layout point in the window.
+    pub fn pixels_per_point(&self) -> f32 {
+        self.pixels_per_point
+    }
+
     /// The size in physical pixels of the camera viewport.
     pub fn camera_pixels(&self) -> [u32; 2] {
         let size = self.viewport_rects[0].size() * self.pixels_per_point;
@@ -538,33 +559,58 @@ impl Editor {
 
     /// Renders viewports offscreen at their on-screen size and encodes them as PNG.
     ///
-    /// Uses the same drawing code as the window but does not need it to be visible.
-    /// Viewport labels are left out.
+    /// Uses the GPU renderer the window uses once it exists, so screenshots match the
+    /// window, and the CPU drawing code before that. Neither needs the window to be
+    /// visible. Viewport labels are left out.
     pub fn render_png(&mut self, target: ShotTarget) -> Result<Vec<u8>, String> {
-        if target == ShotTarget::Camera {
-            if let Some(camera) = self.render_camera_gpu() {
-                return camera.encode_png();
-            }
-        }
         if let Some(index) = target.index() {
-            return self.render_viewport(index)?.encode_png();
+            let (canvas, scale) = self.render_any(index)?;
+            if scale == 1.0 {
+                return canvas.encode_png();
+            }
+            let size = self.viewport_rects[index].size();
+            let mut scaled = canvas_for(size)?;
+            scaled.draw_canvas_scaled(&canvas, 0.0, 0.0, scale);
+            return scaled.encode_png();
         }
         let rects = self.viewport_rects;
         let area = rects[0].union(rects[3]);
         let mut canvas = canvas_for(area.size())?;
         canvas.fill_all(GAP_COLOR);
-        if let Some(camera) = self.render_camera_gpu() {
-            let offset = rects[0].min - area.min;
-            canvas.draw_canvas_scaled(&camera, offset.x, offset.y, 1.0 / self.pixels_per_point);
-        } else {
-            let offset = rects[0].min - area.min;
-            canvas.draw_canvas(&self.render_viewport(0)?, offset.x.round() as i32, offset.y.round() as i32);
-        }
-        for (index, rect) in rects.iter().enumerate().skip(1) {
+        for (index, rect) in rects.iter().enumerate() {
             let offset = rect.min - area.min;
-            canvas.draw_canvas(&self.render_viewport(index)?, offset.x.round() as i32, offset.y.round() as i32);
+            let (image, scale) = self.render_any(index)?;
+            canvas.draw_canvas_scaled(&image, offset.x.round(), offset.y.round(), scale);
         }
         canvas.encode_png()
+    }
+
+    /// Renders one viewport, on the GPU when possible, and returns it with the scale that
+    /// brings it to layout-point size.
+    fn render_any(&mut self, index: usize) -> Result<(PixmapCanvas, f32), String> {
+        let gpu_image = match index {
+            0 => self.render_camera_gpu().map(|image| (image, 1.0 / self.pixels_per_point)),
+            _ => self.render_view_gpu(index - 1).map(|image| (image, 1.0)),
+        };
+        match gpu_image {
+            Some(image) => Ok(image),
+            None => Ok((self.render_viewport(index)?, 1.0)),
+        }
+    }
+
+    /// Renders a 2D view on the GPU at layout-point size, with its handles and marquee
+    /// drawn on top, and reads it back.
+    fn render_view_gpu(&mut self, index: usize) -> Option<PixmapCanvas> {
+        let overlay = self.display_overlay();
+        let points = self.viewport_rects[index + 1].size();
+        let pixels = [points.x.round().max(1.0) as u32, points.y.round().max(1.0) as u32];
+        let gpu = self.gpu.as_mut()?;
+        gpu.render_2d(index, &self.views[index], points, pixels, &self.scene, &overlay, self.grid);
+        let (width, height, rgba) = gpu.read_pixels(Some(index))?;
+        let mut canvas = PixmapCanvas::from_rgba(width, height, rgba)?;
+        let local = Rect::from_min_size(Pos2::ZERO, points);
+        self.views[index].draw_overlay(&mut canvas, local, &overlay, false);
+        Some(canvas)
     }
 
     /// Renders the textured camera view on the GPU, when the window has created the
@@ -574,7 +620,7 @@ impl Editor {
         let size = self.camera_pixels();
         let gpu = self.gpu.as_mut()?;
         gpu.render(&self.scene, &overlay, &self.camera, size, self.materials.as_mut());
-        let (width, height, rgba) = gpu.read_pixels()?;
+        let (width, height, rgba) = gpu.read_pixels(None)?;
         PixmapCanvas::from_rgba(width, height, rgba)
     }
 

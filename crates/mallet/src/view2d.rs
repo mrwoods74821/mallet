@@ -227,6 +227,12 @@ impl View2D {
         if let Some(block) = &overlay.block {
             self.draw_edges(canvas, rect, &box_edges(block), None, TOOL_COLOR);
         }
+        self.draw_overlay(canvas, rect, overlay, active);
+    }
+
+    /// Draws what sits on top of the map: the resize handles, this view's selection
+    /// marquee and the corner label. The GPU-drawn views use this on top of their image.
+    pub fn draw_overlay(&self, canvas: &mut dyn Canvas, rect: Rect, overlay: &Overlay, active: bool) {
         if let Some(handles) = &overlay.handles {
             for (_, at) in self.handle_positions(rect, handles) {
                 canvas.fill(Rect::from_center_size(at, egui::Vec2::splat(HANDLE_HALF_SIZE * 2.0)), HANDLE_COLOR);
@@ -263,12 +269,19 @@ impl View2D {
     /// Draws the box the handles sit on. It goes under the brushes so a selected brush's
     /// red outline stays visible where the two coincide.
     fn draw_handle_outline(&self, canvas: &mut dyn Canvas, rect: Rect, bounds: &Bounds) {
-        let (min, max) = (self.axis.project(bounds.min), self.axis.project(bounds.max));
-        let corners = [min, DVec2::new(max.x, min.y), max, DVec2::new(min.x, max.y)];
-        let outline: Vec<[Pos2; 2]> = (0..4)
-            .map(|i| [self.to_screen(rect, corners[i]), self.to_screen(rect, corners[(i + 1) % 4])])
+        let outline: Vec<[Pos2; 2]> = self
+            .handle_outline(bounds)
+            .iter()
+            .map(|[a, b]| [self.to_screen(rect, *a), self.to_screen(rect, *b)])
             .collect();
         canvas.lines(&outline, HANDLE_COLOR);
+    }
+
+    /// The four sides of a box as projected into this view, in 2D world coordinates.
+    pub fn handle_outline(&self, bounds: &Bounds) -> [[DVec2; 2]; 4] {
+        let (min, max) = (self.axis.project(bounds.min), self.axis.project(bounds.max));
+        let corners = [min, DVec2::new(max.x, min.y), max, DVec2::new(min.x, max.y)];
+        [0, 1, 2, 3].map(|i| [corners[i], corners[(i + 1) % 4]])
     }
 
     fn draw_edges(&self, canvas: &mut dyn Canvas, rect: Rect, edges: &[[DVec3; 2]], remap: Option<&Remap>, color: Color32) {
@@ -283,6 +296,15 @@ impl View2D {
     }
 
     fn draw_grid(&self, canvas: &mut dyn Canvas, rect: Rect, grid: f64) {
+        for ([a, b], color) in self.grid_lines(rect, grid) {
+            canvas.lines(&[[self.to_screen(rect, a), self.to_screen(rect, b)]], color);
+        }
+    }
+
+    /// The visible grid lines, in 2D world coordinates, with their colours. Lines closer
+    /// than a few pixels are thinned out by doubling the spacing, and nothing is returned
+    /// if even that would be too many lines.
+    pub fn grid_lines(&self, rect: Rect, grid: f64) -> Vec<([DVec2; 2], Color32)> {
         let mut spacing = grid;
         while spacing * self.scale < MIN_GRID_PIXELS {
             spacing *= 2.0;
@@ -290,22 +312,24 @@ impl View2D {
         let min = self.to_world(rect, rect.left_bottom());
         let max = self.to_world(rect, rect.right_top());
         if (max.x - min.x) / spacing + (max.y - min.y) / spacing > MAX_GRID_LINES {
-            return;
+            return Vec::new();
         }
+        let mut lines = Vec::new();
         for vertical in [true, false] {
             let (low, high) = if vertical { (min.x, max.x) } else { (min.y, max.y) };
             let first = (low / spacing).floor() as i64;
             let last = (high / spacing).ceil() as i64;
             for step in first..=last {
                 let value = step as f64 * spacing;
-                let (a, b) = if vertical {
-                    (DVec2::new(value, min.y), DVec2::new(value, max.y))
+                let segment = if vertical {
+                    [DVec2::new(value, min.y), DVec2::new(value, max.y)]
                 } else {
-                    (DVec2::new(min.x, value), DVec2::new(max.x, value))
+                    [DVec2::new(min.x, value), DVec2::new(max.x, value)]
                 };
-                canvas.lines(&[[self.to_screen(rect, a), self.to_screen(rect, b)]], grid_color(value));
+                lines.push((segment, grid_color(value)));
             }
         }
+        lines
     }
 }
 

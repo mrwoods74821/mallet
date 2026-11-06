@@ -423,6 +423,17 @@ fn status_json(editor: &Editor) -> Value {
         "grid": editor.grid,
         "game_dir": editor.game_dir().map(|dir| dir.display().to_string()),
         "textured_3d": editor.gpu.is_some(),
+        "timings_ms": {
+            "update": editor.timings.update_ms,
+            "camera": editor.timings.camera_ms,
+            "views_2d": editor.timings.views_2d_ms,
+            "previous_frame_cpu": editor.timings.previous_frame_cpu_ms,
+        },
+        "camera_culling": editor.gpu.as_ref().map(|gpu| json!({
+            "chunks": gpu.stats.chunks,
+            "chunks_drawn": gpu.stats.chunks_drawn,
+            "triangles_drawn": gpu.stats.triangles_drawn,
+        })),
         "tool": match editor.tool {
             Tool::Select => "selection",
             Tool::Block => "block",
