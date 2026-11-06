@@ -8,7 +8,8 @@
 
 Mallet opens and saves VMF files without losing anything, has its own faster `.mallet`
 map format, and shows maps in Hammer's four-viewport layout, with textured brushes and prop models in 3D. It has Hammer's
-Selection, Block and Entity tools, Object Properties driven by the game's FGD, map tabs,
+Selection, Block and Entity tools with scale, rotate and skew handles and a Hammer++-style
+3D transform gizmo, Object Properties driven by the game's FGD, map tabs,
 a CompilePal-style compile window with presets, SourceCubemap and leak lines, and
 Hammer's texture tool with a texture browser that loads every mounted game's materials. A
 built-in MCP server lets AI agents inspect and edit maps, compile them and take
@@ -77,6 +78,14 @@ These follow Hammer's defaults.
 | Drag on empty space | Select everything fully inside the rectangle (Ctrl adds) |
 | Drag the selection | Move it so its corner snaps to the grid, with texture lock; hold Shift on release to clone |
 | Drag a white handle | Resize the selection or the pending block from that edge or corner |
+| Click a selected object (2D) | Switch its handles between scale, rotate (round corner handles) and skew (edge handles), as in Hammer |
+| Rotate handles | Drag a corner to turn the selection around the yellow pivot, which you can drag elsewhere; hold Shift to snap to 15° |
+| Skew handles | Drag an edge along itself to shear the selection; the opposite edge stays put |
+| Arrow keys over a 2D view | Nudge the selection one grid step along the view's axes (Ctrl: one unit) |
+| Ctrl+M | Transform dialog: rotate, scale or move by typed amounts around the selection's centre, the pivot or the world origin |
+| Ctrl+B / Ctrl+Shift+B | Snap the selection to the grid / snap each selected object on its own |
+| Ctrl+L / Ctrl+I | Flip the selection horizontally / vertically in the 2D view used last |
+| Shift+L | Toggle texture lock |
 | Entity tool: click in 3D | Create an entity of the class chosen under New entity on the brush face under the cursor |
 | Entity tool: click in 2D views, then Enter | Place the new entity's marker (each view sets its two axes, snapped to the grid), then create it |
 | Drag with the Block tool, then Enter | Create a box brush; drag inside it to move it, drag handles in any view to resize it (its depth starts from the last block) |
@@ -95,6 +104,27 @@ frame rate, CPU time per frame, how many chunks and props culling left to draw, 
 reused their last image, and how many textures are still loading. View > 3D draw distance
 sets how far the 3D view draws, like Hammer's back clipping plane. For the best
 speed on large maps, run the release build (`cargo build --release -p mallet`).
+
+## Transforming
+
+Besides moving and resizing, the selection can be rotated, skewed and mirrored, with one
+undo step per change. Rotating or mirroring an entity turns its `angles` with it;
+displacements turn with their brushes.
+
+In the 3D view the selection tool shows a transform gizmo, as in Hammer++. In its move
+mode the arrows move along one axis and the squares across a plane, snapping the
+selection's corner to the grid; in rotate mode the rings turn the selection around the
+pivot (Shift snaps to 15°); in scale mode the cubes stretch one axis by whole grid steps
+and the centre cube scales evenly. Click the gizmo's centre, or use the buttons under
+Transform in the side panel, to switch modes. Hold Shift when letting go of a move to
+clone. View > 3D Transform Gizmo or the toolbar button hides it.
+
+Tools > Align Objects lines selected objects up with an edge of the selection in the 2D
+view used last. The toolbar's padlock is Hammer's texture lock: textures move and turn
+with their brushes. Texture scale lock, beside it, also stretches them when brushes are
+scaled; without it they keep their scale and stay pinned to the brush's corner. Both
+locks, the rotation snap step, arrow-key nudging and the gizmo's mode are saved in
+`config.json` under `transform`.
 
 ## Texturing
 

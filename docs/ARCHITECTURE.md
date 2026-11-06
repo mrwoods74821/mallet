@@ -84,6 +84,25 @@ moves a displacement's start position with it. Resizing (`Edit::Rescale`) maps e
 point from the old bounding box to the new one; its undo is `Edit::ReplaceSolids` holding
 the original brushes, so undo is exact instead of scaling back with rounding errors.
 
+Rotations, skews, mirrors and the editor's own resizes are `Edit::Transform`: an affine
+matrix applied to every plane point (`mallet_vmf::transform`). A mirroring matrix reverses
+each side's plane points so normals still point out. Texture lock carries each texture
+axis through the inverse transpose of the matrix's linear part; `TextureLock::Full` also
+lets the texture stretch, `Align` keeps its scale and pins it at an anchor point, and
+`Off` leaves it in world space. Displacement normals, distances and offsets go through
+the linear part, and coordinates within a millionth of a whole number snap to it, so a
+90° turn stays on the grid. Its undo is `ReplaceSolids`, like resizing.
+
+`crates/mallet/src/transform.rs` builds the matrices for the editor's commands (around
+the pivot, the selection's centre or the world origin) and turns entity `angles` by
+carrying their forward and up directions through the matrix and squaring them up again,
+which also handles mirrors. The 2D views preview a drag through `Overlay::transform`, now
+a general matrix, so rotations and skews show live in every view, models included.
+`gizmo.rs` places the 3D gizmo at a fixed size on screen, hit-tests its parts in screen
+space, and turns a drag into a move (the mouse ray's closest point on an axis, or its hit
+on a plane), a rotation (the mouse's angle around the gizmo's centre on screen) or a
+scale; the result goes through the same commands as the 2D handles.
+
 ## Selection
 
 World brushes are selected one by one; clicking any part of an entity selects the whole
@@ -294,6 +313,9 @@ Tools:
 | `get_selection`, `select`, `clear_selection` | Read or change the selection the window shows |
 | `move_selection`, `clone_selection`, `delete_selection` | Undoable selection edits; moves keep textures locked |
 | `resize_selection` | Stretch the selection to a new bounding box, like dragging its handles |
+| `transform_selection` | Scale, rotate and move the selection in one step around its centre, the pivot, the origin or a point |
+| `flip_selection`, `snap_selection_to_grid`, `align_selection` | Hammer's Flip Objects, Snap Selected to Grid and Align Objects |
+| `set_pivot` | Place or reset the pivot rotations turn around |
 | `create_block` | Box brush between two corners, like the Block tool |
 | `create_entity` | Point entity of any class at a position, with extra keyvalues, like the Entity tool |
 | `undo`, `redo` | Step the shared history |
@@ -332,8 +354,7 @@ make any map change through `Editor::apply_edit` so it stays undoable.
 
 ## Roadmap
 
-1. Rotate handles as `Edit`s with matching MCP tools; the Model and VisGroup tabs of
-   Object Properties.
+1. The Model and VisGroup tabs of Object Properties.
 2. Model skins and bodygroups, and a model browser for prop entities.
 3. Clip, vertex and displacement tools.
 4. Lighting: a real-time preview first, then a bake through VRAD with lightmaps read back.
