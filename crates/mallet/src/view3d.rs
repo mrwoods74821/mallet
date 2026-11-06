@@ -256,6 +256,7 @@ impl Camera3D {
             let mut wish = DVec3::ZERO;
             wish += forward * turn(Action::MoveForward, Action::MoveBack);
             wish += right * turn(Action::StrafeRight, Action::StrafeLeft);
+            wish += right.cross(forward) * turn(Action::StrafeUp, Action::StrafeDown);
             let speed = if crouching {
                 self.move_speed * self.crouch_speed.clamp(0.05, 1.0)
             } else {

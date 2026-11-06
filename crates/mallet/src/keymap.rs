@@ -61,6 +61,10 @@ pub enum Action {
     MoveBack,
     StrafeLeft,
     StrafeRight,
+    /// Fly the 3D camera along its own up direction.
+    StrafeUp,
+    /// Fly the 3D camera along its own down direction.
+    StrafeDown,
     TurnLeft,
     TurnRight,
     LookUp,
@@ -68,11 +72,13 @@ pub enum Action {
 }
 
 /// The actions that move or turn the 3D camera while their key is held.
-const MOVEMENT_ACTIONS: [Action; 8] = [
+const MOVEMENT_ACTIONS: [Action; 10] = [
     Action::MoveForward,
     Action::MoveBack,
     Action::StrafeLeft,
     Action::StrafeRight,
+    Action::StrafeUp,
+    Action::StrafeDown,
     Action::TurnLeft,
     Action::TurnRight,
     Action::LookUp,
