@@ -428,6 +428,10 @@ impl MalletApp {
     }
 
     /// Handles and draws a 2D viewport slot showing one of the editor's three 2D views.
+    ///
+    /// During mouselook the 2D views ignore the mouse: the cursor is only pulled back to the
+    /// 3D view once per frame, so a quick flick can leave it over a 2D view for a moment, and
+    /// a click there would otherwise undo the selection made through the crosshair.
     #[allow(clippy::too_many_arguments)]
     fn view_slot(
         &mut self,
@@ -445,7 +449,7 @@ impl MalletApp {
             editor.views[view_index].handle_input(ui, response, rect);
         }
         let view = editor.views[view_index].clone();
-        if !space_held {
+        if !space_held && !editor.camera.mouse_look() {
             self.use_tool_2d(slot, &view, rect, response, editor, pointer);
             if let Some(icon) = self.cursor_icon(slot, &view, rect, response, editor) {
                 ui.ctx().set_cursor_icon(icon);
