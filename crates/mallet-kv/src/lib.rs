@@ -81,8 +81,7 @@ impl Block {
 
     /// Iterates over child blocks whose name matches, ignoring ASCII case.
     pub fn blocks_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Block> + 'a {
-        self.blocks()
-            .filter(move |block| block.name.eq_ignore_ascii_case(name))
+        self.blocks().filter(move |block| block.name.eq_ignore_ascii_case(name))
     }
 
     /// Appends a pair to the end of the block.
@@ -237,9 +236,7 @@ fn parse_items(lexer: &mut Lexer<'_>, open_at: Option<usize>) -> Result<Vec<Item
                 items: parse_items(lexer, Some(open))?,
             })),
             Some((Token::Text(value), _)) => items.push(Item::Pair(Pair::new(key, value))),
-            Some((Token::Close, _)) | None => {
-                return Err(lexer.error(at, format!("key \"{key}\" has no value")))
-            }
+            Some((Token::Close, _)) | None => return Err(lexer.error(at, format!("key \"{key}\" has no value"))),
         }
     }
 }

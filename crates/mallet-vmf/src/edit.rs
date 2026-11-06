@@ -114,7 +114,10 @@ impl fmt::Display for EditError {
             Self::NoSuchKey { entity, key } => write!(f, "entity {entity} has no key \"{key}\""),
             Self::CannotRemoveWorld => write!(f, "the world cannot be removed"),
             Self::MissingId => write!(f, "the added brush or entity has no id"),
-            Self::InvalidResize => write!(f, "the new size must be larger than zero along every axis the selection spans"),
+            Self::InvalidResize => write!(
+                f,
+                "the new size must be larger than zero along every axis the selection spans"
+            ),
         }
     }
 }
@@ -180,9 +183,7 @@ impl Edit {
             }
             Self::AddEntity { index, entity } => {
                 let id = entity.id().ok_or(EditError::MissingId)?;
-                let at = index
-                    .unwrap_or_else(|| default_entity_index(vmf))
-                    .min(vmf.items.len());
+                let at = index.unwrap_or_else(|| default_entity_index(vmf)).min(vmf.items.len());
                 vmf.items.insert(at, TopLevel::Entity(entity.clone()));
                 Ok(Self::RemoveEntity { entity: id })
             }
@@ -228,7 +229,11 @@ impl Edit {
                 }
                 let originals = solids
                     .iter()
-                    .map(|id| solid_mut(vmf, *id).map(|solid| solid.clone()).ok_or(EditError::NoSuchSolid(*id)))
+                    .map(|id| {
+                        solid_mut(vmf, *id)
+                            .map(|solid| solid.clone())
+                            .ok_or(EditError::NoSuchSolid(*id))
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 let (from, to) = (*from, *to);
                 for id in solids {

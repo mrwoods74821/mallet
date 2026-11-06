@@ -144,10 +144,7 @@ pub fn solid_faces(solid: &Solid) -> Vec<Face> {
 }
 
 fn clipped_faces(solid: &Solid) -> Vec<Face> {
-    let planes: Vec<Option<Plane>> = solid
-        .sides()
-        .map(|side| Plane::from_points(side.plane))
-        .collect();
+    let planes: Vec<Option<Plane>> = solid.sides().map(|side| Plane::from_points(side.plane)).collect();
     planes
         .iter()
         .enumerate()
@@ -221,5 +218,9 @@ pub fn clip_polygon(points: &[DVec3], plane: &Plane) -> Vec<DVec3> {
 
 fn snap(point: DVec3) -> DVec3 {
     let rounded = point.round();
-    DVec3::select((point - rounded).abs().cmplt(DVec3::splat(SNAP_EPSILON)), rounded, point)
+    DVec3::select(
+        (point - rounded).abs().cmplt(DVec3::splat(SNAP_EPSILON)),
+        rounded,
+        point,
+    )
 }

@@ -266,15 +266,15 @@ impl Entity {
             .iter()
             .rposition(|item| matches!(item, EntityItem::Key(_)))
             .map_or(0, |index| index + 1);
-        self.items
-            .insert(insert_at, EntityItem::Key(Pair::new(key, value)));
+        self.items.insert(insert_at, EntityItem::Key(Pair::new(key, value)));
     }
 
     /// Removes the first key that matches, ignoring ASCII case, and returns its value.
     pub fn remove(&mut self, key: &str) -> Option<String> {
-        let index = self.items.iter().position(
-            |item| matches!(item, EntityItem::Key(pair) if pair.key.eq_ignore_ascii_case(key)),
-        )?;
+        let index = self
+            .items
+            .iter()
+            .position(|item| matches!(item, EntityItem::Key(pair) if pair.key.eq_ignore_ascii_case(key)))?;
         match self.items.remove(index) {
             EntityItem::Key(pair) => Some(pair.value),
             _ => None,
@@ -628,9 +628,7 @@ impl Side {
                     vaxis = Some(TexAxis::parse(&pair.value).ok_or_else(|| bad_value(&context, &pair))?)
                 }
                 "rotation" if rotation.is_none() => rotation = Some(parse_value(&context, &pair)?),
-                "lightmapscale" if lightmap_scale.is_none() => {
-                    lightmap_scale = Some(parse_value(&context, &pair)?)
-                }
+                "lightmapscale" if lightmap_scale.is_none() => lightmap_scale = Some(parse_value(&context, &pair)?),
                 "smoothing_groups" if smoothing_groups.is_none() => {
                     smoothing_groups = Some(parse_value(&context, &pair)?)
                 }
@@ -665,9 +663,12 @@ impl Side {
             Some(Pair::new("material", self.material.clone())),
             Some(Pair::new("uaxis", self.uaxis.to_string())),
             Some(Pair::new("vaxis", self.vaxis.to_string())),
-            self.rotation.map(|rotation| Pair::new("rotation", rotation.to_string())),
-            self.lightmap_scale.map(|scale| Pair::new("lightmapscale", scale.to_string())),
-            self.smoothing_groups.map(|groups| Pair::new("smoothing_groups", groups.to_string())),
+            self.rotation
+                .map(|rotation| Pair::new("rotation", rotation.to_string())),
+            self.lightmap_scale
+                .map(|scale| Pair::new("lightmapscale", scale.to_string())),
+            self.smoothing_groups
+                .map(|groups| Pair::new("smoothing_groups", groups.to_string())),
         ]
         .into_iter()
         .flatten()
@@ -777,11 +778,7 @@ pub fn parse_color(text: &str) -> Option<[u8; 3]> {
 pub fn parse_plane(text: &str) -> Option<[DVec3; 3]> {
     let numbers = parse_numbers(text)?;
     let [ax, ay, az, bx, by, bz, cx, cy, cz] = numbers.try_into().ok()?;
-    Some([
-        DVec3::new(ax, ay, az),
-        DVec3::new(bx, by, bz),
-        DVec3::new(cx, cy, cz),
-    ])
+    Some([DVec3::new(ax, ay, az), DVec3::new(bx, by, bz), DVec3::new(cx, cy, cz)])
 }
 
 /// Formats a plane the way Hammer writes it.

@@ -152,7 +152,6 @@ impl Materials {
             .map(|key| self.cache.get(key).cloned().unwrap_or_else(Material::missing))
             .collect()
     }
-
 }
 
 impl MaterialLoader {

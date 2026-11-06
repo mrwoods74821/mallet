@@ -52,12 +52,18 @@ impl VpkArchive {
                 reader.read_exact(&mut rest).map_err(io_error)?;
                 28
             }
-            other => return Err(ContentError::format(dir_path, format!("unsupported VPK version {other}"))),
+            other => {
+                return Err(ContentError::format(
+                    dir_path,
+                    format!("unsupported VPK version {other}"),
+                ))
+            }
         };
 
         let mut tree = vec![0u8; tree_size as usize];
         reader.read_exact(&mut tree).map_err(io_error)?;
-        let entries = parse_tree(&tree, header_size).ok_or_else(|| ContentError::format(dir_path, "corrupt VPK tree"))?;
+        let entries =
+            parse_tree(&tree, header_size).ok_or_else(|| ContentError::format(dir_path, "corrupt VPK tree"))?;
         Ok(Self {
             dir_path: dir_path.to_owned(),
             data_start: header_size + u64::from(tree_size),
@@ -87,7 +93,12 @@ impl VpkArchive {
         };
         let mut data = Vec::with_capacity(usize::from(entry.preload_length) + entry.length as usize);
         if entry.preload_length > 0 {
-            read_range(&self.dir_path, entry.preload_offset, u64::from(entry.preload_length), &mut data)?;
+            read_range(
+                &self.dir_path,
+                entry.preload_offset,
+                u64::from(entry.preload_length),
+                &mut data,
+            )?;
         }
         if entry.length > 0 {
             let (path, start) = if entry.archive == IN_DIRECTORY_FILE {
@@ -160,8 +171,16 @@ fn parse_tree(tree: &[u8], tree_start: u64) -> Option<HashMap<String, Entry>> {
                 }
                 let preload_offset = tree_start + cursor.pos as u64;
                 cursor.skip(usize::from(preload_length))?;
-                let file = if extension == " " { name.to_owned() } else { format!("{name}.{extension}") };
-                let path = if folder == " " { file } else { format!("{folder}/{file}") };
+                let file = if extension == " " {
+                    name.to_owned()
+                } else {
+                    format!("{name}.{extension}")
+                };
+                let path = if folder == " " {
+                    file
+                } else {
+                    format!("{folder}/{file}")
+                };
                 entries.insert(
                     normalize(&path),
                     Entry {

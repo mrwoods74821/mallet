@@ -280,7 +280,10 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
                 game_dir: Some(path.clone()),
             };
             config.save()?;
-            Ok(ToolResult::text(format!("Mounted {} with {mounts} search paths.", path.display())))
+            Ok(ToolResult::text(format!(
+                "Mounted {} with {mounts} search paths.",
+                path.display()
+            )))
         }
         "new_map" => {
             editor.new_tab();
@@ -292,16 +295,28 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
         }
         "list_tabs" => Ok(ToolResult::json(&tabs_json(editor))),
         "switch_tab" => {
-            let index = args.get("index").and_then(Value::as_u64).ok_or("\"index\" must be a whole number")?;
+            let index = args
+                .get("index")
+                .and_then(Value::as_u64)
+                .ok_or("\"index\" must be a whole number")?;
             editor.switch_tab(index as usize)?;
             Ok(ToolResult::json(&tabs_json(editor)))
         }
         "close_tab" => {
-            let index = args.get("index").and_then(Value::as_u64).map_or(editor.active_tab(), |index| index as usize);
+            let index = args
+                .get("index")
+                .and_then(Value::as_u64)
+                .map_or(editor.active_tab(), |index| index as usize);
             let discard = args.get("discard").and_then(Value::as_bool).unwrap_or(false);
-            let dirty = editor.tabs().get(index).ok_or_else(|| format!("there is no tab {index}"))?.dirty;
+            let dirty = editor
+                .tabs()
+                .get(index)
+                .ok_or_else(|| format!("there is no tab {index}"))?
+                .dirty;
             if dirty && !discard {
-                return Err(format!("tab {index} has unsaved changes; save it first or pass discard: true"));
+                return Err(format!(
+                    "tab {index} has unsaved changes; save it first or pass discard: true"
+                ));
             }
             editor.close_tab(index)?;
             Ok(ToolResult::json(&tabs_json(editor)))
@@ -369,7 +384,9 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
         }
         "delete_selection" => {
             let count = editor.delete_selection()?;
-            Ok(ToolResult::text(format!("Deleted {count} objects. Undo with the undo tool or Ctrl+Z.")))
+            Ok(ToolResult::text(format!(
+                "Deleted {count} objects. Undo with the undo tool or Ctrl+Z."
+            )))
         }
         "create_block" => {
             let min = required_vec3(args, "min")?;
@@ -406,11 +423,11 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
         }
         "set_grid" => {
             let size = optional_number(args, "size")?.ok_or("\"size\" is required")?;
-            let valid = (MIN_GRID..=MAX_GRID).contains(&size)
-                && size.fract() == 0.0
-                && (size as u32).is_power_of_two();
+            let valid = (MIN_GRID..=MAX_GRID).contains(&size) && size.fract() == 0.0 && (size as u32).is_power_of_two();
             if !valid {
-                return Err(format!("grid size must be a power of two from {MIN_GRID} to {MAX_GRID}"));
+                return Err(format!(
+                    "grid size must be a power of two from {MIN_GRID} to {MAX_GRID}"
+                ));
             }
             editor.grid = size;
             Ok(ToolResult::text(format!("Grid is now {size}.")))
@@ -600,10 +617,7 @@ fn selection_json(editor: &Editor) -> Value {
 
 fn list_entities(editor: &Editor, args: &Value) -> Result<Value, String> {
     let pattern = optional_string(args, "classname")?;
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_LIST_LIMIT);
+    let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(DEFAULT_LIST_LIMIT);
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
     let matching: Vec<&Entity> = editor
         .document
@@ -613,7 +627,11 @@ fn list_entities(editor: &Editor, args: &Value) -> Result<Value, String> {
         .all_entities()
         .filter(|entity| pattern.is_none_or(|pattern| classname_matches(pattern, entity.classname())))
         .collect();
-    let entities: Vec<Value> = matching.iter().take(limit).map(|entity| entity_summary(entity)).collect();
+    let entities: Vec<Value> = matching
+        .iter()
+        .take(limit)
+        .map(|entity| entity_summary(entity))
+        .collect();
     Ok(json!({
         "total": matching.len(),
         "returned": entities.len(),

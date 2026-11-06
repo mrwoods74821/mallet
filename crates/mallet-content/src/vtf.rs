@@ -78,9 +78,13 @@ impl Format {
             Self::Dxt1 => blocks * 8,
             Self::Dxt3 | Self::Dxt5 => blocks * 16,
             Self::I8 | Self::A8 => width * height,
-            Self::Ia88 | Self::Rgb565 | Self::Bgr565 | Self::Bgra4444 | Self::Bgrx5551 | Self::Bgra5551 | Self::Uv88 => {
-                width * height * 2
-            }
+            Self::Ia88
+            | Self::Rgb565
+            | Self::Bgr565
+            | Self::Bgra4444
+            | Self::Bgrx5551
+            | Self::Bgra5551
+            | Self::Uv88 => width * height * 2,
             Self::Rgb888 | Self::Bgr888 => width * height * 3,
             Self::Rgba8888 | Self::Abgr8888 | Self::Argb8888 | Self::Bgra8888 | Self::Bgrx8888 => width * height * 4,
         }
@@ -91,7 +95,10 @@ impl Format {
 /// smallest available level if none fits.
 pub fn decode(data: &[u8], max_side: u32) -> Result<Image, String> {
     let read_u16 = |at: usize| data.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
-    let read_u32 = |at: usize| data.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let read_u32 = |at: usize| {
+        data.get(at..at + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
     if data.get(0..4) != Some(b"VTF\0") {
         return Err("not a VTF file".to_owned());
     }
@@ -107,7 +114,11 @@ pub fn decode(data: &[u8], max_side: u32) -> Result<Image, String> {
     let low_format_id = read_u32(57).ok_or_else(truncated)? as i32;
     let low_width = u32::from(*data.get(61).ok_or_else(truncated)?);
     let low_height = u32::from(*data.get(62).ok_or_else(truncated)?);
-    let depth = if minor >= 2 { usize::from(read_u16(63).ok_or_else(truncated)?.max(1)) } else { 1 };
+    let depth = if minor >= 2 {
+        usize::from(read_u16(63).ok_or_else(truncated)?.max(1))
+    } else {
+        1
+    };
     let format = Format::from_id(format_id).ok_or_else(|| format!("unsupported VTF image format {format_id}"))?;
     let faces = if flags & FLAG_ENVMAP != 0 { 6 } else { 1 };
 
@@ -116,7 +127,9 @@ pub fn decode(data: &[u8], max_side: u32) -> Result<Image, String> {
         (0..resource_count)
             .find_map(|index| {
                 let at = 80 + index * 8;
-                (data.get(at..at + 3)? == RESOURCE_HIGH_RES_IMAGE).then(|| read_u32(at + 4)).flatten()
+                (data.get(at..at + 3)? == RESOURCE_HIGH_RES_IMAGE)
+                    .then(|| read_u32(at + 4))
+                    .flatten()
             })
             .ok_or("VTF has no image resource")? as usize
     } else {
@@ -202,11 +215,20 @@ fn to_rgba(format: Format, source: &[u8], width: u32, height: u32) -> Vec<u8> {
                 }
                 Format::Bgra4444 => {
                     let v = short();
-                    [expand4((v >> 8) & 15), expand4((v >> 4) & 15), expand4(v & 15), expand4(v >> 12)]
+                    [
+                        expand4((v >> 8) & 15),
+                        expand4((v >> 4) & 15),
+                        expand4(v & 15),
+                        expand4(v >> 12),
+                    ]
                 }
                 Format::Bgrx5551 | Format::Bgra5551 => {
                     let v = short();
-                    let alpha = if format == Format::Bgrx5551 || v >> 15 == 1 { 255 } else { 0 };
+                    let alpha = if format == Format::Bgrx5551 || v >> 15 == 1 {
+                        255
+                    } else {
+                        0
+                    };
                     [expand5((v >> 10) & 31), expand5((v >> 5) & 31), expand5(v & 31), alpha]
                 }
                 Format::Dxt1 | Format::Dxt3 | Format::Dxt5 => unreachable!("block formats return above"),

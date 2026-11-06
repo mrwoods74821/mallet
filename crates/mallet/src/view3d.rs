@@ -148,7 +148,10 @@ impl Camera3D {
                     self.recent_look.pop_front();
                 }
                 self.recent_look.push_back(raw);
-                let smoothed = self.recent_look.iter().fold(egui::Vec2::ZERO, |total, delta| total + *delta)
+                let smoothed = self
+                    .recent_look
+                    .iter()
+                    .fold(egui::Vec2::ZERO, |total, delta| total + *delta)
                     / LOOK_FRAMES as f32;
                 self.yaw -= f64::from(smoothed.x) * LOOK_SENSITIVITY;
                 self.pitch = (self.pitch - f64::from(smoothed.y) * LOOK_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH);
@@ -189,9 +192,24 @@ impl Camera3D {
     pub fn draw_crosshair(painter: &egui::Painter, rect: Rect) {
         let center = rect.center();
         let arm = 5.0;
-        for (stroke, extra) in [(egui::Stroke::new(3.0_f32, Color32::from_black_alpha(160)), 1.0), (egui::Stroke::new(1.0_f32, Color32::WHITE), 0.0)] {
-            painter.line_segment([center - egui::vec2(arm + extra, 0.0), center + egui::vec2(arm + extra, 0.0)], stroke);
-            painter.line_segment([center - egui::vec2(0.0, arm + extra), center + egui::vec2(0.0, arm + extra)], stroke);
+        for (stroke, extra) in [
+            (egui::Stroke::new(3.0_f32, Color32::from_black_alpha(160)), 1.0),
+            (egui::Stroke::new(1.0_f32, Color32::WHITE), 0.0),
+        ] {
+            painter.line_segment(
+                [
+                    center - egui::vec2(arm + extra, 0.0),
+                    center + egui::vec2(arm + extra, 0.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    center - egui::vec2(0.0, arm + extra),
+                    center + egui::vec2(0.0, arm + extra),
+                ],
+                stroke,
+            );
         }
     }
 
@@ -269,6 +287,10 @@ impl Camera3D {
         }
 
         let label_color = if active { Color32::WHITE } else { Color32::GRAY };
-        canvas.label(rect.left_top() + egui::vec2(6.0, 4.0), "camera (wireframe)", label_color);
+        canvas.label(
+            rect.left_top() + egui::vec2(6.0, 4.0),
+            "camera (wireframe)",
+            label_color,
+        );
     }
 }

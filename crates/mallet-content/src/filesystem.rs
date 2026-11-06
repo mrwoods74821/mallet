@@ -81,7 +81,11 @@ impl GameFs {
             .replace("|gameinfo_path|", &format!("{}/", game_dir.display()))
             .replace("|all_source_engine_paths|", &format!("{}/", base_dir.display()));
         let path = Path::new(&expanded);
-        let path = if path.is_absolute() { path.to_owned() } else { base_dir.join(path) };
+        let path = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            base_dir.join(path)
+        };
         let text = path.to_string_lossy().replace('\\', "/");
 
         if let Some(parent) = text.strip_suffix("/*") {

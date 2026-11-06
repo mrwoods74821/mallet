@@ -29,7 +29,11 @@ type PaletteEntry = (&'static str, &'static str, Option<(Tool, Action)>);
 /// Hammer's tool palette, top to bottom. Tools Mallet does not have yet are shown greyed
 /// out so the layout already matches.
 const PALETTE: [PaletteEntry; 9] = [
-    (icon::CURSOR, "Selection tool", Some((Tool::Select, Action::SelectionTool))),
+    (
+        icon::CURSOR,
+        "Selection tool",
+        Some((Tool::Select, Action::SelectionTool)),
+    ),
     (icon::LIGHTBULB, "Entity tool", None),
     (icon::CUBE, "Block tool", Some((Tool::Block, Action::BlockTool))),
     (icon::PAINT_BRUSH, "Texture application", None),
@@ -65,29 +69,56 @@ impl MalletApp {
                 ];
                 for group in groups {
                     for (glyph, name, action) in group {
-                        if self.icon_button(ui, glyph, name, Some(*action), false, TOOLBAR_ICON_SIZE).clicked() {
+                        if self
+                            .icon_button(ui, glyph, name, Some(*action), false, TOOLBAR_ICON_SIZE)
+                            .clicked()
+                        {
                             chosen = Some(*action);
                         }
                     }
                     ui.separator();
                 }
                 if self
-                    .icon_button(ui, icon::MINUS, "Smaller grid", Some(Action::GridSmaller), false, TOOLBAR_ICON_SIZE)
+                    .icon_button(
+                        ui,
+                        icon::MINUS,
+                        "Smaller grid",
+                        Some(Action::GridSmaller),
+                        false,
+                        TOOLBAR_ICON_SIZE,
+                    )
                     .clicked()
                 {
                     chosen = Some(Action::GridSmaller);
                 }
-                ui.add_sized([46.0, 26.0], egui::Label::new(format!("{} {}", icon::GRID_FOUR, editor.grid)))
-                    .on_hover_text("Grid size");
+                ui.add_sized(
+                    [46.0, 26.0],
+                    egui::Label::new(format!("{} {}", icon::GRID_FOUR, editor.grid)),
+                )
+                .on_hover_text("Grid size");
                 if self
-                    .icon_button(ui, icon::PLUS, "Larger grid", Some(Action::GridLarger), false, TOOLBAR_ICON_SIZE)
+                    .icon_button(
+                        ui,
+                        icon::PLUS,
+                        "Larger grid",
+                        Some(Action::GridLarger),
+                        false,
+                        TOOLBAR_ICON_SIZE,
+                    )
                     .clicked()
                 {
                     chosen = Some(Action::GridLarger);
                 }
                 ui.separator();
                 if self
-                    .icon_button(ui, icon::GAUGE, "Net graph", None, self.show_net_graph, TOOLBAR_ICON_SIZE)
+                    .icon_button(
+                        ui,
+                        icon::GAUGE,
+                        "Net graph",
+                        None,
+                        self.show_net_graph,
+                        TOOLBAR_ICON_SIZE,
+                    )
                     .clicked()
                 {
                     self.show_net_graph = !self.show_net_graph;
@@ -111,8 +142,16 @@ impl MalletApp {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 for (index, tab) in editor.tabs().iter().enumerate() {
                     let active = index == editor.active_tab();
-                    let title = if tab.dirty { format!("{} \u{2022}", tab.title) } else { tab.title.clone() };
-                    let text_color = if active { Color32::WHITE } else { Color32::from_gray(170) };
+                    let title = if tab.dirty {
+                        format!("{} \u{2022}", tab.title)
+                    } else {
+                        tab.title.clone()
+                    };
+                    let text_color = if active {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_gray(170)
+                    };
                     egui::Frame::default()
                         .fill(if active { ACTIVE_TAB } else { INACTIVE_TAB })
                         .corner_radius(4)
@@ -167,7 +206,10 @@ impl MalletApp {
                         match tool {
                             Some((tool, action)) => {
                                 let selected = editor.tool == tool;
-                                if self.icon_button(ui, glyph, name, Some(action), selected, PALETTE_ICON_SIZE).clicked() {
+                                if self
+                                    .icon_button(ui, glyph, name, Some(action), selected, PALETTE_ICON_SIZE)
+                                    .clicked()
+                                {
                                     chosen = Some(action);
                                 }
                             }
@@ -231,8 +273,11 @@ impl MalletApp {
                         if let Some((_, [width, height])) = &preview {
                             ui.label(format!("{width}x{height}"));
                         }
-                        ui.add_enabled(false, egui::Button::new(format!("{} Browse...", icon::MAGNIFYING_GLASS)))
-                            .on_disabled_hover_text("Texture browser (coming soon)");
+                        ui.add_enabled(
+                            false,
+                            egui::Button::new(format!("{} Browse...", icon::MAGNIFYING_GLASS)),
+                        )
+                        .on_disabled_hover_text("Texture browser (coming soon)");
                     });
                 });
                 ui.separator();
@@ -339,7 +384,11 @@ impl MalletApp {
         size: f32,
     ) -> egui::Response {
         let shortcut = action.map(|action| self.keymap.label(action)).unwrap_or_default();
-        let hint = if shortcut.is_empty() { name.to_owned() } else { format!("{name} ({shortcut})") };
+        let hint = if shortcut.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{name} ({shortcut})")
+        };
         let button = egui::Button::new(RichText::new(glyph).size(size))
             .selected(selected)
             .min_size(Vec2::splat(size + 12.0));

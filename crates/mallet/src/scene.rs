@@ -236,17 +236,20 @@ impl Scene {
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(owner, _)| owner)
         };
-        let on_centre = |mesh: &&WireMesh| (axis.project(mesh.bounds.center()) - point).abs().max_element() <= tolerance;
+        let on_centre =
+            |mesh: &&WireMesh| (axis.project(mesh.bounds.center()) - point).abs().max_element() <= tolerance;
         let on_outline = |mesh: &&WireMesh| {
             let min = axis.project(mesh.bounds.min) - DVec2::splat(tolerance);
             let max = axis.project(mesh.bounds.max) + DVec2::splat(tolerance);
             point.cmpge(min).all()
                 && point.cmple(max).all()
-                && mesh.edges.iter().any(|[a, b]| {
-                    segment_distance(point, axis.project(*a), axis.project(*b)) <= tolerance
-                })
+                && mesh
+                    .edges
+                    .iter()
+                    .any(|[a, b]| segment_distance(point, axis.project(*a), axis.project(*b)) <= tolerance)
         };
-        smallest(&mut self.meshes.iter().filter(on_centre)).or_else(|| smallest(&mut self.meshes.iter().filter(on_outline)))
+        smallest(&mut self.meshes.iter().filter(on_centre))
+            .or_else(|| smallest(&mut self.meshes.iter().filter(on_outline)))
     }
 
     /// Picks the nearest mesh hit by a ray.
@@ -283,7 +286,11 @@ fn projected_area(axis: Axis2D, bounds: &Bounds) -> f64 {
 fn segment_distance(point: DVec2, a: DVec2, b: DVec2) -> f64 {
     let along = b - a;
     let length = along.length_squared();
-    let t = if length > 0.0 { ((point - a).dot(along) / length).clamp(0.0, 1.0) } else { 0.0 };
+    let t = if length > 0.0 {
+        ((point - a).dot(along) / length).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     point.distance(a + along * t)
 }
 
@@ -402,7 +409,11 @@ fn box_faces(bounds: &Bounds) -> Vec<SceneFace> {
         .into_iter()
         .map(|plane| {
             let normal = plane.normal;
-            let (u, v) = if normal.z.abs() > 0.5 { (DVec3::X, DVec3::Y) } else { (DVec3::Z, normal.cross(DVec3::Z)) };
+            let (u, v) = if normal.z.abs() > 0.5 {
+                (DVec3::X, DVec3::Y)
+            } else {
+                (DVec3::Z, normal.cross(DVec3::Z))
+            };
             let center = bounds.center() + normal * (bounds.size() * 0.5).dot(normal.abs());
             let half = bounds.size() * 0.5;
             let (du, dv) = (u * half.dot(u.abs()), v * half.dot(v.abs()));

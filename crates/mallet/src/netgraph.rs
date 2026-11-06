@@ -53,7 +53,11 @@ impl NetGraph {
     /// The most recent back-to-back frame intervals in milliseconds, oldest first.
     pub fn recent_intervals(&self, count: usize) -> Vec<f32> {
         let skip = self.intervals.len().saturating_sub(count);
-        self.intervals.iter().skip(skip).map(|seconds| seconds * 1000.0).collect()
+        self.intervals
+            .iter()
+            .skip(skip)
+            .map(|seconds| seconds * 1000.0)
+            .collect()
     }
 
     /// Shortest, average and longest time between recent back-to-back frames, in
@@ -115,7 +119,10 @@ impl NetGraph {
         for (index, ms) in self.cpu_ms.iter().enumerate() {
             let height = (ms / GRAPH_RANGE_MS).min(1.0) * graph.height();
             let x = graph.min.x + (offset + index) as f32 * bar_width;
-            let bar = Rect::from_min_max(Pos2::new(x, graph.max.y - height), Pos2::new(x + bar_width.max(1.0), graph.max.y));
+            let bar = Rect::from_min_max(
+                Pos2::new(x, graph.max.y - height),
+                Pos2::new(x + bar_width.max(1.0), graph.max.y),
+            );
             painter.rect_filled(bar, 0.0, bar_color(*ms));
         }
         let target_y = graph.max.y - (TARGET_MS / GRAPH_RANGE_MS) * graph.height();

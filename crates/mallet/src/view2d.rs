@@ -183,8 +183,8 @@ impl View2D {
     /// Pans with middle-drag or Space+left-drag and zooms around the cursor with the wheel.
     pub fn handle_input(&mut self, ui: &egui::Ui, response: &Response, rect: Rect) {
         let space_held = ui.input(|input| input.key_down(egui::Key::Space));
-        let panning = response.dragged_by(PointerButton::Middle)
-            || (space_held && response.dragged_by(PointerButton::Primary));
+        let panning =
+            response.dragged_by(PointerButton::Middle) || (space_held && response.dragged_by(PointerButton::Primary));
         if panning {
             let delta = response.drag_delta();
             self.center.x -= f64::from(delta.x) / self.scale;
@@ -267,14 +267,22 @@ impl View2D {
     pub fn draw_overlay(&self, canvas: &mut dyn Canvas, rect: Rect, overlay: &Overlay, active: bool) {
         if let Some(handles) = &overlay.handles {
             for (_, at) in self.handle_positions(rect, handles) {
-                canvas.fill(Rect::from_center_size(at, egui::Vec2::splat(HANDLE_HALF_SIZE * 2.0)), HANDLE_COLOR);
+                canvas.fill(
+                    Rect::from_center_size(at, egui::Vec2::splat(HANDLE_HALF_SIZE * 2.0)),
+                    HANDLE_COLOR,
+                );
             }
         }
         if let Some((axis, a, b)) = overlay.marquee {
             if axis == self.axis {
                 let corners = [a, DVec2::new(b.x, a.y), b, DVec2::new(a.x, b.y)];
                 let segments: Vec<[Pos2; 2]> = (0..4)
-                    .map(|i| [self.to_screen(rect, corners[i]), self.to_screen(rect, corners[(i + 1) % 4])])
+                    .map(|i| {
+                        [
+                            self.to_screen(rect, corners[i]),
+                            self.to_screen(rect, corners[(i + 1) % 4]),
+                        ]
+                    })
                     .collect();
                 canvas.lines(&segments, TOOL_COLOR);
             }
@@ -316,7 +324,14 @@ impl View2D {
         [0, 1, 2, 3].map(|i| [corners[i], corners[(i + 1) % 4]])
     }
 
-    fn draw_edges(&self, canvas: &mut dyn Canvas, rect: Rect, edges: &[[DVec3; 2]], remap: Option<&Remap>, color: Color32) {
+    fn draw_edges(
+        &self,
+        canvas: &mut dyn Canvas,
+        rect: Rect,
+        edges: &[[DVec3; 2]],
+        remap: Option<&Remap>,
+        color: Color32,
+    ) {
         let map = |point: DVec3| remap.map_or(point, |remap| remap.apply(point));
         let segments: Vec<[Pos2; 2]> = edges
             .iter()

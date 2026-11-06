@@ -118,9 +118,10 @@ impl Document {
     /// The file name shown in the title bar, or `untitled` for a new map.
     pub fn file_name(&self) -> String {
         match &self.path {
-            Some(path) => path
-                .file_name()
-                .map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned()),
+            Some(path) => path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
             None => "untitled".to_owned(),
         }
     }

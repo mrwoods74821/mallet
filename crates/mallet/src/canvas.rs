@@ -61,7 +61,8 @@ impl PixmapCanvas {
             ..PixmapPaint::default()
         };
         let transform = Transform::from_row(scale, 0.0, 0.0, scale, x, y);
-        self.pixmap.draw_pixmap(0, 0, other.pixmap.as_ref(), &paint, transform, None);
+        self.pixmap
+            .draw_pixmap(0, 0, other.pixmap.as_ref(), &paint, transform, None);
     }
 
     /// Fills the whole image with one colour.
@@ -87,8 +88,7 @@ fn paint(color: Color32) -> Paint<'static> {
 impl Canvas for PixmapCanvas {
     fn fill(&mut self, rect: Rect, color: Color32) {
         if let Some(rect) = tiny_skia::Rect::from_ltrb(rect.min.x, rect.min.y, rect.max.x, rect.max.y) {
-            self.pixmap
-                .fill_rect(rect, &paint(color), Transform::identity(), None);
+            self.pixmap.fill_rect(rect, &paint(color), Transform::identity(), None);
         }
     }
 

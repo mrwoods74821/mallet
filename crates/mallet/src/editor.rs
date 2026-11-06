@@ -18,9 +18,9 @@ use mallet_vmf::{format_vec3, Entity, IdAllocator, Solid, Vmf};
 use mallet_content::{GameFs, Materials};
 
 use crate::canvas::PixmapCanvas;
-use crate::render3d::{CameraStyle, Renderer3D};
 use crate::document::Document;
 use crate::input::InputFrame;
+use crate::render3d::{CameraStyle, Renderer3D};
 use crate::scene::{Overlay, Owner, Scene};
 use crate::view2d::{Axis2D, View2D};
 use crate::view3d::Camera3D;
@@ -124,7 +124,6 @@ pub enum ShotTarget {
     Front,
     Side,
 }
-
 
 /// How long the parts of recent frames took, for finding slowdowns.
 #[derive(Clone, Debug, Default)]
@@ -332,7 +331,9 @@ impl Editor {
         }
         self.tabs.remove(index);
         self.active_tab = index.min(self.tabs.len() - 1);
-        let next = self.tabs[self.active_tab].take().expect("background tabs hold their state");
+        let next = self.tabs[self.active_tab]
+            .take()
+            .expect("background tabs hold their state");
         self.put_map(next);
         Ok(())
     }
@@ -348,7 +349,10 @@ impl Editor {
         if let Some(index) = already_open {
             return self.switch_tab(index);
         }
-        let reuse = self.document.as_ref().is_none_or(|document| document.path.is_none() && !document.dirty)
+        let reuse = self
+            .document
+            .as_ref()
+            .is_none_or(|document| document.path.is_none() && !document.dirty)
             && self.scene.meshes.is_empty();
         if !reuse {
             self.new_tab();
@@ -495,10 +499,7 @@ impl Editor {
 
     /// Changes the selection. Owners that are not in the map are ignored.
     pub fn select(&mut self, owners: impl IntoIterator<Item = Owner>, mode: SelectMode) {
-        let owners: Vec<Owner> = owners
-            .into_iter()
-            .filter(|owner| self.scene.contains(*owner))
-            .collect();
+        let owners: Vec<Owner> = owners.into_iter().filter(|owner| self.scene.contains(*owner)).collect();
         match mode {
             SelectMode::Replace => self.selection = owners.into_iter().collect(),
             SelectMode::Add => self.selection.extend(owners),
@@ -735,14 +736,16 @@ impl Editor {
     pub fn slot_for(&self, target: ShotTarget) -> Result<usize, String> {
         let (name, slot) = match target {
             ShotTarget::All => return Err("pick one viewport: camera, top, front or side".to_owned()),
-            ShotTarget::Camera => ("camera", self.layout.iter().position(|mode| mode.camera_style().is_some())),
+            ShotTarget::Camera => (
+                "camera",
+                self.layout.iter().position(|mode| mode.camera_style().is_some()),
+            ),
             ShotTarget::Top => ("top", self.layout.iter().position(|mode| *mode == ViewMode::Top)),
             ShotTarget::Front => ("front", self.layout.iter().position(|mode| *mode == ViewMode::Front)),
             ShotTarget::Side => ("side", self.layout.iter().position(|mode| *mode == ViewMode::Side)),
         };
         slot.ok_or_else(|| format!("no viewport currently shows the {name} view"))
     }
-
 
     /// Moves the 3D camera back until the whole map is in view.
     pub fn fit_3d(&mut self) {
@@ -764,7 +767,9 @@ impl Editor {
 
     /// The mounted game folder, if any.
     pub fn game_dir(&self) -> Option<&Path> {
-        self.materials.as_ref().map(|materials| materials.filesystem().game_dir())
+        self.materials
+            .as_ref()
+            .map(|materials| materials.filesystem().game_dir())
     }
 
     /// The size in physical pixels of a viewport slot.
@@ -850,7 +855,15 @@ impl Editor {
         let points = self.viewport_rects[slot].size();
         let pixels = [points.x.round().max(1.0) as u32, points.y.round().max(1.0) as u32];
         let gpu = self.gpu.as_mut()?;
-        gpu.render_2d(slot, &self.views[view], points, pixels, &self.scene, &overlay, self.grid);
+        gpu.render_2d(
+            slot,
+            &self.views[view],
+            points,
+            pixels,
+            &self.scene,
+            &overlay,
+            self.grid,
+        );
         let (width, height, rgba) = gpu.read_pixels(slot)?;
         let mut canvas = PixmapCanvas::from_rgba(width, height, rgba)?;
         let local = Rect::from_min_size(Pos2::ZERO, points);
@@ -864,10 +877,26 @@ impl Editor {
         let overlay = self.display_overlay();
         let size = self.slot_pixels(slot);
         let gpu = self.gpu.as_mut()?;
-        gpu.render(slot, style, &self.scene, &overlay, &self.camera, size, self.materials.as_mut());
+        gpu.render(
+            slot,
+            style,
+            &self.scene,
+            &overlay,
+            &self.camera,
+            size,
+            self.materials.as_mut(),
+        );
         if gpu.textures_loading() > 0 {
             gpu.finish_loading();
-            gpu.render(slot, style, &self.scene, &overlay, &self.camera, size, self.materials.as_mut());
+            gpu.render(
+                slot,
+                style,
+                &self.scene,
+                &overlay,
+                &self.camera,
+                size,
+                self.materials.as_mut(),
+            );
         }
         let (width, height, rgba) = gpu.read_pixels(slot)?;
         PixmapCanvas::from_rgba(width, height, rgba)
@@ -905,8 +934,7 @@ fn find_entity(vmf: &Vmf, id: u32) -> Result<&Entity, String> {
 }
 
 fn canvas_for(size: Vec2) -> Result<PixmapCanvas, String> {
-    PixmapCanvas::new(size.x.round() as u32, size.y.round() as u32)
-        .ok_or_else(|| "the viewport has no area".to_owned())
+    PixmapCanvas::new(size.x.round() as u32, size.y.round() as u32).ok_or_else(|| "the viewport has no area".to_owned())
 }
 
 /// Splits the area into Hammer's default layout: camera top-left, top view top-right,

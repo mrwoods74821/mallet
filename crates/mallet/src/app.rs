@@ -16,10 +16,10 @@ use eframe::egui_wgpu;
 
 use crate::canvas::{Canvas, PainterCanvas};
 use crate::config::{self, Config};
-use crate::render3d::{CameraStyle, Renderer3D};
 use crate::editor::{self, Editor, SelectMode, Tool, ViewMode, VIEWPORT_GAP};
 use crate::keymap::{Action, KeyMap};
 use crate::netgraph::{NetGraph, NetGraphExtra};
+use crate::render3d::{CameraStyle, Renderer3D};
 use crate::scene::Remap;
 use crate::view2d::{Axis2D, Handle, View2D};
 use crate::view3d::Camera3D;
@@ -61,7 +61,12 @@ enum Drag {
     /// Moving the selection, or cloning it when Shift is held at release.
     Move { view: usize, start: DVec2, bounds: Bounds },
     /// Resizing the selection with one of its handles.
-    Resize { view: usize, start: DVec2, bounds: Bounds, handle: Handle },
+    Resize {
+        view: usize,
+        start: DVec2,
+        bounds: Bounds,
+        handle: Handle,
+    },
     /// Drawing a selection rectangle.
     Marquee { view: usize, start: DVec2 },
     /// Drawing a new block, from a grid-snapped corner.
@@ -69,7 +74,12 @@ enum Drag {
     /// Moving the pending block.
     MoveBlock { view: usize, start: DVec2, bounds: Bounds },
     /// Resizing the pending block with one of its handles.
-    ResizeBlock { view: usize, start: DVec2, bounds: Bounds, handle: Handle },
+    ResizeBlock {
+        view: usize,
+        start: DVec2,
+        bounds: Bounds,
+        handle: Handle,
+    },
 }
 
 impl Drag {
@@ -153,8 +163,7 @@ impl MalletApp {
                 Ok(0) => return,
                 Ok(port) => port,
                 Err(_) => {
-                    editor::lock(&self.editor).message =
-                        format!("MALLET_MCP_PORT \"{value}\" is not a port number");
+                    editor::lock(&self.editor).message = format!("MALLET_MCP_PORT \"{value}\" is not a port number");
                     return;
                 }
             },
@@ -251,7 +260,11 @@ impl MalletApp {
                     }
                     ui.horizontal(|ui| {
                         ui.label("3D draw distance");
-                        ui.add(egui::Slider::new(&mut editor.camera.far, 1024.0..=65536.0).logarithmic(true).integer());
+                        ui.add(
+                            egui::Slider::new(&mut editor.camera.far, 1024.0..=65536.0)
+                                .logarithmic(true)
+                                .integer(),
+                        );
                     });
                     ui.separator();
                     menu_item(ui, &self.keymap, "Smaller Grid", Action::GridSmaller, &mut chosen);
@@ -325,7 +338,17 @@ impl MalletApp {
             let mode = editor.layout[slot];
             match (mode.camera_style(), mode.view_index()) {
                 (Some(style), _) => {
-                    self.camera_slot(ui, slot, style, rect, &response, editor, frame, &pointer, &mut camera_updated);
+                    self.camera_slot(
+                        ui,
+                        slot,
+                        style,
+                        rect,
+                        &response,
+                        editor,
+                        frame,
+                        &pointer,
+                        &mut camera_updated,
+                    );
                     camera_ms += elapsed_ms(started);
                 }
                 (None, Some(view)) => {
@@ -365,7 +388,9 @@ impl MalletApp {
         let typing = ctx.wants_keyboard_input() && !was_looking;
         if !*camera_updated && !typing && (response.hovered() || was_looking) {
             *camera_updated = true;
-            moving = editor.camera.update(&ctx, response.hovered() || was_looking, &self.keymap);
+            moving = editor
+                .camera
+                .update(&ctx, response.hovered() || was_looking, &self.keymap);
             let looking = editor.camera.mouse_look();
             if looking && !was_looking {
                 self.look_return = pointer.position;
@@ -405,7 +430,11 @@ impl MalletApp {
                     CameraStyle::Textured if editor.materials.is_none() => "camera (no game set)",
                     _ => editor.layout[slot].label(),
                 };
-                let color = if active { egui::Color32::WHITE } else { egui::Color32::GRAY };
+                let color = if active {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::GRAY
+                };
                 canvas.label(rect.left_top() + egui::vec2(6.0, 4.0), label, color);
                 Camera3D::draw_crosshair(&painter, rect);
                 if self.show_net_graph && style == CameraStyle::Textured {
@@ -420,7 +449,9 @@ impl MalletApp {
                     ctx.request_repaint_after(Duration::from_millis(50));
                 }
             }
-            None => editor.camera.draw(canvas, rect, &editor.scene, active, &editor.display_overlay()),
+            None => editor
+                .camera
+                .draw(canvas, rect, &editor.scene, active, &editor.display_overlay()),
         }
         if moving {
             ctx.request_repaint();
@@ -485,8 +516,15 @@ impl MalletApp {
         let renderer = editor
             .gpu
             .get_or_insert_with(|| Renderer3D::new(&render_state.device, &render_state.queue));
-        let (view, recreated) =
-            renderer.render(slot, style, &editor.scene, &overlay, &editor.camera, size, editor.materials.as_mut());
+        let (view, recreated) = renderer.render(
+            slot,
+            style,
+            &editor.scene,
+            &overlay,
+            &editor.camera,
+            size,
+            editor.materials.as_mut(),
+        );
         show_texture(render_state, &mut self.slot_textures[slot], view, recreated)
     }
 
@@ -524,11 +562,29 @@ impl MalletApp {
         let handle = target.and_then(|bounds| view.hit_handle(rect, &bounds, origin));
         let inside = target.is_some_and(|bounds| box_contains(view.axis, &bounds, start));
         match (editor.tool, target, handle, inside) {
-            (Tool::Select, Some(bounds), Some(handle), _) => Drag::Resize { view: index, start, bounds, handle },
-            (Tool::Select, Some(bounds), None, true) => Drag::Move { view: index, start, bounds },
+            (Tool::Select, Some(bounds), Some(handle), _) => Drag::Resize {
+                view: index,
+                start,
+                bounds,
+                handle,
+            },
+            (Tool::Select, Some(bounds), None, true) => Drag::Move {
+                view: index,
+                start,
+                bounds,
+            },
             (Tool::Select, ..) => Drag::Marquee { view: index, start },
-            (Tool::Block, Some(bounds), Some(handle), _) => Drag::ResizeBlock { view: index, start, bounds, handle },
-            (Tool::Block, Some(bounds), None, true) => Drag::MoveBlock { view: index, start, bounds },
+            (Tool::Block, Some(bounds), Some(handle), _) => Drag::ResizeBlock {
+                view: index,
+                start,
+                bounds,
+                handle,
+            },
+            (Tool::Block, Some(bounds), None, true) => Drag::MoveBlock {
+                view: index,
+                start,
+                bounds,
+            },
             (Tool::Block, ..) => Drag::NewBlock {
                 view: index,
                 start: snap(start, editor.grid),
@@ -581,7 +637,9 @@ impl MalletApp {
             if response.clicked_by(PointerButton::Primary) && editor.tool == Tool::Select {
                 if let Some(position) = pointer.position {
                     let tolerance = PICK_TOLERANCE_PIXELS / view.scale;
-                    let hit = editor.scene.pick_2d(view.axis, view.to_world(rect, position), tolerance);
+                    let hit = editor
+                        .scene
+                        .pick_2d(view.axis, view.to_world(rect, position), tolerance);
                     pick(editor, hit, pointer.modifiers);
                 }
             }
@@ -595,7 +653,9 @@ impl MalletApp {
                     let offset = snapped_offset(view.axis, &bounds, world - start, grid);
                     editor.overlay.transform = Some(Remap::translate(bounds, offset));
                 }
-                Drag::Resize { start, bounds, handle, .. } => {
+                Drag::Resize {
+                    start, bounds, handle, ..
+                } => {
                     let to = handle.resize(view.axis, &bounds, world - start, grid);
                     editor.overlay.transform = Some(Remap { from: bounds, to });
                 }
@@ -607,7 +667,9 @@ impl MalletApp {
                     let offset = snapped_offset(view.axis, &bounds, world - start, grid);
                     editor.overlay.block = Some(Remap::translate(bounds, offset).to);
                 }
-                Drag::ResizeBlock { start, bounds, handle, .. } => {
+                Drag::ResizeBlock {
+                    start, bounds, handle, ..
+                } => {
                     editor.overlay.block = Some(handle.resize(view.axis, &bounds, world - start, grid));
                 }
             }
@@ -644,7 +706,11 @@ fn finish_drag(drag: Drag, editor: &mut Editor, modifiers: Modifiers) -> Result<
         Drag::Marquee { .. } => {
             if let Some((axis, a, b)) = editor.overlay.marquee.take() {
                 let owners = editor.scene.owners_inside(axis, a, b);
-                let mode = if modifiers.ctrl { SelectMode::Add } else { SelectMode::Replace };
+                let mode = if modifiers.ctrl {
+                    SelectMode::Add
+                } else {
+                    SelectMode::Replace
+                };
                 editor.select(owners, mode);
             }
             Ok(())
@@ -757,9 +823,7 @@ fn choose_game_dir(editor: &mut Editor) {
     };
     match editor.set_game_dir(&folder) {
         Ok(_) => {
-            let config = Config {
-                game_dir: Some(folder),
-            };
+            let config = Config { game_dir: Some(folder) };
             if let Err(error) = config.save() {
                 editor.message = format!("Could not save settings: {error}");
             }
@@ -787,15 +851,24 @@ fn open_or_new(editor: &mut Editor, path: Option<PathBuf>) {
 fn viewport_menu(ui: &mut egui::Ui, slot: usize, rect: Rect, editor: &mut Editor) {
     let mode = editor.layout[slot];
     let font = egui::FontId::proportional(13.0);
-    let width = ui.fonts(|fonts| fonts.layout_no_wrap(mode.label().to_owned(), font, egui::Color32::WHITE).size().x);
+    let width = ui.fonts(|fonts| {
+        fonts
+            .layout_no_wrap(mode.label().to_owned(), font, egui::Color32::WHITE)
+            .size()
+            .x
+    });
     let label = Rect::from_min_size(rect.left_top() + egui::vec2(3.0, 2.0), egui::vec2(width + 8.0, 19.0));
     let response = ui
         .interact(label, Id::new(("viewport_label", slot)), Sense::click())
         .on_hover_text("Change this viewport's type");
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        ui.painter_at(rect)
-            .rect_stroke(label, 2.0, egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)), egui::StrokeKind::Inside);
+        ui.painter_at(rect).rect_stroke(
+            label,
+            2.0,
+            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)),
+            egui::StrokeKind::Inside,
+        );
     }
     let popup = Id::new(("viewport_menu", slot));
     if response.clicked() {

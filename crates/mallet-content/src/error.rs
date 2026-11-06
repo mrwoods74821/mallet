@@ -33,7 +33,10 @@ impl Error for ContentError {}
 
 impl ContentError {
     pub(crate) fn io(path: impl Into<PathBuf>, error: io::Error) -> Self {
-        Self::Io { path: path.into(), error }
+        Self::Io {
+            path: path.into(),
+            error,
+        }
     }
 
     pub(crate) fn format(path: impl Into<PathBuf>, message: impl Into<String>) -> Self {

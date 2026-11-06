@@ -115,10 +115,7 @@ fn handle(mut request: Request, handler: &dyn ToolHandler, tools: &Value) {
             .with_header(header("Allow", "POST"))
     } else {
         let mut body = String::new();
-        let read = request
-            .as_reader()
-            .take(MAX_BODY_BYTES)
-            .read_to_string(&mut body);
+        let read = request.as_reader().take(MAX_BODY_BYTES).read_to_string(&mut body);
         match read {
             Ok(_) => answer(&body, handler, tools),
             Err(error) => Response::from_string(error.to_string()).with_status_code(400),
@@ -186,11 +183,7 @@ fn header(name: &str, value: &str) -> Header {
 
 /// Allows requests without an `Origin` header and requests from loopback origins only.
 fn origin_allowed(request: &Request) -> bool {
-    let Some(origin) = request
-        .headers()
-        .iter()
-        .find(|header| header.field.equiv("Origin"))
-    else {
+    let Some(origin) = request.headers().iter().find(|header| header.field.equiv("Origin")) else {
         return true;
     };
     let origin = origin.value.as_str();
