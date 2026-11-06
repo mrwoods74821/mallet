@@ -6,6 +6,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod branding;
 mod canvas;
 mod compile;
 mod config;
@@ -42,6 +43,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Mallet")
+            .with_icon(std::sync::Arc::new(branding::window_icon()))
             .with_inner_size([1600.0, 1000.0])
             .with_drag_and_drop(true),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {

@@ -13,6 +13,11 @@ maps through a built-in MCP server.
 | `mallet-content` | Game content: `gameinfo.txt` search paths, VPK archives, VMT materials, VTF textures, MDL models and FGD entity classes. |
 | `mallet` | The editor application: window, viewports, key bindings and the MCP server. |
 
+The icon lives in `branding/`: `make_icons.py` draws the mallet once and writes the SVG,
+PNGs and the multi-size `.ico` (with a simpler drawing at 24 pixels and below). `build.rs`
+embeds the `.ico` and version details in the executable on Windows; `branding.rs` gives the
+window, menu bar, About window and MCP server's `serverInfo` the same picture.
+
 ## Lossless loading and saving
 
 A VMF is parsed into `Vmf`, whose world, entities, solids and sides are typed while every
@@ -235,7 +240,7 @@ Tools:
 | `list_compile_presets`, `set_compile_preset`, `delete_compile_preset` | Compile presets, with each step's command for the open map |
 | `compile_map` | Save and compile, returning at once or waiting up to `wait_seconds` |
 | `compile_status`, `cancel_compile` | Steps, progress, problems, leak and output of the compile |
-| `show_compile`, `show_options` | Open the compile window or Mallet Options on a tab |
+| `show_compile`, `show_options`, `show_about` | Open the compile window or Mallet Options on a tab, or Help > About |
 | `load_pointfile`, `clear_pointfile` | Show or hide a leak line |
 | `send_input` | Key presses, clicks and drags fed into the window as if a user made them |
 

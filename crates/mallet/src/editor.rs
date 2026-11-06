@@ -280,6 +280,8 @@ pub struct Editor {
     /// Whether the Mallet Options window is showing, and a section an MCP tool asked for.
     pub options_open: bool,
     pub options_section: Option<String>,
+    /// Whether Help > About Mallet is showing.
+    pub about_open: bool,
     /// The leak line VBSP traced, shown in the views.
     pub pointfile: Option<Vec<DVec3>>,
     /// The GPU renderer for the textured camera view, created once the window has a GPU.
@@ -329,6 +331,7 @@ impl Default for Editor {
             compile_tab: None,
             options_open: false,
             options_section: None,
+            about_open: false,
             pointfile: None,
             window_shot: WindowShot::Idle,
             gpu: None,

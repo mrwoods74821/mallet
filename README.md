@@ -1,11 +1,18 @@
-# Mallet
+<p align="center">
+  <img src="branding/mallet.svg" width="128" alt="Mallet's icon: a white mallet on a black circle">
+</p>
 
-A Hammer-style level editor for Source engine VMF maps, written in Rust.
+<h1 align="center">Mallet</h1>
 
-Early work in progress. It already opens and saves VMF files without losing anything,
-shows them in Hammer's four-viewport layout with wireframe brushes, and has Hammer's
-Selection and Block tools for selecting, moving, cloning, deleting and creating brushes. A built-in MCP server
-lets AI agents inspect the map, edit entities and take viewport screenshots.
+<p align="center">A Hammer-style level editor for Source engine VMF maps, written in Rust.</p>
+
+Mallet opens and saves VMF files without losing anything and shows them in Hammer's
+four-viewport layout, with textured brushes and prop models in 3D. It has Hammer's
+Selection, Block and Entity tools, Object Properties driven by the game's FGD, map tabs,
+and a CompilePal-style compile window with presets, SourceCubemap and leak lines. A
+built-in MCP server lets AI agents inspect and edit maps, compile them and take
+screenshots. It is a work in progress: texturing, clipping, vertex editing and
+displacements are next.
 
 ## Running
 

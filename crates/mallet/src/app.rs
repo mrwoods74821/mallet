@@ -18,6 +18,7 @@ use mallet_vmf::geometry::Bounds;
 
 use eframe::egui_wgpu;
 
+use crate::branding;
 use crate::canvas::{Canvas, PainterCanvas};
 use crate::config::{self, Config};
 use crate::editor::{self, Editor, SelectMode, Tool, ViewMode, WindowShot, VIEWPORT_GAP};
@@ -132,6 +133,8 @@ pub struct MalletApp {
     compile: compile_window::CompileWindowState,
     /// The Mallet Options window's section.
     options: options::OptionsState,
+    /// Mallet's icon, for the menu bar and the About window; loaded on the first frame.
+    logo: Option<egui::TextureHandle>,
     /// The Object Properties window's tab, drafts and other state.
     properties: properties::PropertiesState,
 }
@@ -155,6 +158,7 @@ impl MalletApp {
             texture_previews: chrome::TexturePreviews::new(),
             net_graph: NetGraph::default(),
             compile: compile_window::CompileWindowState::default(),
+            logo: None,
             options: options::OptionsState::default(),
             properties: properties::PropertiesState::default(),
         };
@@ -264,6 +268,9 @@ impl MalletApp {
         let mut draw_distance = editor.config.view.draw_distance;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
+                let logo = self.logo.get_or_insert_with(|| branding::logo_texture(ctx)).id();
+                ui.add(egui::Image::new((logo, egui::Vec2::splat(16.0))))
+                    .on_hover_text(format!("Mallet {}", env!("CARGO_PKG_VERSION")));
                 ui.menu_button("File", |ui| {
                     menu_item(ui, &self.keymap, "New", Action::NewFile, &mut chosen);
                     menu_item(ui, &self.keymap, "Open...", Action::OpenFile, &mut chosen);
@@ -327,6 +334,12 @@ impl MalletApp {
                     menu_item(ui, &self.keymap, "Entity Tool", Action::EntityTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Create Block", Action::CreateBlock, &mut chosen);
                 });
+                ui.menu_button("Help", |ui| {
+                    if ui.button("About Mallet").clicked() {
+                        editor.about_open = true;
+                        ui.close_menu();
+                    }
+                });
             });
         });
         if let Some(action) = chosen {
@@ -347,6 +360,60 @@ impl MalletApp {
             if !ctx.input(|input| input.pointer.any_down()) {
                 editor.save_config();
             }
+        }
+    }
+
+    /// Help > About Mallet: the icon, version, and where things are.
+    fn about_window(&mut self, ctx: &egui::Context, editor: &mut Editor) {
+        if !editor.about_open {
+            return;
+        }
+        let logo = self.logo.get_or_insert_with(|| branding::logo_texture(ctx)).id();
+        let mut open = true;
+        egui::Window::new("About Mallet")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(8.0);
+                    ui.add(egui::Image::new((logo, egui::Vec2::splat(112.0))));
+                    ui.add_space(6.0);
+                    ui.heading(egui::RichText::new("Mallet").size(26.0).strong());
+                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                    ui.label(egui::RichText::new(env!("CARGO_PKG_DESCRIPTION")).color(egui::Color32::GRAY));
+                    ui.add_space(10.0);
+                });
+                egui::Grid::new("about_details")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Game");
+                        ui.label(
+                            editor
+                                .game_dir()
+                                .map_or_else(|| "none".to_owned(), |dir| dir.display().to_string()),
+                        );
+                        ui.end_row();
+                        ui.label("Graphics");
+                        ui.label(if editor.gpu_info.is_empty() {
+                            "starting"
+                        } else {
+                            editor.gpu_info.as_str()
+                        });
+                        ui.end_row();
+                        ui.label("MCP server");
+                        ui.label(self.mcp_url.as_deref().unwrap_or("off"));
+                        ui.end_row();
+                        ui.label("Settings");
+                        ui.label(config::data_dir().map_or_else(String::new, |dir| dir.display().to_string()));
+                        ui.end_row();
+                    });
+                ui.add_space(6.0);
+            });
+        if !open {
+            editor.about_open = false;
         }
     }
 
@@ -854,6 +921,7 @@ impl eframe::App for MalletApp {
         self.properties_window(ctx, &mut editor);
         self.compile_window(ctx, &mut editor);
         self.options_window(ctx, &mut editor);
+        self.about_window(ctx, &mut editor);
         self.finish_compile(ctx, &mut editor);
         apply_view_options(&mut editor);
         egui::CentralPanel::default()

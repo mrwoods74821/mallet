@@ -147,7 +147,12 @@ fn dispatch(method: &str, params: &Value, handler: &dyn ToolHandler, tools: &Val
             Ok(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": "mallet", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": {
+                    "name": "mallet",
+                    "title": "Mallet",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "icons": [{ "src": crate::branding::icon_data_url(), "mimeType": "image/png", "sizes": ["64x64"] }],
+                },
                 "instructions": INSTRUCTIONS,
             }))
         }

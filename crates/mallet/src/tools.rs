@@ -311,6 +311,12 @@ pub fn definitions() -> Value {
             &[],
         ),
         tool(
+            "show_about",
+            "Open or close Help > About Mallet.",
+            json!({ "open": { "type": "boolean" } }),
+            &[],
+        ),
+        tool(
             "load_pointfile",
             "Show a VBSP leak line (.lin) in the views and move the camera to it. Defaults to the open map's.",
             json!({ "path": { "type": "string" } }),
@@ -698,6 +704,14 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
                 "Mallet Options is open."
             } else {
                 "Mallet Options is closed."
+            }))
+        }
+        "show_about" => {
+            editor.about_open = args.get("open").and_then(Value::as_bool).unwrap_or(true);
+            Ok(ToolResult::text(if editor.about_open {
+                "About Mallet is open."
+            } else {
+                "About Mallet is closed."
             }))
         }
         "load_pointfile" => {
