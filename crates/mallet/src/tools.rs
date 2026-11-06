@@ -11,7 +11,8 @@ use serde_json::{json, Value};
 
 use eframe::egui::Pos2;
 
-use crate::config::Config;
+use crate::compile::{self, Outcome, Preset, Severity};
+use crate::config::{self, Config, ToolKind};
 use crate::editor::{Editor, SelectMode, ShotTarget, Tool, ViewMode, MAX_GRID, MIN_GRID};
 use crate::input::{self, InputFrame};
 use crate::mcp::ToolResult;
@@ -226,6 +227,87 @@ pub fn definitions() -> Value {
             &["paths"],
         ),
         tool(
+            "get_settings",
+            "Read Mallet Options: game folder, FGD files, compile tool paths (with the programs found on this \
+             computer), compile behaviour and viewport options.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "set_settings",
+            "Change Mallet Options and save them. Pass only what changes, in the shape get_settings returns under \
+             \"config\", e.g. {\"tools\": {\"sourcecubemap\": \"D:/scm/sourcecubemap.exe\"}} or \
+             {\"view\": {\"camera_speed\": 600}}. A tool path of null means find it automatically.",
+            json!({ "settings": { "type": "object" } }),
+            &["settings"],
+        ),
+        tool(
+            "list_compile_presets",
+            "List compile presets with their steps and options, and the command each enabled step would run for \
+             the open map.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "set_compile_preset",
+            "Create or replace a compile preset (matched by name). Steps have kind (vbsp, vvis, vrad, vbspinfo, \
+             source_cubemap, repack, copy_to_game, run_game, custom), enabled, options [{flag, value}], \
+             extra_args, and for custom steps name, program, args and working_dir. Arguments may use {map}, {vmf}, \
+             {bsp}, {mapdir}, {gamedir}, {gamemaps} and {bindir}.",
+            json!({ "preset": { "type": "object" } }),
+            &["preset"],
+        ),
+        tool(
+            "delete_compile_preset",
+            "Delete a compile preset by name.",
+            json!({ "name": { "type": "string" } }),
+            &["name"],
+        ),
+        tool(
+            "compile_map",
+            "Save the open map and compile it with a preset (default: the one used last). Returns at once with \
+             the plan, or waits up to wait_seconds for the compile to finish and returns its result. Check on a \
+             running compile with compile_status.",
+            json!({
+                "preset": { "type": "string" },
+                "wait_seconds": { "type": "number", "minimum": 0, "maximum": 3600 }
+            }),
+            &[],
+        ),
+        tool(
+            "compile_status",
+            "The running or last compile: each step's status and time, progress, errors and warnings with the \
+             brush or position they name, whether the map leaked, and the last lines of output.",
+            json!({ "lines": { "type": "integer", "minimum": 0, "description": "Output lines to include; default 40." } }),
+            &[],
+        ),
+        tool("cancel_compile", "Stop the running compile.", json!({}), &[]),
+        tool(
+            "show_compile",
+            "Open or close the compile window (F9), optionally on a tab.",
+            json!({
+                "open": { "type": "boolean" },
+                "tab": { "type": "string", "enum": ["steps", "output", "problems"] }
+            }),
+            &[],
+        ),
+        tool(
+            "show_options",
+            "Open or close Mallet Options, optionally on a section.",
+            json!({
+                "open": { "type": "boolean" },
+                "section": { "type": "string", "enum": ["game", "tools", "compiling", "viewports", "keyboard", "agents"] }
+            }),
+            &[],
+        ),
+        tool(
+            "load_pointfile",
+            "Show a VBSP leak line (.lin) in the views and move the camera to it. Defaults to the open map's.",
+            json!({ "path": { "type": "string" } }),
+            &[],
+        ),
+        tool("clear_pointfile", "Hide the leak line.", json!({}), &[]),
+        tool(
             "show_properties",
             "Open or close the Object Properties window for the current selection, as Alt+Enter does.",
             json!({
@@ -347,12 +429,7 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
         "get_status" => Ok(ToolResult::json(&status_json(editor))),
         "set_game_dir" => {
             let path = PathBuf::from(string_arg(args, "path")?);
-            let mounts = editor.set_game_dir(&path)?;
-            let config = Config {
-                game_dir: Some(path.clone()),
-                fgds: Vec::new(),
-            };
-            config.save()?;
+            let mounts = editor.choose_game(&path)?;
             Ok(ToolResult::text(format!(
                 "Mounted {} with {mounts} search paths.",
                 path.display()
@@ -471,11 +548,155 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
                 .filter_map(Value::as_str)
                 .map(PathBuf::from)
                 .collect();
-            let count = editor.set_fgds(&paths)?;
-            let mut config = Config::load();
-            config.fgds = paths;
-            config.save()?;
+            let count = editor.choose_fgds(paths)?;
             Ok(ToolResult::text(format!("Read {count} entity classes.")))
+        }
+        "get_settings" => {
+            let game_dir = editor.game_dir().map(PathBuf::from);
+            let tools: serde_json::Map<String, Value> = ToolKind::ALL
+                .into_iter()
+                .map(|tool| {
+                    let found: Vec<String> = tool
+                        .candidates(game_dir.as_deref())
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect();
+                    let value = json!({
+                        "using": editor.tool_path(tool).map(|path| path.display().to_string()),
+                        "found": found,
+                    });
+                    (tool.key().to_owned(), value)
+                })
+                .collect();
+            Ok(ToolResult::json(&json!({
+                "config": serde_json::to_value(&editor.config).map_err(|error| error.to_string())?,
+                "tools": tools,
+                "data_dir": config::data_dir().map(|dir| dir.display().to_string()),
+            })))
+        }
+        "set_settings" => {
+            let changes = args
+                .get("settings")
+                .filter(|value| value.is_object())
+                .ok_or("\"settings\" must be an object")?;
+            let mut value = serde_json::to_value(&editor.config).map_err(|error| error.to_string())?;
+            merge(&mut value, changes);
+            let updated: Config =
+                serde_json::from_value(value).map_err(|error| format!("invalid settings: {error}"))?;
+            let game_changed = updated.game_dir != editor.config.game_dir;
+            let fgds_changed = updated.fgds != editor.config.fgds;
+            let (game_dir, fgds) = (updated.game_dir.clone(), updated.fgds.clone());
+            editor.config = updated;
+            if game_changed {
+                if let Some(game_dir) = game_dir {
+                    editor.choose_game(&game_dir)?;
+                }
+            }
+            if fgds_changed || game_changed {
+                editor.choose_fgds(fgds)?;
+            }
+            editor.config.save()?;
+            Ok(ToolResult::json(
+                &serde_json::to_value(&editor.config).map_err(|error| error.to_string())?,
+            ))
+        }
+        "list_compile_presets" => {
+            let presets: Vec<Value> = editor
+                .compile_presets
+                .iter()
+                .map(|preset| {
+                    let mut value = serde_json::to_value(preset).unwrap_or(Value::Null);
+                    value["commands"] = match editor.preview_preset(preset) {
+                        Ok(commands) => json!(commands),
+                        Err(error) => json!({ "error": error }),
+                    };
+                    value
+                })
+                .collect();
+            Ok(ToolResult::json(&json!({
+                "last_used": editor.config.compile.last_preset,
+                "presets": presets,
+            })))
+        }
+        "set_compile_preset" => {
+            let preset: Preset = serde_json::from_value(args.get("preset").cloned().unwrap_or(Value::Null))
+                .map_err(|error| format!("invalid preset: {error}"))?;
+            if preset.name.trim().is_empty() {
+                return Err("the preset needs a name".to_owned());
+            }
+            let name = preset.name.clone();
+            match editor
+                .compile_presets
+                .iter_mut()
+                .find(|existing| existing.name.eq_ignore_ascii_case(&name))
+            {
+                Some(existing) => *existing = preset,
+                None => editor.compile_presets.push(preset),
+            }
+            compile::save_presets(&editor.compile_presets)?;
+            Ok(ToolResult::text(format!("Saved the preset \"{name}\".")))
+        }
+        "delete_compile_preset" => {
+            let name = string_arg(args, "name")?;
+            let before = editor.compile_presets.len();
+            editor
+                .compile_presets
+                .retain(|preset| !preset.name.eq_ignore_ascii_case(name));
+            if editor.compile_presets.len() == before {
+                return Err(format!("there is no preset named \"{name}\""));
+            }
+            compile::save_presets(&editor.compile_presets)?;
+            Ok(ToolResult::text(format!("Deleted the preset \"{name}\".")))
+        }
+        "compile_map" => {
+            let preset = optional_string(args, "preset")?
+                .map(str::to_owned)
+                .unwrap_or_else(|| editor.config.compile.last_preset.clone());
+            editor.start_compile(&preset)?;
+            Ok(ToolResult::json(&compile_status_json(editor, 10)))
+        }
+        "compile_status" => {
+            editor.poll_compile();
+            let lines = optional_number(args, "lines")?.unwrap_or(40.0) as usize;
+            Ok(ToolResult::json(&compile_status_json(editor, lines)))
+        }
+        "cancel_compile" => Ok(ToolResult::text(if editor.cancel_compile() {
+            "Cancelling the compile."
+        } else {
+            "No compile is running."
+        })),
+        "show_compile" => {
+            editor.compile_open = args.get("open").and_then(Value::as_bool).unwrap_or(true);
+            editor.compile_tab = optional_string(args, "tab")?.map(str::to_owned);
+            Ok(ToolResult::text(if editor.compile_open {
+                "The compile window is open."
+            } else {
+                "The compile window is closed."
+            }))
+        }
+        "show_options" => {
+            editor.options_open = args.get("open").and_then(Value::as_bool).unwrap_or(true);
+            editor.options_section = optional_string(args, "section")?.map(str::to_owned);
+            Ok(ToolResult::text(if editor.options_open {
+                "Mallet Options is open."
+            } else {
+                "Mallet Options is closed."
+            }))
+        }
+        "load_pointfile" => {
+            let path = match optional_string(args, "path")? {
+                Some(path) => PathBuf::from(path),
+                None => editor.compile_context()?.vmf.with_extension("lin"),
+            };
+            let points = compile::runner::read_pointfile(&path)
+                .ok_or_else(|| format!("{} is not a pointfile", path.display()))?;
+            let count = points.len();
+            editor.set_pointfile(points);
+            Ok(ToolResult::text(format!("Showing a leak line of {count} points.")))
+        }
+        "clear_pointfile" => {
+            editor.clear_pointfile();
+            Ok(ToolResult::text("The leak line is hidden."))
         }
         "show_properties" => {
             editor.properties_open = args.get("open").and_then(Value::as_bool).unwrap_or(true);
@@ -890,6 +1111,80 @@ fn entity_summary(entity: &Entity) -> Value {
         "targetname": entity.get("targetname"),
         "origin": entity.origin().map(|origin| origin.to_array()),
         "solids": entity.solids().count(),
+    })
+}
+
+/// Merges `changes` into `target`: objects merge key by key, anything else replaces.
+fn merge(target: &mut Value, changes: &Value) {
+    match (target, changes) {
+        (Value::Object(target), Value::Object(changes)) => {
+            for (key, change) in changes {
+                merge(target.entry(key.clone()).or_insert(Value::Null), change);
+            }
+        }
+        (target, change) => *target = change.clone(),
+    }
+}
+
+/// The running or last compile, for `compile_map` and `compile_status`.
+pub fn compile_status_json(editor: &Editor, lines: usize) -> Value {
+    let Some(job) = &editor.compile_job else {
+        return json!({ "state": "none", "message": "Nothing has been compiled yet." });
+    };
+    let job = job.lock();
+    let (state, error) = match &job.outcome {
+        None => ("running", None),
+        Some(Outcome::Succeeded) => ("succeeded", None),
+        Some(Outcome::Failed(error)) => ("failed", Some(error.clone())),
+        Some(Outcome::Cancelled) => ("cancelled", None),
+    };
+    let steps: Vec<Value> = job
+        .steps
+        .iter()
+        .map(|step| {
+            json!({
+                "title": step.title,
+                "status": format!("{:?}", step.status).to_lowercase(),
+                "seconds": step.time().map(|time| (time.as_secs_f64() * 10.0).round() / 10.0),
+                "progress": step.progress,
+                "command": step.command,
+            })
+        })
+        .collect();
+    let problems: Vec<Value> = job
+        .problems
+        .iter()
+        .take(100)
+        .map(|problem| {
+            json!({
+                "severity": if problem.severity == Severity::Error { "error" } else { "warning" },
+                "step": job.steps.get(problem.step).map(|step| step.title.clone()),
+                "text": problem.text,
+                "brush": problem.brush,
+                "position": problem.position.map(|point| [point.x, point.y, point.z]),
+            })
+        })
+        .collect();
+    let tail: Vec<&str> = job
+        .lines
+        .iter()
+        .skip(job.lines.len().saturating_sub(lines))
+        .map(|line| line.text.as_str())
+        .collect();
+    json!({
+        "state": state,
+        "error": error,
+        "map": job.map,
+        "preset": job.preset,
+        "seconds": (job.elapsed().as_secs_f64() * 10.0).round() / 10.0,
+        "progress": (job.progress() * 100.0).round() / 100.0,
+        "steps": steps,
+        "errors": job.errors(),
+        "warnings": job.warnings(),
+        "problems": problems,
+        "leaked": job.leaked,
+        "leak_line_shown": editor.pointfile.is_some(),
+        "output": tail,
     })
 }
 

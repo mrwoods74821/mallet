@@ -1,9 +1,10 @@
-//! Settings kept between runs, stored as JSON in `%APPDATA%\Mallet\config.json`.
+//! Settings kept between runs, stored as JSON in `%APPDATA%\Mallet\config.json`, and the
+//! programs Mallet runs to compile maps.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
 
 /// Game folders tried, in order, inside each Steam library when no game is configured.
 const KNOWN_GAMES: [&str; 5] = [
@@ -15,52 +16,279 @@ const KNOWN_GAMES: [&str; 5] = [
 ];
 const DEFAULT_STEAM_DIR: &str = "C:/Program Files (x86)/Steam";
 
-/// Settings kept between runs.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// Settings kept between runs. Missing fields take their defaults, so older files load.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// The game folder holding `gameinfo.txt`, such as `.../GarrysMod/garrysmod`.
     pub game_dir: Option<PathBuf>,
     /// FGD files chosen instead of the game's default one; empty to use the default.
     pub fgds: Vec<PathBuf>,
+    /// Programs chosen for each compile tool; a missing one is found automatically.
+    pub tools: ToolPaths,
+    pub compile: CompileOptions,
+    pub view: ViewOptions,
+}
+
+/// Programs chosen in Mallet Options. `None` means "find it automatically".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolPaths {
+    pub vbsp: Option<PathBuf>,
+    pub vvis: Option<PathBuf>,
+    pub vrad: Option<PathBuf>,
+    pub vbspinfo: Option<PathBuf>,
+    pub bspzip: Option<PathBuf>,
+    pub sourcecubemap: Option<PathBuf>,
+    pub game: Option<PathBuf>,
+}
+
+impl ToolPaths {
+    pub fn get(&self, tool: ToolKind) -> Option<&PathBuf> {
+        match tool {
+            ToolKind::Vbsp => self.vbsp.as_ref(),
+            ToolKind::Vvis => self.vvis.as_ref(),
+            ToolKind::Vrad => self.vrad.as_ref(),
+            ToolKind::Vbspinfo => self.vbspinfo.as_ref(),
+            ToolKind::Bspzip => self.bspzip.as_ref(),
+            ToolKind::SourceCubemap => self.sourcecubemap.as_ref(),
+            ToolKind::Game => self.game.as_ref(),
+        }
+    }
+
+    pub fn set(&mut self, tool: ToolKind, path: Option<PathBuf>) {
+        let slot = match tool {
+            ToolKind::Vbsp => &mut self.vbsp,
+            ToolKind::Vvis => &mut self.vvis,
+            ToolKind::Vrad => &mut self.vrad,
+            ToolKind::Vbspinfo => &mut self.vbspinfo,
+            ToolKind::Bspzip => &mut self.bspzip,
+            ToolKind::SourceCubemap => &mut self.sourcecubemap,
+            ToolKind::Game => &mut self.game,
+        };
+        *slot = path;
+    }
+}
+
+/// How compiles behave.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompileOptions {
+    /// Save the map before compiling it, so the compile sees the latest changes.
+    pub save_before: bool,
+    /// Run the compilers below normal priority so the editor stays responsive.
+    pub low_priority: bool,
+    /// Flash the taskbar button when a compile ends.
+    pub notify: bool,
+    /// Show the leak line in the views when VBSP finds a leak.
+    pub load_pointfile: bool,
+    /// Keep each compile's log in `%APPDATA%\Mallet\logs`.
+    pub keep_logs: bool,
+    /// The preset the compile window starts with and Shift+F9 runs.
+    pub last_preset: String,
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        Self {
+            save_before: true,
+            low_priority: true,
+            notify: true,
+            load_pointfile: true,
+            keep_logs: true,
+            last_preset: "Normal".to_owned(),
+        }
+    }
+}
+
+/// How the viewports look and move.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ViewOptions {
+    pub net_graph: bool,
+    /// How far the 3D view draws, in units.
+    pub draw_distance: f64,
+    /// Horizontal field of view of the 3D view, in degrees.
+    pub fov: f64,
+    /// 3D camera speed in units per second.
+    pub camera_speed: f64,
+    /// Degrees turned per point of mouse movement in mouselook.
+    pub look_sensitivity: f64,
+    /// Grid size of new maps.
+    pub default_grid: f64,
+}
+
+impl Default for ViewOptions {
+    fn default() -> Self {
+        Self {
+            net_graph: true,
+            draw_distance: crate::view3d::DEFAULT_DRAW_DISTANCE,
+            fov: crate::view3d::DEFAULT_FOV,
+            camera_speed: crate::view3d::DEFAULT_MOVE_SPEED,
+            look_sensitivity: crate::view3d::DEFAULT_LOOK_SENSITIVITY,
+            default_grid: 64.0,
+        }
+    }
 }
 
 impl Config {
     /// Loads the settings, or defaults when there are none yet or they cannot be read.
     pub fn load() -> Self {
-        let Some(path) = config_path() else {
-            return Self::default();
-        };
-        let Ok(text) = fs::read_to_string(path) else {
-            return Self::default();
-        };
-        let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        Self {
-            game_dir: value.get("game_dir").and_then(Value::as_str).map(PathBuf::from),
-            fgds: value
-                .get("fgds")
-                .and_then(Value::as_array)
-                .map(|paths| paths.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
-                .unwrap_or_default(),
-        }
+        config_path().map_or_else(Self::default, |path| Self::load_from(&path))
+    }
+
+    /// Loads settings from a file, or defaults when it is missing or unreadable.
+    pub fn load_from(path: &Path) -> Self {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
     }
 
     /// Writes the settings, creating the folder if needed.
     pub fn save(&self) -> Result<(), String> {
         let path = config_path().ok_or("APPDATA is not set, so settings cannot be saved")?;
+        self.save_to(&path)
+    }
+
+    pub fn save_to(&self, path: &Path) -> Result<(), String> {
         if let Some(folder) = path.parent() {
             fs::create_dir_all(folder).map_err(|error| error.to_string())?;
         }
-        let value = json!({
-            "game_dir": self.game_dir.as_ref().map(|dir| dir.display().to_string()),
-            "fgds": self.fgds.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
-        });
-        let text = serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?;
+        let text = serde_json::to_string_pretty(self).map_err(|error| error.to_string())?;
         fs::write(path, text).map_err(|error| error.to_string())
     }
 }
 
+/// Mallet's folder in `%APPDATA%`, holding settings, presets and compile logs.
+pub fn data_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|appdata| Path::new(&appdata).join("Mallet"))
+}
+
 fn config_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|appdata| Path::new(&appdata).join("Mallet").join("config.json"))
+    data_dir().map(|dir| dir.join("config.json"))
+}
+
+/// A program Mallet runs while compiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolKind {
+    Vbsp,
+    Vvis,
+    Vrad,
+    Vbspinfo,
+    Bspzip,
+    SourceCubemap,
+    Game,
+}
+
+impl ToolKind {
+    pub const ALL: [ToolKind; 7] = [
+        ToolKind::Vbsp,
+        ToolKind::Vvis,
+        ToolKind::Vrad,
+        ToolKind::Vbspinfo,
+        ToolKind::Bspzip,
+        ToolKind::SourceCubemap,
+        ToolKind::Game,
+    ];
+
+    /// The name shown in Mallet Options.
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolKind::Vbsp => "VBSP",
+            ToolKind::Vvis => "VVIS",
+            ToolKind::Vrad => "VRAD",
+            ToolKind::Vbspinfo => "VBSPInfo",
+            ToolKind::Bspzip => "BSPZip",
+            ToolKind::SourceCubemap => "SourceCubemap",
+            ToolKind::Game => "Game",
+        }
+    }
+
+    /// The name used in settings and MCP tools.
+    pub fn key(self) -> &'static str {
+        match self {
+            ToolKind::Vbsp => "vbsp",
+            ToolKind::Vvis => "vvis",
+            ToolKind::Vrad => "vrad",
+            ToolKind::Vbspinfo => "vbspinfo",
+            ToolKind::Bspzip => "bspzip",
+            ToolKind::SourceCubemap => "sourcecubemap",
+            ToolKind::Game => "game",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            ToolKind::Vbsp => "Turns the VMF into a BSP: brushes, entities and props.",
+            ToolKind::Vvis => "Works out what can be seen from where, so the engine draws less.",
+            ToolKind::Vrad => "Bakes the lighting.",
+            ToolKind::Vbspinfo => "Prints what a compiled map contains and how close it is to the limits.",
+            ToolKind::Bspzip => "Packs files into a BSP.",
+            ToolKind::SourceCubemap => "Builds cubemaps on the graphics card without starting the game.",
+            ToolKind::Game => "The game to test the map in.",
+        }
+    }
+
+    /// Every existing program that could be this tool, best first: the game's 64-bit
+    /// tools, its 32-bit ones and the Hammer++ builds, or for SourceCubemap and the game,
+    /// the usual install places.
+    pub fn candidates(self, game_dir: Option<&Path>) -> Vec<PathBuf> {
+        let root = game_dir.and_then(Path::parent);
+        let mut found: Vec<PathBuf> = Vec::new();
+        let mut add = |path: PathBuf| {
+            // Rebuilding from components gives one kind of slash on Windows.
+            let path: PathBuf = path.components().collect();
+            if path.is_file() && !found.contains(&path) {
+                found.push(path);
+            }
+        };
+        match self {
+            ToolKind::SourceCubemap => {
+                for folder in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+                    add(folder.join("sourcecubemap.exe"));
+                }
+                if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                    add(Path::new(&local).join("Programs/SourceCubemap/sourcecubemap.exe"));
+                }
+                for program_files in ["ProgramFiles", "ProgramFiles(x86)"] {
+                    if let Some(folder) = std::env::var_os(program_files) {
+                        add(Path::new(&folder).join("SourceCubemap/sourcecubemap.exe"));
+                    }
+                }
+                if let Some(home) = std::env::var_os("USERPROFILE") {
+                    add(Path::new(&home).join("SourceCubemap/sourcecubemap.exe"));
+                }
+                for drive in ["C:", "D:", "E:"] {
+                    add(PathBuf::from(format!(
+                        "{drive}/Github/SourceCubemap/build/release/sourcecubemap.exe"
+                    )));
+                    add(PathBuf::from(format!("{drive}/SourceCubemap/sourcecubemap.exe")));
+                }
+            }
+            ToolKind::Game => {
+                let Some(root) = root else { return found };
+                for name in ["gmod.exe", "hl2.exe", "hl2_win64.exe", "bin/win64/gmod.exe", "csgo.exe"] {
+                    add(root.join(name));
+                }
+                if let Some(game) = game_dir.and_then(Path::file_name) {
+                    add(root.join(format!("{}.exe", game.to_string_lossy())));
+                }
+            }
+            _ => {
+                let Some(root) = root else { return found };
+                let name = self.key();
+                for folder in ["bin/win64", "bin"] {
+                    add(root.join(folder).join(format!("{name}.exe")));
+                }
+                for folder in ["bin/win64", "bin"] {
+                    add(root.join(folder).join(format!("{name}plusplus.exe")));
+                }
+            }
+        }
+        found
+    }
 }
 
 /// Looks for an installed Source game: the first known game folder found in the Steam
@@ -83,4 +311,30 @@ pub fn detect_game_dir() -> Option<PathBuf> {
             .map(|game| library.join("steamapps").join("common").join(game))
             .find(|dir| dir.join("gameinfo.txt").is_file())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_files_load_with_defaults_and_round_trip() {
+        let folder = std::env::temp_dir().join(format!("mallet-config-{}", std::process::id()));
+        let path = folder.join("config.json");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(&path, r#"{ "game_dir": "C:/Games/hl2", "fgds": ["a.fgd"] }"#).unwrap();
+        let mut config = Config::load_from(&path);
+        assert_eq!(config.game_dir, Some(PathBuf::from("C:/Games/hl2")));
+        assert_eq!(config.fgds, [PathBuf::from("a.fgd")]);
+        assert!(config.compile.save_before);
+        assert_eq!(config.tools.get(ToolKind::Vrad), None);
+
+        config
+            .tools
+            .set(ToolKind::SourceCubemap, Some(PathBuf::from("D:/scm.exe")));
+        config.view.camera_speed = 500.0;
+        config.save_to(&path).unwrap();
+        assert_eq!(Config::load_from(&path), config);
+        fs::remove_dir_all(folder).unwrap();
+    }
 }

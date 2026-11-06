@@ -22,6 +22,12 @@ pub enum Action {
     BlockTool,
     EntityTool,
     Properties,
+    /// Open the compile window (Hammer's Run Map).
+    Compile,
+    /// Compile again with the preset used last.
+    CompileAgain,
+    /// Open Mallet Options.
+    Options,
     SelectAll,
     ClearSelection,
     DeleteSelection,
@@ -137,6 +143,8 @@ impl KeyMap {
                 (Action::BlockTool, Chord::shift(Key::B)),
                 (Action::EntityTool, Chord::shift(Key::E)),
                 (Action::Properties, Chord::alt(Key::Enter)),
+                (Action::Compile, Chord::key(Key::F9)),
+                (Action::CompileAgain, Chord::shift(Key::F9)),
                 (Action::SelectAll, Chord::ctrl(Key::A)),
                 (Action::ClearSelection, Chord::key(Key::Escape)),
                 (Action::DeleteSelection, Chord::key(Key::Delete)),
@@ -154,6 +162,11 @@ impl KeyMap {
                 (Action::LookDown, Chord::key(Key::ArrowDown)),
             ],
         }
+    }
+
+    /// Every binding, in table order.
+    pub fn bindings(&self) -> &[(Action, Chord)] {
+        &self.bindings
     }
 
     /// The first chord bound to an action, for display in menus.

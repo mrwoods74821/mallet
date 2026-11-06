@@ -116,12 +116,66 @@ impl MalletApp {
                         icon::GAUGE,
                         "Net graph",
                         None,
-                        self.show_net_graph,
+                        editor.config.view.net_graph,
                         TOOLBAR_ICON_SIZE,
                     )
                     .clicked()
                 {
-                    self.show_net_graph = !self.show_net_graph;
+                    editor.config.view.net_graph = !editor.config.view.net_graph;
+                    editor.save_config();
+                }
+                ui.separator();
+                let running = editor.compile_running();
+                let compile = self
+                    .icon_button(
+                        ui,
+                        icon::HAMMER,
+                        "Compile",
+                        Some(Action::Compile),
+                        editor.compile_open,
+                        TOOLBAR_ICON_SIZE,
+                    )
+                    .on_hover_text(
+                        "Compile the map with presets of VBSP, VVIS, VRAD, SourceCubemap and your own steps",
+                    );
+                if compile.clicked() {
+                    chosen = Some(Action::Compile);
+                }
+                if running {
+                    let job = editor
+                        .compile_job
+                        .as_ref()
+                        .map(|job| job.lock().progress())
+                        .unwrap_or(0.0);
+                    ui.add(egui::ProgressBar::new(job).desired_width(60.0).desired_height(10.0));
+                } else {
+                    let preset = editor.config.compile.last_preset.clone();
+                    if self
+                        .icon_button(
+                            ui,
+                            icon::PLAY,
+                            &format!("Compile again with \"{preset}\""),
+                            Some(Action::CompileAgain),
+                            false,
+                            TOOLBAR_ICON_SIZE,
+                        )
+                        .clicked()
+                    {
+                        chosen = Some(Action::CompileAgain);
+                    }
+                }
+                if self
+                    .icon_button(
+                        ui,
+                        icon::GEAR,
+                        "Mallet Options",
+                        None,
+                        editor.options_open,
+                        TOOLBAR_ICON_SIZE,
+                    )
+                    .clicked()
+                {
+                    editor.options_open = !editor.options_open;
                 }
             });
             ui.add_space(2.0);
@@ -401,7 +455,40 @@ impl MalletApp {
                 let step = if action == Action::NextTab { 1 } else { count - 1 };
                 let _ = editor.switch_tab((editor.active_tab() + step) % count);
             }
+            Action::Compile => self.open_compile_window(editor),
+            Action::CompileAgain => {
+                let preset = editor.config.compile.last_preset.clone();
+                if editor.is_untitled() {
+                    self.open_compile_window(editor);
+                    editor.message = "Save the map first, then compile it".to_owned();
+                } else {
+                    match editor.start_compile(&preset) {
+                        Ok(()) => self.compile.tab = super::compile_window::Tab::Output,
+                        Err(error) => {
+                            self.open_compile_window(editor);
+                            editor.message = error;
+                        }
+                    }
+                }
+            }
             _ => run(action, editor),
+        }
+    }
+
+    /// Reacts to a compile that just ended: flashes the taskbar and shows the problems
+    /// when there are errors.
+    pub(super) fn finish_compile(&mut self, ctx: &egui::Context, editor: &mut Editor) {
+        let Some(outcome) = editor.poll_compile() else { return };
+        if editor.config.compile.notify {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
+        if !matches!(outcome, crate::compile::Outcome::Succeeded)
+            && !matches!(outcome, crate::compile::Outcome::Cancelled)
+        {
+            editor.compile_open = true;
+            self.compile.tab = super::compile_window::Tab::Problems;
         }
     }
 

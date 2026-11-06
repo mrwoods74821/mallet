@@ -2,6 +2,9 @@
 //! toolbar, map tabs, tool palette and side panel are in `chrome`.
 
 mod chrome;
+mod compile_window;
+pub(crate) use compile_window::count;
+mod options;
 mod properties;
 
 use std::path::{Path, PathBuf};
@@ -34,7 +37,7 @@ const PICK_TOLERANCE_PIXELS: f64 = 4.0;
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 20] = [
+const KEY_ACTIONS: [Action; 22] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -49,6 +52,8 @@ const KEY_ACTIONS: [Action; 20] = [
     Action::BlockTool,
     Action::EntityTool,
     Action::Properties,
+    Action::Compile,
+    Action::CompileAgain,
     Action::SelectAll,
     Action::ClearSelection,
     Action::DeleteSelection,
@@ -123,7 +128,10 @@ pub struct MalletApp {
     texture_previews: chrome::TexturePreviews,
     /// Frame timing overlay in the camera viewport's bottom-right corner.
     net_graph: NetGraph,
-    show_net_graph: bool,
+    /// The compile window's preset, tab and other state.
+    compile: compile_window::CompileWindowState,
+    /// The Mallet Options window's section.
+    options: options::OptionsState,
     /// The Object Properties window's tab, drafts and other state.
     properties: properties::PropertiesState,
 }
@@ -146,7 +154,8 @@ impl MalletApp {
             closing: None,
             texture_previews: chrome::TexturePreviews::new(),
             net_graph: NetGraph::default(),
-            show_net_graph: true,
+            compile: compile_window::CompileWindowState::default(),
+            options: options::OptionsState::default(),
             properties: properties::PropertiesState::default(),
         };
         let mut fonts = egui::FontDefinitions::default();
@@ -185,6 +194,18 @@ impl MalletApp {
             }
             let result = tools::run(&mut editor::lock(&shared), name, arguments);
             ctx.request_repaint();
+            if name == "compile_map" && !result.is_error {
+                let wait = arguments
+                    .get("wait_seconds")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0);
+                if wait > 0.0 {
+                    wait_for_compile(&shared, Duration::from_secs_f64(wait.min(3600.0)));
+                    let mut editor = editor::lock(&shared);
+                    editor.poll_compile();
+                    return mcp::ToolResult::json(&tools::compile_status_json(&editor, 40));
+                }
+            }
             if name == "send_input" && !result.is_error {
                 if let Err(message) = wait_for_input(&shared, &ctx) {
                     return mcp::ToolResult::error(message);
@@ -239,7 +260,8 @@ impl MalletApp {
         let mut save_as = false;
         let mut choose_game = false;
         let mut choose_fgds = false;
-        let mut show_net_graph = self.show_net_graph;
+        let mut show_net_graph = editor.config.view.net_graph;
+        let mut draw_distance = editor.config.view.draw_distance;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -251,6 +273,9 @@ impl MalletApp {
                         save_as = true;
                         ui.close_menu();
                     }
+                    ui.separator();
+                    menu_item(ui, &self.keymap, "Compile...", Action::Compile, &mut chosen);
+                    menu_item(ui, &self.keymap, "Compile Again", Action::CompileAgain, &mut chosen);
                     ui.separator();
                     if ui.button("Exit").clicked() {
                         ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -265,6 +290,8 @@ impl MalletApp {
                     menu_item(ui, &self.keymap, "Select None", Action::ClearSelection, &mut chosen);
                     ui.separator();
                     menu_item(ui, &self.keymap, "Properties", Action::Properties, &mut chosen);
+                    ui.separator();
+                    menu_item(ui, &self.keymap, "Mallet Options...", Action::Options, &mut chosen);
                 });
                 ui.menu_button("View", |ui| {
                     menu_item(ui, &self.keymap, "Center 2D Views", Action::CenterViews2D, &mut chosen);
@@ -276,7 +303,7 @@ impl MalletApp {
                     ui.horizontal(|ui| {
                         ui.label("3D draw distance");
                         ui.add(
-                            egui::Slider::new(&mut editor.camera.far, 1024.0..=65536.0)
+                            egui::Slider::new(&mut draw_distance, 1024.0..=65536.0)
                                 .logarithmic(true)
                                 .integer(),
                         );
@@ -314,7 +341,13 @@ impl MalletApp {
         if choose_fgds {
             choose_fgd_files(editor);
         }
-        self.show_net_graph = show_net_graph;
+        if show_net_graph != editor.config.view.net_graph || draw_distance != editor.config.view.draw_distance {
+            editor.config.view.net_graph = show_net_graph;
+            editor.config.view.draw_distance = draw_distance;
+            if !ctx.input(|input| input.pointer.any_down()) {
+                editor.save_config();
+            }
+        }
     }
 
     fn status_bar(&self, ctx: &egui::Context, editor: &Editor) {
@@ -338,6 +371,7 @@ impl MalletApp {
                     if let Some(url) = &self.mcp_url {
                         ui.label(format!("MCP: {url}"));
                     }
+                    compile_status(ui, editor);
                 });
             });
         });
@@ -479,7 +513,7 @@ impl MalletApp {
                 };
                 canvas.label(rect.left_top() + egui::vec2(6.0, 4.0), label, color);
                 Camera3D::draw_crosshair(&painter, rect);
-                if self.show_net_graph && style == CameraStyle::Textured {
+                if editor.config.view.net_graph && style == CameraStyle::Textured {
                     let extra = editor.gpu.as_ref().map(|gpu| NetGraphExtra {
                         stats: gpu.stats,
                         reused: gpu.reused.iter().filter(|reused| **reused).count(),
@@ -818,6 +852,10 @@ impl eframe::App for MalletApp {
         self.side_panel(ctx, &mut editor);
         self.close_dialog(ctx, &mut editor);
         self.properties_window(ctx, &mut editor);
+        self.compile_window(ctx, &mut editor);
+        self.options_window(ctx, &mut editor);
+        self.finish_compile(ctx, &mut editor);
+        apply_view_options(&mut editor);
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(egui::Color32::from_gray(30)))
             .show(ctx, |ui| self.viewports(ui, &mut editor, frame));
@@ -833,6 +871,55 @@ impl eframe::App for MalletApp {
             raw_input.events.extend(frame.events);
             ctx.request_repaint();
         }
+    }
+}
+
+/// Copies the viewport settings from Mallet Options onto the camera every frame, so
+/// changes show at once.
+fn apply_view_options(editor: &mut Editor) {
+    let view = &editor.config.view;
+    editor.camera.far = view.draw_distance;
+    editor.camera.fov = view.fov;
+    editor.camera.move_speed = view.camera_speed;
+    editor.camera.look_sensitivity = view.look_sensitivity;
+}
+
+/// A small progress readout of the running or last compile, in the status bar.
+fn compile_status(ui: &mut egui::Ui, editor: &Editor) {
+    let Some(job) = &editor.compile_job else { return };
+    let job = job.lock();
+    let text = match &job.outcome {
+        None => {
+            let step = job
+                .steps
+                .iter()
+                .find(|step| step.status == crate::compile::StepStatus::Running)
+                .map_or("Starting", |step| step.title.as_str());
+            ui.add(
+                egui::ProgressBar::new(job.progress())
+                    .desired_width(90.0)
+                    .desired_height(12.0),
+            );
+            format!("Compiling: {step} {:.0}%", job.progress() * 100.0)
+        }
+        Some(crate::compile::Outcome::Succeeded) => format!("Compiled {}", job.map),
+        Some(crate::compile::Outcome::Failed(_)) => format!("Compile of {} failed", job.map),
+        Some(crate::compile::Outcome::Cancelled) => "Compile cancelled".to_owned(),
+    };
+    ui.label(text);
+}
+
+/// Waits, without holding the editor, until the compile ends or the time is up.
+fn wait_for_compile(shared: &Mutex<Editor>, limit: Duration) {
+    let Some(job) = editor::lock(shared).compile_job.as_ref().map(|job| job.shared()) else {
+        return;
+    };
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if job.lock().is_ok_and(|state| !state.is_running()) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -913,16 +1000,16 @@ fn wait_for_input(shared: &Mutex<Editor>, ctx: &egui::Context) -> Result<(), Str
 /// Mounts the configured game folder, or finds an installed Source game the first time
 /// and remembers it.
 fn load_game_content(editor: &mut Editor) {
-    let mut config = Config::load();
+    editor.config = Config::load();
+    editor.grid = editor.config.view.default_grid;
+    let config = editor.config.clone();
     let detected = config.game_dir.is_none();
     let Some(game_dir) = config.game_dir.clone().or_else(config::detect_game_dir) else {
         return;
     };
     if editor.set_game_dir(&game_dir).is_ok() && detected {
-        config.game_dir = Some(game_dir);
-        if let Err(error) = config.save() {
-            editor.message = format!("Could not save settings: {error}");
-        }
+        editor.config.game_dir = Some(game_dir);
+        editor.save_config();
     }
     if !config.fgds.is_empty() {
         if let Err(error) = editor.set_fgds(&config.fgds) {
@@ -946,15 +1033,8 @@ fn choose_fgd_files(editor: &mut Editor) {
     let Some(paths) = dialog.pick_files() else {
         return;
     };
-    match editor.set_fgds(&paths) {
-        Ok(_) => {
-            let mut config = Config::load();
-            config.fgds = paths;
-            if let Err(error) = config.save() {
-                editor.message = format!("Could not save settings: {error}");
-            }
-        }
-        Err(error) => editor.message = error,
+    if let Err(error) = editor.choose_fgds(paths) {
+        editor.message = error;
     }
 }
 
@@ -966,18 +1046,8 @@ fn choose_game_dir(editor: &mut Editor) {
     else {
         return;
     };
-    match editor.set_game_dir(&folder) {
-        Ok(_) => {
-            // Another game's FGD override would not fit, so the new game uses its own.
-            let config = Config {
-                game_dir: Some(folder),
-                fgds: Vec::new(),
-            };
-            if let Err(error) = config.save() {
-                editor.message = format!("Could not save settings: {error}");
-            }
-        }
-        Err(error) => editor.message = error,
+    if let Err(error) = editor.choose_game(&folder) {
+        editor.message = error;
     }
 }
 
@@ -1141,6 +1211,7 @@ fn run(action: Action, editor: &mut Editor) {
         Action::CenterViews2D => editor.fit_2d(),
         Action::CenterView3D => editor.fit_3d(),
         Action::Properties => editor.properties_open = true,
+        Action::Options => editor.options_open = true,
         _ => {}
     }
 }

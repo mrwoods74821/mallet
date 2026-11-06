@@ -7,6 +7,7 @@
 
 mod app;
 mod canvas;
+mod compile;
 mod config;
 mod document;
 mod editor;

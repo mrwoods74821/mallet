@@ -44,6 +44,7 @@ These follow Hammer's defaults.
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Shift+S / Shift+B / Shift+E | Selection tool / Block tool / Entity tool |
 | Alt+Enter or double-click | Object Properties for the selection: keyvalues, outputs, inputs and flags from the game's FGD |
+| F9 / Shift+F9 | Open the compile window / compile again with the preset used last |
 | Click | In 2D, click a brush's centre × or its outline to select it; in 3D, click it (or aim the crosshair at it in mouselook). Entities are selected whole; Ctrl+click toggles |
 | Drag on empty space | Select everything fully inside the rectangle (Ctrl adds) |
 | Drag the selection | Move it so its corner snaps to the grid, with texture lock; hold Shift on release to clone |
@@ -65,6 +66,34 @@ frame rate, CPU time per frame, how many chunks and props culling left to draw, 
 reused their last image, and how many textures are still loading. View > 3D draw distance
 sets how far the 3D view draws, like Hammer's back clipping plane. For the best
 speed on large maps, run the release build (`cargo build --release -p mallet`).
+
+## Compiling
+
+The hammer icon on the toolbar (or F9) opens the compile window, which works like
+CompilePal. A preset is a list of steps: VBSP, VVIS, VRAD, SourceCubemap, BSPZip repack,
+VBSPInfo, copying the BSP to the game, starting the game, or any program you add. Tick
+each tool's options, add extra arguments, reorder steps, and keep as many presets as
+you like; Fast, Normal, Final, Entities only and Cubemaps come built in. Custom steps
+can use `{map}`, `{vmf}`, `{bsp}`, `{mapdir}`, `{gamedir}`, `{gamemaps}` and `{bindir}`.
+
+While it runs, the window shows each step's progress and time and the live output.
+Errors and warnings are collected on the Problems tab, with buttons that select the brush
+or show the place a message names. When the map leaks, the leak line is drawn in red in
+every view and the 3D camera moves to it. Logs are kept in `%APPDATA%\Mallet\logs`, and
+Shift+F9 compiles again with the last preset.
+
+[SourceCubemap](https://github.com/riggs9162/SourceCubemap) builds cubemaps without
+starting the game; Mallet runs it in place on the compiled BSP so the cubemaps keep the
+map's name.
+
+## Mallet Options
+
+Edit > Mallet Options... (or the gear on the toolbar) holds every setting: the game
+folder and FGD files, the compile programs (VBSP, VVIS, VRAD, VBSPInfo, BSPZip,
+SourceCubemap and the game, each found automatically, with a menu of every copy found,
+including 64-bit and Hammer++ builds), how compiles run, the viewports (draw distance,
+field of view, camera speed, mouselook sensitivity, default grid), the key bindings and
+the MCP server address. Settings are saved in `%APPDATA%\Mallet\config.json`.
 
 ## AI agents
 

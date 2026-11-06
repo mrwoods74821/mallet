@@ -573,7 +573,7 @@ fn entity_transform(origin: DVec3, entity: &Entity) -> DMat4 {
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 
-fn next_generation() -> u64 {
+pub fn next_generation() -> u64 {
     GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 

@@ -20,6 +20,8 @@ use std::sync::Arc;
 use mallet_content::{default_fgd, parallel_map, GameData, GameFs, Materials};
 
 use crate::canvas::PixmapCanvas;
+use crate::compile::{CompileJob, Preset};
+use crate::config::Config;
 use crate::document::Document;
 use crate::input::InputFrame;
 use crate::render3d::{CameraStyle, Renderer3D};
@@ -199,6 +201,7 @@ pub struct MapState {
     overlay: Overlay,
     last_block: Bounds,
     refit_on_layout: bool,
+    pointfile: Option<Vec<DVec3>>,
 }
 
 /// What a tab shows in the tab strip.
@@ -264,12 +267,27 @@ pub struct Editor {
     pub properties_tab: Option<String>,
     /// Why each model in [`Self::models`] that is `None` could not be loaded.
     pub model_errors: HashMap<String, String>,
+    /// Settings kept between runs, edited in Mallet Options.
+    pub config: Config,
+    /// Compile presets, edited in the compile window.
+    pub compile_presets: Vec<Preset>,
+    /// The running or last compile.
+    pub compile_job: Option<CompileJob>,
+    /// Whether the compile window is showing.
+    pub compile_open: bool,
+    /// A tab the `show_compile` tool asked the compile window to switch to.
+    pub compile_tab: Option<String>,
+    /// Whether the Mallet Options window is showing, and a section an MCP tool asked for.
+    pub options_open: bool,
+    pub options_section: Option<String>,
+    /// The leak line VBSP traced, shown in the views.
+    pub pointfile: Option<Vec<DVec3>>,
     /// The GPU renderer for the textured camera view, created once the window has a GPU.
     pub gpu: Option<Renderer3D>,
     /// The last block created; new blocks reuse its depth.
     last_block: Bounds,
     /// Camera, top, front and side viewport rectangles from the latest window layout.
-    viewport_rects: [Rect; 4],
+    pub(crate) viewport_rects: [Rect; 4],
     /// Physical pixels per layout point in the window.
     pixels_per_point: f32,
     refit_on_layout: bool,
@@ -304,6 +322,14 @@ impl Default for Editor {
             game_data: None,
             properties_open: false,
             properties_tab: None,
+            config: Config::default(),
+            compile_presets: crate::compile::load_presets(),
+            compile_job: None,
+            compile_open: false,
+            compile_tab: None,
+            options_open: false,
+            options_section: None,
+            pointfile: None,
             window_shot: WindowShot::Idle,
             gpu: None,
             last_block: DEFAULT_BLOCK,
@@ -442,6 +468,7 @@ impl Editor {
             overlay: std::mem::take(&mut self.overlay),
             last_block: std::mem::replace(&mut self.last_block, DEFAULT_BLOCK),
             refit_on_layout: std::mem::take(&mut self.refit_on_layout),
+            pointfile: self.pointfile.take(),
         }
     }
 
@@ -454,6 +481,7 @@ impl Editor {
         self.overlay = map.overlay;
         self.last_block = map.last_block;
         self.refit_on_layout = map.refit_on_layout;
+        self.pointfile = map.pointfile;
     }
 
     /// Opens a map and frames it in every viewport.
@@ -559,6 +587,7 @@ impl Editor {
             self.ensure_models(&document.vmf);
             self.scene = Scene::build(&document.vmf, &self.models, self.game_data.as_deref());
             self.document = Some(document);
+            self.add_pointfile_to_scene();
         } else {
             self.scene = Scene::default();
         }
@@ -887,6 +916,46 @@ impl Editor {
         self.rebuild_scene();
         self.message = format!("Using game content from {} ({mounts} search paths)", game_dir.display());
         Ok(mounts)
+    }
+
+    /// Pans every 2D view so a point is in its middle, keeping the zoom.
+    pub fn center_2d_on(&mut self, point: DVec3) {
+        for view in &mut self.views {
+            view.center = view.axis.project(point);
+        }
+    }
+
+    /// Mounts a game folder and remembers it. Another game's FGD choice would not fit,
+    /// so the new game uses its own FGD.
+    pub fn choose_game(&mut self, game_dir: &Path) -> Result<usize, String> {
+        let mounts = self.set_game_dir(game_dir)?;
+        self.config.game_dir = Some(game_dir.to_owned());
+        self.config.fgds.clear();
+        self.save_config();
+        Ok(mounts)
+    }
+
+    /// Reads entity classes from FGD files and remembers the choice; an empty list goes
+    /// back to the game's default FGD.
+    pub fn choose_fgds(&mut self, paths: Vec<PathBuf>) -> Result<usize, String> {
+        let count = if paths.is_empty() {
+            let fgd = self.game_dir().and_then(default_fgd);
+            self.game_data = fgd.and_then(|fgd| GameData::load(&[fgd]).ok()).map(Arc::new);
+            self.rebuild_scene();
+            self.game_data.as_ref().map_or(0, |data| data.len())
+        } else {
+            self.set_fgds(&paths)?
+        };
+        self.config.fgds = paths;
+        self.save_config();
+        Ok(count)
+    }
+
+    /// Writes the settings, reporting a failure in the status bar.
+    pub fn save_config(&mut self) {
+        if let Err(error) = self.config.save() {
+            self.message = format!("Could not save settings: {error}");
+        }
     }
 
     /// Reads entity classes from FGD files instead of the game's default FGD. Returns

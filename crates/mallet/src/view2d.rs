@@ -248,7 +248,7 @@ impl View2D {
         let view_max = self.to_world(rect, rect.right_top());
         let arm = CROSS_PIXELS / self.scale;
         let mut crosses = Vec::new();
-        for mesh in &scene.meshes {
+        for mesh in scene.meshes.iter().filter(|mesh| mesh.owner.is_some()) {
             let (color, remap) = mesh.appearance(overlay);
             let bounds = mesh.mapped_bounds(remap.as_ref());
             let (min, max) = (self.axis.project(bounds.min), self.axis.project(bounds.max));

@@ -9,11 +9,13 @@ use crate::keymap::{Action, KeyMap};
 use crate::scene::{box_edges, Overlay, Remap, Scene, TOOL_COLOR};
 
 /// World units per second, matching Hammer's default forward speed.
-const MOVE_SPEED: f64 = 1000.0;
+pub const DEFAULT_MOVE_SPEED: f64 = 1000.0;
+/// Hammer's default horizontal field of view in degrees.
+pub const DEFAULT_FOV: f64 = 90.0;
 /// Degrees per second for arrow-key turning.
 const TURN_SPEED: f64 = 90.0;
 /// Degrees per pixel of mouse movement in mouselook.
-const LOOK_SENSITIVITY: f64 = 0.2;
+pub const DEFAULT_LOOK_SENSITIVITY: f64 = 0.2;
 /// World units the camera moves per mouse wheel notch.
 const WHEEL_STEP: f64 = 64.0;
 const POINTS_PER_NOTCH: f64 = 50.0;
@@ -44,6 +46,10 @@ pub struct Camera3D {
     pub fov: f64,
     /// Draw distance: nothing farther away is drawn, like Hammer's back clipping plane.
     pub far: f64,
+    /// Units per second the movement keys fly at.
+    pub move_speed: f64,
+    /// Degrees per point of mouse movement in mouselook.
+    pub look_sensitivity: f64,
     mouse_look: bool,
     /// Current movement, eased towards what the movement keys ask for.
     velocity: DVec3,
@@ -59,8 +65,10 @@ impl Camera3D {
             position: DVec3::new(-512.0, -512.0, 512.0),
             yaw: 45.0,
             pitch: -30.0,
-            fov: 90.0,
+            fov: DEFAULT_FOV,
             far: DEFAULT_DRAW_DISTANCE,
+            move_speed: DEFAULT_MOVE_SPEED,
+            look_sensitivity: DEFAULT_LOOK_SENSITIVITY,
             mouse_look: false,
             velocity: DVec3::ZERO,
             recent_look: std::collections::VecDeque::with_capacity(LOOK_FRAMES),
@@ -153,8 +161,8 @@ impl Camera3D {
                     .iter()
                     .fold(egui::Vec2::ZERO, |total, delta| total + *delta)
                     / LOOK_FRAMES as f32;
-                self.yaw -= f64::from(smoothed.x) * LOOK_SENSITIVITY;
-                self.pitch = (self.pitch - f64::from(smoothed.y) * LOOK_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH);
+                self.yaw -= f64::from(smoothed.x) * self.look_sensitivity;
+                self.pitch = (self.pitch - f64::from(smoothed.y) * self.look_sensitivity).clamp(-MAX_PITCH, MAX_PITCH);
             }
 
             let turn = |positive: Action, negative: Action| {
@@ -171,7 +179,7 @@ impl Camera3D {
             let mut wish = DVec3::ZERO;
             wish += forward * turn(Action::MoveForward, Action::MoveBack);
             wish += right * turn(Action::StrafeRight, Action::StrafeLeft);
-            let target = wish.normalize_or_zero() * MOVE_SPEED;
+            let target = wish.normalize_or_zero() * self.move_speed;
             self.velocity += (target - self.velocity) * (ACCELERATION * dt).min(1.0);
             if target == DVec3::ZERO && self.velocity.length() < STOP_SPEED {
                 self.velocity = DVec3::ZERO;

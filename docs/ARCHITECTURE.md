@@ -115,6 +115,27 @@ listing the outputs elsewhere that name this entity; and Flags. Help for the hov
 shows at the bottom. Text fields commit when they lose focus, and every change is an
 undoable edit, so there is no Apply button.
 
+## Compiling
+
+`compile` turns a `Preset` (a list of `Step`s with options from a per-tool catalog,
+extra arguments and, for custom steps, a program, arguments and working folder) into
+`PlannedStep`s: a program to run, a program to launch, or a file to copy. Variables such
+as `{bsp}` are expanded here, so the plan is plain data that tests check without running
+anything. Presets live in `%APPDATA%\Mallet\compile_presets.json`.
+
+`CompileJob` runs a plan on its own thread. Each program runs without a console window
+(below normal priority when the option is on), its stdout and stderr are read on two more
+threads, and lines go into a shared `JobState` that the window, the status bar and MCP
+read. Progress comes from the compilers' `0...1...2` counters. Lines that read as errors
+or warnings become `Problem`s with the brush id or position they name. After VBSP, a new
+`.lin` pointfile (or "leaked" in the output) marks a leak: the compile stops and the
+editor draws the line as an ownerless scene mesh, which every view shows but nothing can
+select. Cancelling kills the running program and skips the rest.
+
+`Config` is one serde struct with defaults for every field, so older `config.json` files
+load. Tool paths left empty are found next to the game (`bin/win64` first) or, for
+SourceCubemap, on `PATH` and in the usual install folders.
+
 ## Drawing
 
 Each of the four viewport slots shows a `ViewMode`: 3D Textured, 3D Wireframe, or the 2D
@@ -205,6 +226,12 @@ Tools:
 | `describe_entity_class`, `list_entity_classes` | Entity classes from the FGD files |
 | `set_fgds` | Read entity classes from chosen FGD files |
 | `show_properties` | Open or close Object Properties on a tab |
+| `get_settings`, `set_settings` | Read and change Mallet Options, with the programs found for each tool |
+| `list_compile_presets`, `set_compile_preset`, `delete_compile_preset` | Compile presets, with each step's command for the open map |
+| `compile_map` | Save and compile, returning at once or waiting up to `wait_seconds` |
+| `compile_status`, `cancel_compile` | Steps, progress, problems, leak and output of the compile |
+| `show_compile`, `show_options` | Open the compile window or Mallet Options on a tab |
+| `load_pointfile`, `clear_pointfile` | Show or hide a leak line |
 | `send_input` | Key presses, clicks and drags fed into the window as if a user made them |
 
 `send_input` queues synthetic egui events that `MalletApp::raw_input_hook` feeds into the

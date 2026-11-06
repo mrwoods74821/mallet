@@ -1517,6 +1517,7 @@ dependencies = [
  "mallet-content",
  "mallet-vmf",
  "rfd",
+ "serde",
  "serde_json",
  "tiny-skia",
  "tiny_http",

@@ -571,6 +571,10 @@ impl Renderer3D {
         };
         let selected_owners: HashSet<Owner> = selected.iter().filter_map(|mesh| mesh.owner).collect();
         let mut outline = Vec::new();
+        // Lines that belong to nothing, such as a leak line, show in the textured view too.
+        for mesh in scene.meshes.iter().filter(|mesh| mesh.owner.is_none()) {
+            push_edges(&mut outline, &mesh.edges, None, mesh.color);
+        }
         for mesh in &selected {
             push_edges(&mut outline, &mesh.edges, overlay.transform.as_ref(), SELECTED_COLOR);
         }
