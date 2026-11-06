@@ -1,4 +1,5 @@
-//! A game's virtual file system, built from the search paths in its `gameinfo.txt`.
+//! A game's virtual file system, built from the search paths in its `gameinfo.txt` and,
+//! for Garry's Mod, the other games listed in `cfg/mount.cfg`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,11 +9,39 @@ use mallet_kv::{Block, Item};
 use crate::vpk::{normalize, VpkArchive};
 use crate::ContentError;
 
-/// One mounted location.
+/// One mounted location, and which [`Source`] it belongs to.
 #[derive(Debug)]
-enum Mount {
+struct Mount {
+    place: Place,
+    source: usize,
+}
+
+#[derive(Debug)]
+enum Place {
     Folder(PathBuf),
     Vpk(VpkArchive),
+}
+
+/// What kind of content a source is, for grouping in the texture browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SourceKind {
+    /// The game's own folders and VPKs.
+    Game,
+    /// Another game mounted through `cfg/mount.cfg`.
+    MountedGame,
+    /// A folder in `addons/`.
+    Addon,
+    /// Content downloaded from servers.
+    Download,
+}
+
+/// A named group of mounts, such as `hl2_textures`, `cstrike` or one addon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub name: String,
+    pub kind: SourceKind,
+    /// The folder or archive it comes from.
+    pub path: PathBuf,
 }
 
 /// Game files from every search path, looked up in priority order.
@@ -20,15 +49,22 @@ enum Mount {
 pub struct GameFs {
     game_dir: PathBuf,
     mounts: Vec<Mount>,
+    sources: Vec<Source>,
 }
 
 impl GameFs {
     /// Mounts the `game` search paths of the `gameinfo.txt` in `game_dir`, such as
-    /// `.../GarrysMod/garrysmod` or `.../Half-Life 2/hl2`.
+    /// `.../GarrysMod/garrysmod` or `.../Half-Life 2/hl2`, then every game in its
+    /// `cfg/mount.cfg`, as Garry's Mod does.
     ///
     /// Search paths that do not exist are skipped, as the engine does. Paths ending in
     /// `.vpk` mount the matching `_dir.vpk`; paths ending in `/*` mount every subfolder.
     pub fn from_gameinfo(game_dir: &Path) -> Result<Self, ContentError> {
+        Self::with_mounts(game_dir, &|_| true)
+    }
+
+    /// Like [`GameFs::from_gameinfo`], mounting only the `mount.cfg` games `mount` lets in.
+    pub fn with_mounts(game_dir: &Path, mount: &dyn Fn(&str) -> bool) -> Result<Self, ContentError> {
         let gameinfo_path = game_dir.join("gameinfo.txt");
         if !gameinfo_path.is_file() {
             return Err(ContentError::NoGameInfo(game_dir.to_owned()));
@@ -43,9 +79,15 @@ impl GameFs {
         let mut filesystem = Self {
             game_dir: game_dir.to_owned(),
             mounts: Vec::new(),
+            sources: Vec::new(),
         };
         for value in search_paths(&items) {
             filesystem.mount_search_path(&value, game_dir, &base_dir);
+        }
+        for (name, folder) in mounted_games(game_dir) {
+            if mount(&name) {
+                filesystem.mount_game(&name, &folder);
+            }
         }
         Ok(filesystem)
     }
@@ -59,30 +101,107 @@ impl GameFs {
     pub fn mounts(&self) -> Vec<String> {
         self.mounts
             .iter()
-            .map(|mount| match mount {
-                Mount::Folder(path) => format!("folder {}", path.display()),
-                Mount::Vpk(archive) => format!("vpk ({} files)", archive.len()),
+            .map(|mount| match &mount.place {
+                Place::Folder(path) => format!("folder {}", path.display()),
+                Place::Vpk(archive) => format!("vpk ({} files)", archive.len()),
             })
             .collect()
+    }
+
+    /// The sources mounts come from, indexed by the numbers [`GameFs::list_sourced`] gives.
+    pub fn sources(&self) -> &[Source] {
+        &self.sources
     }
 
     /// Whether any mount has a game file, without reading it.
     pub fn exists(&self, path: &str) -> bool {
         let path = normalize(path);
-        self.mounts.iter().any(|mount| match mount {
-            Mount::Folder(folder) => folder.join(&path).is_file(),
-            Mount::Vpk(archive) => archive.contains(&path),
+        self.mounts.iter().any(|mount| match &mount.place {
+            Place::Folder(folder) => folder.join(&path).is_file(),
+            Place::Vpk(archive) => archive.contains(&path),
         })
+    }
+
+    /// Every game file under `folder` (such as `materials/`) with the given extension, from
+    /// every mount, lower case with forward slashes, sorted and without repeats.
+    pub fn list(&self, folder: &str, extension: &str) -> Vec<String> {
+        self.list_sourced(folder, extension)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect()
+    }
+
+    /// Like [`GameFs::list`], with the source each file is read from: the first mount
+    /// that has it, as for [`GameFs::read`].
+    pub fn list_sourced(&self, folder: &str, extension: &str) -> Vec<(String, usize)> {
+        let folder = normalize(folder);
+        let folder = folder.trim_end_matches('/');
+        let extension = extension.to_ascii_lowercase();
+        let mut found = std::collections::BTreeMap::new();
+        for mount in &self.mounts {
+            match &mount.place {
+                Place::Vpk(archive) => {
+                    for path in archive
+                        .paths()
+                        .filter(|path| path.starts_with(folder) && path.ends_with(&extension))
+                    {
+                        found.entry(path.to_owned()).or_insert(mount.source);
+                    }
+                }
+                Place::Folder(root) => {
+                    let mut pending = vec![root.join(folder)];
+                    while let Some(directory) = pending.pop() {
+                        let Ok(children) = fs::read_dir(&directory) else {
+                            continue;
+                        };
+                        for child in children.filter_map(Result::ok) {
+                            let path = child.path();
+                            // The entry's own type needs no extra query, unlike is_dir().
+                            if child.file_type().is_ok_and(|kind| kind.is_dir()) {
+                                pending.push(path);
+                            } else if let Ok(relative) = path.strip_prefix(root) {
+                                let relative = normalize(&relative.to_string_lossy());
+                                if relative.ends_with(&extension) {
+                                    found.entry(relative).or_insert(mount.source);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found.into_iter().collect()
     }
 
     /// Reads a game file such as `materials/tools/toolsnodraw.vmt` from the first mount
     /// that has it. Paths ignore case and may use either slash.
     pub fn read(&self, path: &str) -> Option<Vec<u8>> {
         let path = normalize(path);
-        self.mounts.iter().find_map(|mount| match mount {
-            Mount::Folder(folder) => fs::read(folder.join(&path)).ok(),
-            Mount::Vpk(archive) => archive.read(&path).ok().flatten(),
+        self.mounts.iter().find_map(|mount| match &mount.place {
+            Place::Folder(folder) => fs::read(folder.join(&path)).ok(),
+            Place::Vpk(archive) => archive.read(&path).ok().flatten(),
         })
+    }
+
+    /// Where a game file lies on disk, when it is a loose file rather than in a VPK.
+    pub fn locate(&self, path: &str) -> Option<PathBuf> {
+        let path = normalize(path);
+        for mount in &self.mounts {
+            match &mount.place {
+                Place::Folder(folder) => {
+                    let file = folder.join(&path);
+                    if file.is_file() {
+                        return Some(file);
+                    }
+                }
+                Place::Vpk(archive) => {
+                    if archive.contains(&path) {
+                        return None;
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn mount_search_path(&mut self, value: &str, game_dir: &Path, base_dir: &Path) {
@@ -107,31 +226,113 @@ impl GameFs {
                 .filter(|child| child.is_dir())
                 .collect();
             folders.sort();
+            let addons = Path::new(parent)
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("addons"));
             for folder in folders {
-                self.add(Mount::Folder(folder));
+                let name = folder
+                    .file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+                let kind = if addons { SourceKind::Addon } else { SourceKind::Game };
+                let source = self.source(&name, kind, &folder);
+                self.add(Place::Folder(folder), source);
             }
         } else if let Some(stem) = text.strip_suffix(".vpk") {
             let dir_file = PathBuf::from(format!("{stem}_dir.vpk"));
             if let Ok(archive) = VpkArchive::open(&dir_file) {
-                self.add(Mount::Vpk(archive));
+                let name = Path::new(stem)
+                    .file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+                let source = self.source(&name, SourceKind::Game, &dir_file);
+                self.add(Place::Vpk(archive), source);
             }
         } else if path.is_dir() {
-            self.add(Mount::Folder(path.components().collect()));
+            let folder: PathBuf = path.components().collect();
+            let name = folder
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+            let kind = if name.eq_ignore_ascii_case("download") {
+                SourceKind::Download
+            } else {
+                SourceKind::Game
+            };
+            let source = self.source(&name, kind, &folder);
+            self.add(Place::Folder(folder), source);
         }
     }
 
-    fn add(&mut self, mount: Mount) {
-        if let Mount::Folder(new) = &mount {
+    /// Mounts another game's folder and every VPK in it, as Garry's Mod does for the games
+    /// in `mount.cfg`.
+    fn mount_game(&mut self, name: &str, folder: &Path) {
+        if !folder.is_dir() {
+            return;
+        }
+        let source = self.source(name, SourceKind::MountedGame, folder);
+        self.add(Place::Folder(folder.components().collect()), source);
+        let Ok(children) = fs::read_dir(folder) else { return };
+        let mut archives: Vec<PathBuf> = children
+            .filter_map(Result::ok)
+            .map(|child| child.path())
+            .filter(|path| path.to_string_lossy().to_ascii_lowercase().ends_with("_dir.vpk"))
+            .collect();
+        archives.sort();
+        for archive in archives {
+            if let Ok(archive) = VpkArchive::open(&archive) {
+                self.add(Place::Vpk(archive), source);
+            }
+        }
+    }
+
+    /// The index of a source, added when new.
+    fn source(&mut self, name: &str, kind: SourceKind, path: &Path) -> usize {
+        if let Some(index) = self
+            .sources
+            .iter()
+            .position(|source| source.name == name && source.kind == kind)
+        {
+            return index;
+        }
+        self.sources.push(Source {
+            name: name.to_owned(),
+            kind,
+            path: path.to_owned(),
+        });
+        self.sources.len() - 1
+    }
+
+    fn add(&mut self, place: Place, source: usize) {
+        if let Place::Folder(new) = &place {
             let duplicate = self
                 .mounts
                 .iter()
-                .any(|existing| matches!(existing, Mount::Folder(folder) if same_folder(folder, new)));
+                .any(|existing| matches!(&existing.place, Place::Folder(folder) if same_folder(folder, new)));
             if duplicate {
                 return;
             }
         }
-        self.mounts.push(mount);
+        self.mounts.push(Mount { place, source });
     }
+}
+
+/// The games a Garry's Mod install mounts from `cfg/mount.cfg`, as (name, folder) pairs
+/// in file order. Empty for other games.
+pub fn mounted_games(game_dir: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(bytes) = fs::read(game_dir.join("cfg").join("mount.cfg")) else {
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let Ok(items) = mallet_kv::parse(&text) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Block(block) if block.name.eq_ignore_ascii_case("mountcfg") => Some(block),
+            _ => None,
+        })
+        .flat_map(Block::pairs)
+        .map(|pair| (pair.key.clone(), PathBuf::from(pair.value.trim())))
+        .collect()
 }
 
 fn same_folder(a: &Path, b: &Path) -> bool {
@@ -159,4 +360,43 @@ fn search_paths(items: &[Item]) -> Vec<String> {
         .filter(|pair| pair.key.split('+').any(|kind| kind.eq_ignore_ascii_case("game")))
         .map(|pair| pair.value.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mounts_the_games_in_mount_cfg() {
+        let Some(dir) = std::env::var_os("MALLET_GAME_DIR") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let started = std::time::Instant::now();
+        let alone = GameFs::with_mounts(&dir, &|_| false).unwrap();
+        let alone_time = started.elapsed();
+        let started = std::time::Instant::now();
+        let all = GameFs::from_gameinfo(&dir).unwrap();
+        let all_time = started.elapsed();
+        let started = std::time::Instant::now();
+        let materials = all.list_sourced("materials/", ".vmt");
+        eprintln!(
+            "game alone: {} mounts in {alone_time:?}; with mount.cfg: {} mounts, {} sources in {all_time:?}; {} materials listed in {:?}",
+            alone.mounts().len(),
+            all.mounts().len(),
+            all.sources().len(),
+            materials.len(),
+            started.elapsed()
+        );
+        let games: Vec<&Source> = all
+            .sources()
+            .iter()
+            .filter(|source| source.kind == SourceKind::MountedGame)
+            .collect();
+        eprintln!(
+            "mounted games: {:?}",
+            games.iter().map(|source| &source.name).collect::<Vec<_>>()
+        );
+        assert!(all.mounts().len() >= alone.mounts().len());
+    }
 }

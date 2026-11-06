@@ -358,6 +358,9 @@ fn default_entity_index(vmf: &Vmf) -> usize {
 pub struct History {
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    /// The group of the latest edit made with [`History::apply_grouped`], while nothing
+    /// else has happened since.
+    last_group: Option<u64>,
 }
 
 impl History {
@@ -366,11 +369,27 @@ impl History {
         let inverse = edit.apply(vmf)?;
         self.undo.push(inverse);
         self.redo.clear();
+        self.last_group = None;
+        Ok(())
+    }
+
+    /// Applies an edit that continues the previous one when both have the same `group`,
+    /// such as each step of dragging a value: they undo together, back to before the
+    /// first. The edits of one group must change the same things, so the first inverse
+    /// restores all of them.
+    pub fn apply_grouped(&mut self, vmf: &mut Vmf, edit: &Edit, group: u64) -> Result<(), EditError> {
+        let inverse = edit.apply(vmf)?;
+        if self.last_group != Some(group) || self.undo.is_empty() {
+            self.undo.push(inverse);
+        }
+        self.redo.clear();
+        self.last_group = Some(group);
         Ok(())
     }
 
     /// Undoes the latest edit. Returns `false` when there is nothing to undo.
     pub fn undo(&mut self, vmf: &mut Vmf) -> Result<bool, EditError> {
+        self.last_group = None;
         let Some(edit) = self.undo.pop() else {
             return Ok(false);
         };
@@ -381,6 +400,7 @@ impl History {
 
     /// Redoes the latest undone edit. Returns `false` when there is nothing to redo.
     pub fn redo(&mut self, vmf: &mut Vmf) -> Result<bool, EditError> {
+        self.last_group = None;
         let Some(edit) = self.redo.pop() else {
             return Ok(false);
         };
@@ -422,6 +442,27 @@ entity { "id" "3" "classname" "info_target" }
 
     fn entity(vmf: &Vmf, id: u32) -> &Entity {
         vmf.entities().find(|entity| entity.id() == Some(id)).unwrap()
+    }
+
+    #[test]
+    fn grouped_edits_undo_together() {
+        let mut vmf = Vmf::parse(MAP).unwrap();
+        let original = vmf.to_text();
+        let mut history = History::default();
+        let set = |value: &str| Edit::SetKey {
+            entity: 2,
+            key: "targetname".to_owned(),
+            value: value.to_owned(),
+        };
+        for value in ["a", "ab", "abc"] {
+            history.apply_grouped(&mut vmf, &set(value), 7).unwrap();
+        }
+        history.apply_grouped(&mut vmf, &set("other"), 8).unwrap();
+        assert!(history.undo(&mut vmf).unwrap());
+        assert_eq!(entity(&vmf, 2).get("targetname"), Some("abc"));
+        assert!(history.undo(&mut vmf).unwrap());
+        assert_eq!(vmf.to_text(), original, "the three steps of group 7 undo as one");
+        assert!(!history.undo(&mut vmf).unwrap());
     }
 
     #[test]

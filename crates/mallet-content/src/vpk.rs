@@ -81,6 +81,11 @@ impl VpkArchive {
         self.entries.is_empty()
     }
 
+    /// Every file path in the archive, lower case with forward slashes.
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
+    }
+
     /// Whether the archive holds a file. Paths use forward slashes and ignore case.
     pub fn contains(&self, path: &str) -> bool {
         self.entries.contains_key(&normalize(path))
