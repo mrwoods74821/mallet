@@ -258,21 +258,19 @@ impl Scene {
             .map(|(owner, _)| owner)
     }
 
-    /// Owners with at least one mesh, all of whose meshes lie fully inside a 2D rectangle.
+    /// Owners with a centre cross inside a 2D rectangle, the way Hammer's selection
+    /// rectangle picks brushes. For an entity made of several brushes, any one of their
+    /// centres counts.
     pub fn owners_inside(&self, axis: Axis2D, corner_a: DVec2, corner_b: DVec2) -> BTreeSet<Owner> {
         let (min, max) = (corner_a.min(corner_b), corner_a.max(corner_b));
-        let mut inside = BTreeSet::new();
-        let mut outside = BTreeSet::new();
-        for mesh in &self.meshes {
-            let Some(owner) = mesh.owner else { continue };
-            let contained = axis.project(mesh.bounds.min).cmpge(min).all() && axis.project(mesh.bounds.max).cmple(max).all();
-            if contained {
-                inside.insert(owner);
-            } else {
-                outside.insert(owner);
-            }
-        }
-        inside.difference(&outside).copied().collect()
+        self.meshes
+            .iter()
+            .filter(|mesh| {
+                let centre = axis.project(mesh.bounds.center());
+                centre.cmpge(min).all() && centre.cmple(max).all()
+            })
+            .filter_map(|mesh| mesh.owner)
+            .collect()
     }
 }
 
