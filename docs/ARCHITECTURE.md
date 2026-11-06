@@ -41,8 +41,11 @@ the original brushes, so undo is exact instead of scaling back with rounding err
 
 World brushes are selected one by one; clicking any part of an entity selects the whole
 entity, like Hammer's default "groups" mode. The selection lives in `Editor` as a set of
-`Owner`s, so the window and MCP tools share it. 2D clicks pick the smallest brush whose
-outline contains the point; 3D clicks cast a ray against each brush's planes.
+`Owner`s, so the window and MCP tools share it. 2D clicks pick, like Hammer, a brush's
+centre × first and then its outline, preferring the smallest brush; empty space inside a
+brush picks nothing. 3D clicks cast a ray against each brush's planes, skipping a brush
+the camera is inside; in mouselook the ray goes through the crosshair. The camera smooths
+raw mouse movement over two frames and eases its speed, using real frame times.
 
 ## Shared editor state
 
@@ -92,6 +95,14 @@ changes, never for selection changes or camera moves:
   out of the chunks, sorted back to front each frame and blended without writing depth.
 - The 2D views share one buffer of every brush edge in world space; each view only sets an
   orthographic matrix, so panning and zooming cost almost nothing.
+- Each slot remembers a fingerprint of what its image was drawn from (camera or view,
+  scene generations, overlay, size, texture uploads). When nothing changed, the image is
+  shown again without drawing.
+- Textures stream in: new materials load and get mip-mapped on a background thread while
+  faces show a grey stand-in, so opening a large map does not stall. MCP screenshots wait
+  for the loads to finish.
+- The camera has a draw distance (default 8192 units) that sets the projection's far
+  plane, so frustum culling also drops everything beyond it. Chunks are 1024 units.
 - The selection, its red outline and tool previews are small and rebuilt every frame so
   drags show live. In 3D the selection is drawn again over the cached geometry at equal
   depth, tinted red.

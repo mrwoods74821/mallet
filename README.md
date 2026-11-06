@@ -30,7 +30,7 @@ These follow Hammer's defaults.
 | Ctrl+N / Ctrl+O / Ctrl+S | New map / open / save (a new map asks where to save) |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Shift+S / Shift+B | Selection tool / Block tool |
-| Click | Select a world brush or a whole entity (Ctrl+click toggles) |
+| Click | In 2D, click a brush's centre × or its outline to select it; in 3D, click it (or aim the crosshair at it in mouselook). Entities are selected whole; Ctrl+click toggles |
 | Drag on empty space | Select everything fully inside the rectangle (Ctrl adds) |
 | Drag the selection | Move it so its corner snaps to the grid, with texture lock; hold Shift on release to clone |
 | Drag a white handle | Resize the selection or the pending block from that edge or corner |
@@ -45,7 +45,9 @@ These follow Hammer's defaults.
 | W A S D, arrow keys | Move and turn the 3D camera |
 
 View > Net Graph toggles a frame timing overlay in the 3D view's bottom-right corner:
-frame rate, CPU time per frame, and how much geometry culling left to draw. For the best
+frame rate, CPU time per frame, how much geometry culling left to draw, how many viewports
+reused their last image, and how many textures are still loading. View > 3D draw distance
+sets how far the 3D view draws, like Hammer's back clipping plane. For the best
 speed on large maps, run the release build (`cargo build --release -p mallet`).
 
 ## AI agents
