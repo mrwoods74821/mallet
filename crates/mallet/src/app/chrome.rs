@@ -257,7 +257,7 @@ impl MalletApp {
                                     close = Some(index);
                                 }
                                 let close_button = egui::Button::new(RichText::new(icon::X).size(12.0)).frame(false);
-                                if ui.add(close_button).on_hover_text("Close tab (Ctrl+W)").clicked() {
+                                if ui.add(close_button).on_hover_text("Close tab (Ctrl+F4)").clicked() {
                                     close = Some(index);
                                 }
                             });

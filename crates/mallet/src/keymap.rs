@@ -1,4 +1,4 @@
-//! Editor actions and their key bindings, starting from Hammer's defaults.
+//! Editor actions and their key bindings, starting from Hammer++'s bindings.
 //!
 //! Bindings live in one table so they can be rebound later without touching the code
 //! that reacts to them.
@@ -165,20 +165,24 @@ pub struct KeyMap {
 }
 
 impl KeyMap {
-    /// Hammer's default bindings for the actions Mallet supports so far.
-    pub fn hammer_defaults() -> Self {
+    /// Hammer++'s bindings for the actions Mallet supports so far, as its keybindings
+    /// file sets them. Actions Hammer++ has no key for keep Mallet's own, unless that key
+    /// does something else in Hammer++: closing a tab uses Ctrl+F4 because Hammer++ puts
+    /// group ignore on Ctrl+W. The camera turns with the mouse only, since Hammer++'s
+    /// arrow keys strafe.
+    pub fn hammer_plus_plus_defaults() -> Self {
         Self {
             bindings: vec![
                 (Action::NewFile, Chord::ctrl(Key::N)),
-                (Action::CloseTab, Chord::ctrl(Key::W)),
+                (Action::CloseTab, Chord::ctrl(Key::F4)),
                 (Action::NextTab, Chord::ctrl(Key::Tab)),
                 (Action::PreviousTab, Chord::ctrl_shift(Key::Tab)),
                 (Action::OpenFile, Chord::ctrl(Key::O)),
                 (Action::SaveFile, Chord::ctrl(Key::S)),
                 (Action::Undo, Chord::ctrl(Key::Z)),
                 (Action::Redo, Chord::ctrl(Key::Y)),
-                (Action::GridSmaller, Chord::key(Key::OpenBracket)),
-                (Action::GridLarger, Chord::key(Key::CloseBracket)),
+                (Action::GridSmaller, Chord::key(Key::Minus)),
+                (Action::GridLarger, Chord::key(Key::Plus)),
                 (Action::SelectionTool, Chord::shift(Key::S)),
                 (Action::BlockTool, Chord::shift(Key::B)),
                 (Action::EntityTool, Chord::shift(Key::E)),
@@ -186,12 +190,13 @@ impl KeyMap {
                 (Action::Properties, Chord::alt(Key::Enter)),
                 (Action::Compile, Chord::key(Key::F9)),
                 (Action::CompileAgain, Chord::shift(Key::F9)),
-                (Action::SelectAll, Chord::ctrl(Key::A)),
+                (Action::SelectAll, Chord::ctrl_shift(Key::A)),
+                (Action::ClearSelection, Chord::shift(Key::Q)),
                 (Action::ClearSelection, Chord::key(Key::Escape)),
                 (Action::DeleteSelection, Chord::key(Key::Delete)),
                 (Action::CreateBlock, Chord::key(Key::Enter)),
                 (Action::CenterViews2D, Chord::ctrl(Key::E)),
-                (Action::CenterView3D, Chord::ctrl_shift(Key::E)),
+                (Action::CenterView3D, Chord::ctrl(Key::R)),
                 (Action::Transform, Chord::ctrl(Key::M)),
                 (Action::SnapToGrid, Chord::ctrl(Key::B)),
                 (Action::SnapToGridIndividually, Chord::ctrl_shift(Key::B)),
@@ -203,10 +208,10 @@ impl KeyMap {
                 (Action::MoveBack, Chord::key(Key::S)),
                 (Action::StrafeLeft, Chord::key(Key::A)),
                 (Action::StrafeRight, Chord::key(Key::D)),
-                (Action::TurnLeft, Chord::key(Key::ArrowLeft)),
-                (Action::TurnRight, Chord::key(Key::ArrowRight)),
-                (Action::LookUp, Chord::key(Key::ArrowUp)),
-                (Action::LookDown, Chord::key(Key::ArrowDown)),
+                (Action::StrafeLeft, Chord::key(Key::ArrowLeft)),
+                (Action::StrafeRight, Chord::key(Key::ArrowRight)),
+                (Action::StrafeUp, Chord::key(Key::ArrowUp)),
+                (Action::StrafeDown, Chord::key(Key::ArrowDown)),
             ],
         }
     }

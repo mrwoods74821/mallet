@@ -595,15 +595,6 @@ fn viewports_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
                 *dirty = true;
             }
             ui.end_row();
-            ui.label("Arrow key turning");
-            *dirty |= ui
-                .add(
-                    egui::Slider::new(&mut view.turn_speed, 10.0..=360.0)
-                        .integer()
-                        .suffix("°/s"),
-                )
-                .changed();
-            ui.end_row();
             ui.label("Mouse wheel in 3D");
             *dirty |= ui
                 .add(
@@ -1098,7 +1089,7 @@ fn file_type_row(ui: &mut egui::Ui, title: &str, note: &str, state: &shell::Regi
 }
 
 fn keyboard_section(ui: &mut egui::Ui, keymap: &KeyMap) {
-    heading(ui, "Keyboard", "Hammer's default shortcuts. Rebinding comes later.");
+    heading(ui, "Keyboard", "Hammer++'s shortcuts. Rebinding comes later.");
     egui::Grid::new("key_bindings")
         .num_columns(2)
         .striped(true)

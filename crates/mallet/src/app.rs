@@ -185,7 +185,7 @@ impl MalletApp {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         let mut app = Self {
             editor: Arc::new(Mutex::new(Editor::default())),
-            keymap: KeyMap::hammer_defaults(),
+            keymap: KeyMap::hammer_plus_plus_defaults(),
             cursor: None,
             title: String::new(),
             mcp_url: None,

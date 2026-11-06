@@ -59,7 +59,7 @@ pub struct Camera3D {
     pub move_speed: f64,
     /// Degrees per point of mouse movement in mouselook.
     pub look_sensitivity: f64,
-    /// Degrees per second the arrow keys turn.
+    /// Degrees per second the turn keys turn.
     pub turn_speed: f64,
     /// How quickly the camera reaches its target speed, per second.
     pub acceleration: f64,

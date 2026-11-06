@@ -63,13 +63,13 @@ and undo history; a dot marks unsaved changes.
 
 ## Controls
 
-These follow Hammer's defaults.
+These follow Hammer++'s default keybindings.
 
 | Keys | Action |
 | --- | --- |
 | Ctrl+N / Ctrl+O / Ctrl+S | New map tab / open in a tab / save (a new map asks where to save) |
 | File > Recent Maps | The maps opened or saved last, the latest first (20 unless Mallet Options > Files says otherwise) |
-| Ctrl+W / Ctrl+Tab / Ctrl+Shift+Tab | Close tab (asks about unsaved changes) / next tab / previous tab |
+| Ctrl+F4 / Ctrl+Tab / Ctrl+Shift+Tab | Close tab (asks about unsaved changes) / next tab / previous tab |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Shift+S / Shift+B / Shift+E / Shift+A | Selection tool / Block tool / Entity tool / Texture application |
 | Alt+Enter or double-click | Object Properties for the selection: keyvalues, outputs, inputs and flags from the game's FGD |
@@ -89,15 +89,15 @@ These follow Hammer's defaults.
 | Entity tool: click in 3D | Create an entity of the class chosen under New entity on the brush face under the cursor |
 | Entity tool: click in 2D views, then Enter | Place the new entity's marker (each view sets its two axes, snapped to the grid), then create it |
 | Drag with the Block tool, then Enter | Create a box brush; drag inside it to move it, drag handles in any view to resize it (its depth starts from the last block) |
-| Delete / Escape / Ctrl+A | Delete selection / deselect or cancel the block / select all |
-| `[` / `]` | Smaller / larger grid |
-| Ctrl+E / Ctrl+Shift+E | Centre 2D views / 3D view on the map |
+| Delete / Shift+Q or Escape / Ctrl+Shift+A | Delete selection / deselect or cancel the block / select all |
+| Numpad `-` / Numpad `+` | Smaller / larger grid |
+| Ctrl+E / Ctrl+R | Centre 2D views / 3D view on the map |
 | Mouse wheel | Zoom a 2D view around the cursor, or move the camera forward |
 | Middle-drag or Space+drag | Pan a 2D view |
 | Z | Toggle mouselook in the 3D view (Escape leaves it); the cursor stays in the view and returns afterwards |
 | Click a viewport's label | Switch that viewport between 3D Textured, 3D Wireframe and the 2D Top, Front and Side views |
-| W A S D, arrow keys | Move and turn the 3D camera. A key pressed with Ctrl or Alt, such as the S of Ctrl+S, does not move it until released |
-| Ctrl (in mouselook) | Crouch: fly at a third of the camera speed. Ctrl with W A S D moves instead of closing the tab, saving or selecting all |
+| W A S D, arrow keys | Move the 3D camera; the arrow keys strafe left, right, up and down. A key pressed with Ctrl or Alt, such as the S of Ctrl+S, does not move it until released |
+| Ctrl (in mouselook) | Crouch: fly at a third of the camera speed. Ctrl with W A S D moves instead of saving |
 
 View > Net Graph toggles a frame timing overlay in the 3D view's bottom-right corner:
 frame rate, CPU time per frame, how many chunks and props culling left to draw, how many viewports
@@ -178,8 +178,8 @@ as you change it:
   builds.
 - **Compiling**: how compiles run, the folder `.mallet` maps compile in and how much
   compiler output the compile window keeps.
-- **Viewports**: draw distance, field of view, camera speed, crouch speed and acceleration, arrow key
-  turning, how far the mouse wheel moves the camera, mouselook sensitivity and smoothing,
+- **Viewports**: draw distance, field of view, camera speed, crouch speed and acceleration,
+  how far the mouse wheel moves the camera, mouselook sensitivity and smoothing,
   how far the wheel zooms the 2D views, how close a click must be to select a brush, the
   grid of new maps, how dense the grid may get and how often grid lines are highlighted.
 - **Colours**: the background, grid, axis, selection, tool, handle and texture-face

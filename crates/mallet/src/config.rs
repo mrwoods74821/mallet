@@ -390,7 +390,7 @@ pub struct ViewOptions {
     /// How far one mouse wheel notch scrolls the texture browser, as a share of a card's
     /// height, from 0.25 to 2.
     pub texture_scroll: f64,
-    /// Degrees per second the arrow keys turn the 3D camera.
+    /// Degrees per second the turn keys turn the 3D camera. Hammer++ binds none by default.
     pub turn_speed: f64,
     /// How quickly the 3D camera reaches its speed and stops, per second; higher is
     /// snappier.
