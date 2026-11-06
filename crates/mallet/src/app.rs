@@ -18,7 +18,8 @@ const DEFAULT_MCP_PORT: u16 = 7414;
 const PICK_TOLERANCE_PIXELS: f64 = 4.0;
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 14] = [
+const KEY_ACTIONS: [Action; 15] = [
+    Action::NewFile,
     Action::OpenFile,
     Action::SaveFile,
     Action::Undo,
@@ -86,9 +87,7 @@ impl MalletApp {
             drag: None,
         };
         app.start_mcp(&cc.egui_ctx);
-        if let Some(path) = path {
-            let _ = editor::lock(&app.editor).open(&path);
-        }
+        open_or_new(&mut editor::lock(&app.editor), path);
         app
     }
 
@@ -159,6 +158,7 @@ impl MalletApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
+                    menu_item(ui, &self.keymap, "New", Action::NewFile, &mut chosen);
                     menu_item(ui, &self.keymap, "Open...", Action::OpenFile, &mut chosen);
                     menu_item(ui, &self.keymap, "Save", Action::SaveFile, &mut chosen);
                     if ui.button("Save As...").clicked() {
@@ -386,6 +386,20 @@ impl eframe::App for MalletApp {
     }
 }
 
+/// Opens the map given on the command line, or starts a new map like Hammer when there is
+/// none or it fails to load. A load failure stays in the status bar.
+fn open_or_new(editor: &mut Editor, path: Option<PathBuf>) {
+    let Some(path) = path else {
+        editor.new_map();
+        return;
+    };
+    if editor.open(&path).is_err() {
+        let failure = std::mem::take(&mut editor.message);
+        editor.new_map();
+        editor.message = failure;
+    }
+}
+
 fn snap(point: DVec2, grid: f64) -> DVec2 {
     (point / grid).round() * grid
 }
@@ -417,8 +431,13 @@ fn run(action: Action, editor: &mut Editor) {
                 let _ = editor.open(&path);
             }
         }
+        Action::NewFile => editor.new_map(),
         Action::SaveFile => {
-            let _ = editor.save(None);
+            if editor.is_untitled() {
+                save_as_dialog(editor);
+            } else {
+                let _ = editor.save(None);
+            }
         }
         Action::Undo => {
             let _ = editor.step_history(false);

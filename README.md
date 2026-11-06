@@ -13,7 +13,8 @@ lets AI agents inspect the map, edit entities and take viewport screenshots.
 cargo run --release -p mallet -- path/to/map.vmf
 ```
 
-You can also open a map with File > Open or by dropping a `.vmf` onto the window.
+Without a path it starts with a new, empty map, like Hammer. You can also open a map with
+File > Open or by dropping a `.vmf` onto the window.
 
 ## Controls
 
@@ -21,7 +22,7 @@ These follow Hammer's defaults.
 
 | Keys | Action |
 | --- | --- |
-| Ctrl+O / Ctrl+S | Open / save |
+| Ctrl+N / Ctrl+O / Ctrl+S | New map / open / save (a new map asks where to save) |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Shift+S / Shift+B | Selection tool / Block tool |
 | Click | Select a world brush or a whole entity (Ctrl+click toggles) |

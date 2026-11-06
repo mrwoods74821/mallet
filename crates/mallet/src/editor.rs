@@ -136,11 +136,8 @@ impl Editor {
     pub fn open(&mut self, path: &Path) -> Result<(), String> {
         match Document::load(path) {
             Ok(document) => {
-                self.scene = Scene::build(&document.vmf);
+                self.set_document(document);
                 self.message = format!("Loaded {}", path.display());
-                self.document = Some(document);
-                self.selection.clear();
-                self.overlay = Overlay::default();
                 self.fit_2d();
                 self.fit_3d();
                 self.refit_on_layout = true;
@@ -153,18 +150,47 @@ impl Editor {
         }
     }
 
-    /// Saves the open map, first moving it to `path` when one is given.
+    /// Replaces the open map with a new, empty, unsaved one, viewed from the origin.
+    pub fn new_map(&mut self) {
+        self.set_document(Document::untitled());
+        self.views = [
+            View2D::new(Axis2D::Top),
+            View2D::new(Axis2D::Front),
+            View2D::new(Axis2D::Side),
+        ];
+        self.camera = Camera3D::new();
+        self.refit_on_layout = false;
+        self.message = "New map".to_owned();
+    }
+
+    fn set_document(&mut self, document: Document) {
+        self.scene = Scene::build(&document.vmf);
+        self.document = Some(document);
+        self.selection.clear();
+        self.overlay = Overlay::default();
+    }
+
+    /// Saves the open map, first moving it to `path` when one is given. A map that has
+    /// never been saved needs a path.
     pub fn save(&mut self, path: Option<PathBuf>) -> Result<PathBuf, String> {
         let document = self.document.as_mut().ok_or("no map is open")?;
         if let Some(path) = path {
-            document.path = path;
+            document.path = Some(path);
         }
         let result = document.save();
         self.message = match &result {
-            Ok(()) => format!("Saved {}", document.path.display()),
-            Err(error) => format!("Could not save {}: {error}", document.path.display()),
+            Ok(()) => format!("Saved {}", document.display_path()),
+            Err(error) => format!("Could not save {}: {error}", document.display_path()),
         };
-        result.map(|()| document.path.clone()).map_err(|_| self.message.clone())
+        match (result, &document.path) {
+            (Ok(()), Some(path)) => Ok(path.clone()),
+            _ => Err(self.message.clone()),
+        }
+    }
+
+    /// Whether the open map has never been saved, so saving needs a path.
+    pub fn is_untitled(&self) -> bool {
+        self.document.as_ref().is_some_and(|document| document.path.is_none())
     }
 
     /// Applies an edit through the undo history and refreshes the viewports.

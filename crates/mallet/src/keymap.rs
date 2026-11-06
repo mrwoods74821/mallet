@@ -8,6 +8,7 @@ use eframe::egui::{InputState, Key, Modifiers};
 /// Something the user can trigger from the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
+    NewFile,
     OpenFile,
     SaveFile,
     Undo,
@@ -109,6 +110,7 @@ impl KeyMap {
     pub fn hammer_defaults() -> Self {
         Self {
             bindings: vec![
+                (Action::NewFile, Chord::ctrl(Key::N)),
                 (Action::OpenFile, Chord::ctrl(Key::O)),
                 (Action::SaveFile, Chord::ctrl(Key::S)),
                 (Action::Undo, Chord::ctrl(Key::Z)),

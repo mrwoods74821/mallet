@@ -29,6 +29,13 @@ pub fn definitions() -> Value {
             &[],
         ),
         tool(
+            "new_map",
+            "Start a new, empty, unsaved map, replacing the current one. Unsaved changes are lost. \
+             Save it with save_map and a path.",
+            json!({}),
+            &[],
+        ),
+        tool(
             "open_map",
             "Open a .vmf file in the editor, replacing the current map. Unsaved changes to the current map are lost.",
             json!({ "path": { "type": "string", "description": "Absolute path to the .vmf file." } }),
@@ -36,7 +43,8 @@ pub fn definitions() -> Value {
         ),
         tool(
             "save_map",
-            "Save the open map. Overwrites its file unless a new path is given, which then becomes the map's path.",
+            "Save the open map. Overwrites its file unless a new path is given, which then becomes the map's \
+             path. A new map needs a path.",
             json!({ "path": { "type": "string", "description": "Optional absolute path to save to instead." } }),
             &[],
         ),
@@ -190,6 +198,10 @@ pub fn run(editor: &mut Editor, name: &str, args: &Value) -> ToolResult {
 fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResult, String> {
     match name {
         "get_status" => Ok(ToolResult::json(&status_json(editor))),
+        "new_map" => {
+            editor.new_map();
+            Ok(ToolResult::json(&status_json(editor)))
+        }
         "open_map" => {
             editor.open(&PathBuf::from(string_arg(args, "path")?))?;
             Ok(ToolResult::json(&status_json(editor)))
@@ -323,7 +335,7 @@ fn status_json(editor: &Editor) -> Value {
         .collect();
     let history = editor.document.as_ref().map(|document| &document.history);
     json!({
-        "map": editor.document.as_ref().map(|document| document.path.display().to_string()),
+        "map": editor.document.as_ref().map(|document| document.display_path()),
         "solids": editor.scene.solid_count,
         "entities": editor.scene.entity_count,
         "bounds": (!bounds.is_empty()).then(|| json!({

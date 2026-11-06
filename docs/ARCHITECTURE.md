@@ -79,7 +79,7 @@ Tools:
 | Tool | What it does |
 | --- | --- |
 | `get_status` | Open map, counts, bounds, grid, camera, 2D views, undo/redo state |
-| `open_map`, `save_map` | Load a VMF; save in place or to a new path |
+| `new_map`, `open_map`, `save_map` | Start an empty map, load a VMF, save in place or to a new path |
 | `list_entities`, `get_entity` | Browse entities, filtered by classname (`trigger_*` prefix match) |
 | `set_entity_key`, `remove_entity_key` | Undoable key edits |
 | `get_selection`, `select`, `clear_selection` | Read or change the selection the window shows |

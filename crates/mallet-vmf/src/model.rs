@@ -71,7 +71,52 @@ pub enum TopLevel {
     Other(Block),
 }
 
+/// What Hammer writes for a brand-new, empty map.
+const NEW_MAP: &str = r#"versioninfo
+{
+	"editorversion" "400"
+	"editorbuild" "8864"
+	"mapversion" "0"
+	"formatversion" "100"
+	"prefab" "0"
+}
+visgroups
+{
+}
+viewsettings
+{
+	"bSnapToGrid" "1"
+	"bShowGrid" "1"
+	"bShowLogicalGrid" "0"
+	"nGridSpacing" "64"
+	"bShow3DGrid" "0"
+}
+world
+{
+	"id" "1"
+	"mapversion" "0"
+	"classname" "worldspawn"
+	"skyname" "sky_day01_01"
+	"maxpropscreenwidth" "-1"
+	"detailvbsp" "detail.vbsp"
+	"detailmaterial" "detail/detailsprites"
+}
+cameras
+{
+	"activecamera" "-1"
+}
+cordons
+{
+	"active" "0"
+}
+"#;
+
 impl Vmf {
+    /// An empty map with just a world, laid out the way Hammer creates new maps.
+    pub fn new_map() -> Self {
+        Self::parse(NEW_MAP).expect("the built-in new map template is valid")
+    }
+
     /// Parses VMF text.
     pub fn parse(text: &str) -> Result<Self, VmfError> {
         Self::from_items(mallet_kv::parse(text)?)
