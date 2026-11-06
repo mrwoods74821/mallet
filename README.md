@@ -59,7 +59,7 @@ These follow Hammer's defaults.
 | Middle-drag or Space+drag | Pan a 2D view |
 | Z | Toggle mouselook in the 3D view (Escape leaves it); the cursor stays in the view and returns afterwards |
 | Click a viewport's label | Switch that viewport between 3D Textured, 3D Wireframe and the 2D Top, Front and Side views |
-| W A S D, arrow keys | Move and turn the 3D camera |
+| W A S D, arrow keys | Move and turn the 3D camera. A key pressed with Ctrl or Alt, such as the S of Ctrl+S, does not move it until released |
 
 View > Net Graph toggles a frame timing overlay in the 3D view's bottom-right corner:
 frame rate, CPU time per frame, how many chunks and props culling left to draw, how many viewports

@@ -3,6 +3,8 @@
 //! Bindings live in one table so they can be rebound later without touching the code
 //! that reacts to them.
 
+use std::collections::HashSet;
+
 use eframe::egui::{InputState, Key, Modifiers};
 
 /// Something the user can trigger from the keyboard.
@@ -189,14 +191,15 @@ impl KeyMap {
         })
     }
 
-    /// Whether a movement action's key is held. Ctrl and Alt suppress it, so Ctrl+S saves
-    /// instead of moving the camera backwards.
-    pub fn held(&self, input: &InputState, action: Action) -> bool {
+    /// Whether a movement action's key is held. Ctrl and Alt suppress it, and so does a
+    /// key in `blocked`: one that went down as part of a shortcut such as Ctrl+S, which
+    /// must not move the camera when Ctrl is let go first.
+    pub fn held(&self, input: &InputState, action: Action, blocked: &HashSet<Key>) -> bool {
         !input.modifiers.ctrl
             && !input.modifiers.alt
             && self
                 .bindings
                 .iter()
-                .any(|(bound, chord)| *bound == action && input.key_down(chord.key))
+                .any(|(bound, chord)| *bound == action && input.key_down(chord.key) && !blocked.contains(&chord.key))
     }
 }

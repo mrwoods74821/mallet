@@ -1,5 +1,7 @@
 //! The 3D camera: movement, mouselook and the CPU wireframe fallback drawing.
 
+use std::collections::HashSet;
+
 use eframe::egui::{self, Color32, Pos2, Rect, ViewportCommand};
 use glam::DVec3;
 use mallet_vmf::geometry::Bounds;
@@ -57,6 +59,8 @@ pub struct Camera3D {
     recent_look: std::collections::VecDeque<egui::Vec2>,
     /// Frame time smoothed over recent frames; 0 until the first frame.
     frame_time: f64,
+    /// Keys pressed with Ctrl or Alt, which do not move the camera until released.
+    shortcut_keys: HashSet<egui::Key>,
 }
 
 impl Camera3D {
@@ -73,6 +77,7 @@ impl Camera3D {
             velocity: DVec3::ZERO,
             recent_look: std::collections::VecDeque::with_capacity(LOOK_FRAMES),
             frame_time: 0.0,
+            shortcut_keys: HashSet::new(),
         }
     }
 
@@ -84,6 +89,27 @@ impl Camera3D {
     pub fn right(&self) -> DVec3 {
         let yaw = self.yaw.to_radians();
         DVec3::new(yaw.sin(), -yaw.cos(), 0.0)
+    }
+
+    /// A point straight ahead of the camera, as Hammer saves a camera's `look`.
+    pub fn look_point(&self) -> DVec3 {
+        self.position + self.forward() * 64.0
+    }
+
+    /// Places the camera at `position`, looking towards `look`.
+    pub fn set_view(&mut self, position: DVec3, look: DVec3) {
+        self.position = position;
+        let direction = (look - position).normalize_or_zero();
+        if direction != DVec3::ZERO {
+            self.yaw = direction.y.atan2(direction.x).to_degrees().rem_euclid(360.0);
+            self.pitch = direction
+                .z
+                .clamp(-1.0, 1.0)
+                .asin()
+                .to_degrees()
+                .clamp(-MAX_PITCH, MAX_PITCH);
+        }
+        self.velocity = DVec3::ZERO;
     }
 
     /// Moves the camera back from the bounds' centre until all of it is in view.
@@ -121,6 +147,26 @@ impl Camera3D {
     /// frames, like Source's `m_filter`. The camera also eases towards the speed the keys
     /// ask for instead of jumping to it.
     pub fn update(&mut self, ctx: &egui::Context, hovered: bool, keymap: &KeyMap) -> bool {
+        // Watch every key event, even while another view is hovered, so a shortcut's key
+        // never turns into movement later.
+        ctx.input(|input| {
+            for event in &input.events {
+                if let egui::Event::Key {
+                    key,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } = event
+                {
+                    if !pressed {
+                        self.shortcut_keys.remove(key);
+                    } else if modifiers.ctrl || modifiers.alt || modifiers.command {
+                        self.shortcut_keys.insert(*key);
+                    }
+                }
+            }
+        });
         if !hovered && !self.mouse_look {
             return false;
         }
@@ -166,7 +212,8 @@ impl Camera3D {
             }
 
             let turn = |positive: Action, negative: Action| {
-                f64::from(u8::from(keymap.held(input, positive))) - f64::from(u8::from(keymap.held(input, negative)))
+                let held = |action| f64::from(u8::from(keymap.held(input, action, &self.shortcut_keys)));
+                held(positive) - held(negative)
             };
             let yaw_input = turn(Action::TurnLeft, Action::TurnRight);
             let pitch_input = turn(Action::LookUp, Action::LookDown);

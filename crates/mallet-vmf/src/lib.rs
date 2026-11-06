@@ -7,6 +7,8 @@ pub mod build;
 pub mod edit;
 pub mod geometry;
 mod model;
+mod view;
 
 pub use mallet_kv as kv;
 pub use model::*;
+pub use view::SavedCamera;

@@ -13,7 +13,7 @@ use glam::{DVec2, DVec3};
 use mallet_vmf::build::box_solid;
 use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
-use mallet_vmf::{format_vec3, Entity, IdAllocator, Solid, Vmf};
+use mallet_vmf::{format_vec3, Entity, IdAllocator, SavedCamera, Solid, Vmf};
 
 use std::sync::Arc;
 
@@ -488,10 +488,13 @@ impl Editor {
     pub fn open(&mut self, path: &Path) -> Result<(), String> {
         match Document::load(path) {
             Ok(document) => {
+                let grid = document.vmf.grid_spacing();
                 self.set_document(document);
                 self.message = format!("Loaded {}", path.display());
-                self.fit_2d();
-                self.fit_3d();
+                if let Some(grid) = grid.filter(|grid| (MIN_GRID..=MAX_GRID).contains(grid)) {
+                    self.grid = grid;
+                }
+                self.frame_map();
                 self.refit_on_layout = true;
                 Ok(())
             }
@@ -522,7 +525,16 @@ impl Editor {
     /// Saves the open map, first moving it to `path` when one is given. A map that has
     /// never been saved needs a path.
     pub fn save(&mut self, path: Option<PathBuf>) -> Result<PathBuf, String> {
+        let camera = SavedCamera {
+            position: self.camera.position,
+            look: self.camera.look_point(),
+        };
+        let grid = self.grid;
         let document = self.document.as_mut().ok_or("no map is open")?;
+        // Like Hammer, keep where the map was viewed from, so it reopens there. This is
+        // not an edit: it does not dirty the map or go into the undo history.
+        document.vmf.set_active_camera(camera);
+        document.vmf.set_grid_spacing(grid);
         if let Some(path) = path {
             document.path = Some(path);
         }
@@ -896,6 +908,17 @@ impl Editor {
     }
 
     /// Moves the 3D camera back until the whole map is in view.
+    /// Fits the map into the 2D views, and puts the 3D camera where the map was saved
+    /// from, or back far enough to see all of it.
+    fn frame_map(&mut self) {
+        self.fit_2d();
+        let saved = self.document.as_ref().and_then(|document| document.vmf.active_camera());
+        match saved {
+            Some(camera) => self.camera.set_view(camera.position, camera.look),
+            None => self.fit_3d(),
+        }
+    }
+
     pub fn fit_3d(&mut self) {
         self.camera.look_at(&self.scene.bounds);
     }
@@ -1021,8 +1044,7 @@ impl Editor {
         self.pixels_per_point = pixels_per_point;
         if self.refit_on_layout {
             self.refit_on_layout = false;
-            self.fit_2d();
-            self.fit_3d();
+            self.frame_map();
         }
     }
 

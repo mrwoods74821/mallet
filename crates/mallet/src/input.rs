@@ -47,8 +47,15 @@ pub fn parse_button(name: &str) -> Result<PointerButton, String> {
 }
 
 /// A key press and release, such as `Enter` or `B`, using egui's key names. The key is
-/// held down for `frames` frames before it is released.
-pub fn key_press(name: &str, modifiers: Modifiers, frames: usize) -> Result<Vec<InputFrame>, String> {
+/// held down for `frames` frames before it is released. With `modifier_frames`, the
+/// modifiers are let go after that many frames, before the key, as people often do with
+/// Ctrl+S.
+pub fn key_press(
+    name: &str,
+    modifiers: Modifiers,
+    frames: usize,
+    modifier_frames: Option<usize>,
+) -> Result<Vec<InputFrame>, String> {
     let key = Key::from_name(name).ok_or_else(|| format!("unknown key \"{name}\""))?;
     let event = |pressed| Event::Key {
         key,
@@ -57,11 +64,22 @@ pub fn key_press(name: &str, modifiers: Modifiers, frames: usize) -> Result<Vec<
         repeat: false,
         modifiers,
     };
+    let held = |frame: usize| match modifier_frames {
+        Some(limit) if frame >= limit => Modifiers::NONE,
+        _ => modifiers,
+    };
     let mut sequence = vec![InputFrame::new(modifiers, vec![event(true)])];
-    for _ in 1..frames.max(1) {
-        sequence.push(InputFrame::new(modifiers, Vec::new()));
+    for frame in 1..frames.max(1) {
+        sequence.push(InputFrame::new(held(frame), Vec::new()));
     }
-    sequence.push(InputFrame::new(modifiers, vec![event(false)]));
+    let released = Event::Key {
+        key,
+        physical_key: None,
+        pressed: false,
+        repeat: false,
+        modifiers: held(frames.max(1)),
+    };
+    sequence.push(InputFrame::new(held(frames.max(1)), vec![released]));
     Ok(sequence)
 }
 

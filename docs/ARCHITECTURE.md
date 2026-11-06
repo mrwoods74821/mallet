@@ -22,6 +22,11 @@ opening and saving a map changes nothing except number formatting that parses ba
 same values. Files that are not valid UTF-8 are read byte-for-byte and written back the same
 way.
 
+The one thing saving adds is where the map was viewed from, as Hammer does: the 3D camera
+goes into the active entry of the `cameras` block (other cameras are kept) and the grid
+size into `viewsettings`. Opening a map puts the camera and grid back, in Mallet and in
+Hammer. This is not an edit, so it neither dirties the map nor enters the undo history.
+
 ## Edits and undo
 
 Every change to a map is an `Edit` (`mallet_vmf::edit`). Applying an edit returns its

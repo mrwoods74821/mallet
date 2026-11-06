@@ -56,7 +56,12 @@ pub fn definitions() -> Value {
             json!({ "path": { "type": "string", "description": "Absolute path to the .vmf file." } }),
             &["path"],
         ),
-        tool("list_tabs", "List the open map tabs, which one is active, and which have unsaved changes.", json!({}), &[]),
+        tool(
+            "list_tabs",
+            "List the open map tabs, which one is active, and which have unsaved changes.",
+            json!({}),
+            &[]
+        ),
         tool(
             "switch_tab",
             "Make another map tab the one every other tool works on.",
@@ -152,7 +157,12 @@ pub fn definitions() -> Value {
             json!({ "min": vec3, "max": vec3 }),
             &["min", "max"],
         ),
-        tool("delete_selection", "Delete the selected brushes and entities. Undoable.", json!({}), &[]),
+        tool(
+            "delete_selection",
+            "Delete the selected brushes and entities. Undoable.",
+            json!({}),
+            &[]
+        ),
         tool(
             "create_block",
             "Create an axis-aligned box brush in the world between two corners and select it. Undoable. \
@@ -333,6 +343,7 @@ pub fn definitions() -> Value {
                         "properties": {
                             "key": { "type": "string" },
                             "hold_frames": { "type": "integer", "minimum": 1, "description": "Frames to hold the key before releasing it; default 1." },
+                            "modifier_frames": { "type": "integer", "minimum": 1, "description": "Frames the modifiers stay held, to let go of them before the key; default until the key is released." },
                             "click": vec2,
                             "drag": { "type": "array", "items": vec2, "minItems": 2, "maxItems": 2 },
                             "viewport": { "type": "string", "enum": ["camera", "top", "front", "side"] },
@@ -344,7 +355,12 @@ pub fn definitions() -> Value {
             }),
             &["actions"],
         ),
-        tool("undo", "Undo the last edit, whether it was made by hand or by a tool.", json!({}), &[]),
+        tool(
+            "undo",
+            "Undo the last edit, whether it was made by hand or by a tool.",
+            json!({}),
+            &[]
+        ),
         tool("redo", "Redo the last undone edit.", json!({}), &[]),
         tool(
             "set_grid",
@@ -956,7 +972,11 @@ fn input_action(editor: &Editor, action: &Value) -> Result<Vec<InputFrame>, Stri
     let modifiers = input::parse_modifiers(&names)?;
     if let Some(key) = optional_string(action, "key")? {
         let frames = action.get("hold_frames").and_then(Value::as_u64).unwrap_or(1) as usize;
-        return input::key_press(key, modifiers, frames);
+        let modifier_frames = action
+            .get("modifier_frames")
+            .and_then(Value::as_u64)
+            .map(|frames| frames as usize);
+        return input::key_press(key, modifiers, frames, modifier_frames);
     }
     let button = input::parse_button(optional_string(action, "button")?.unwrap_or("primary"))?;
     let viewport = match string_arg(action, "viewport")? {
