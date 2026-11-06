@@ -39,7 +39,7 @@ pub fn box_solid(min: DVec3, max: DVec3, material: &str, ids: &mut IdAllocator) 
             offset: 0.0,
             scale: DEFAULT_TEXTURE_SCALE,
         };
-        items.push(SolidItem::Side(Side {
+        items.push(SolidItem::Side(Box::new(Side {
             id: ids.side(),
             plane,
             material: material.to_owned(),
@@ -49,7 +49,8 @@ pub fn box_solid(min: DVec3, max: DVec3, material: &str, ids: &mut IdAllocator) 
             lightmap_scale: Some(DEFAULT_LIGHTMAP_SCALE),
             smoothing_groups: Some(0),
             extra: Vec::new(),
-        }));
+            extra_slots: Vec::new(),
+        })));
     }
     let mut editor = Block::new("editor");
     editor.push_pair("color", editor_color(id));

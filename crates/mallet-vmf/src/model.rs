@@ -411,8 +411,8 @@ pub struct Solid {
 pub enum SolidItem {
     /// A key, normally just `id`.
     Key(Pair),
-    /// One face of the brush.
-    Side(Side),
+    /// One face of the brush, boxed because sides are much larger than keys.
+    Side(Box<Side>),
     /// Any other block, normally `editor`.
     Other(Block),
 }
@@ -426,7 +426,7 @@ impl Solid {
             .map(|item| match item {
                 Item::Pair(pair) => Ok(SolidItem::Key(pair)),
                 Item::Block(child) if child.name.eq_ignore_ascii_case("side") => {
-                    Side::from_block(child).map(SolidItem::Side)
+                    Side::from_block(child).map(|side| SolidItem::Side(Box::new(side)))
                 }
                 Item::Block(child) => Ok(SolidItem::Other(child)),
             })
@@ -473,7 +473,7 @@ impl Solid {
     /// Iterates mutably over the solid's faces.
     pub fn sides_mut(&mut self) -> impl Iterator<Item = &mut Side> {
         self.items.iter_mut().filter_map(|item| match item {
-            SolidItem::Side(side) => Some(side),
+            SolidItem::Side(side) => Some(side.as_mut()),
             _ => None,
         })
     }
@@ -507,7 +507,7 @@ impl Solid {
     /// Iterates over the solid's faces.
     pub fn sides(&self) -> impl Iterator<Item = &Side> {
         self.items.iter().filter_map(|item| match item {
-            SolidItem::Side(side) => Some(side),
+            SolidItem::Side(side) => Some(side.as_ref()),
             _ => None,
         })
     }
@@ -561,8 +561,9 @@ impl fmt::Display for TexAxis {
 
 /// One face of a brush.
 ///
-/// The fields Hammer always writes are typed. Anything else, such as a `dispinfo` block,
-/// is kept verbatim in [`Side::extra`] and written after the typed fields.
+/// The fields Hammer always writes are typed. Anything else, such as a `dispinfo` block
+/// or Hammer++'s `vertices_plus`, is kept verbatim in [`Side::extra`] and written back in
+/// the same position relative to the typed fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Side {
     /// Unique face id.
@@ -583,6 +584,9 @@ pub struct Side {
     pub smoothing_groups: Option<u32>,
     /// Every other key and block, in file order.
     pub extra: Vec<Item>,
+    /// For each item in `extra`, how many typed fields came before it in the file. Items
+    /// without an entry are written after all typed fields.
+    pub extra_slots: Vec<usize>,
 }
 
 impl Side {
@@ -601,12 +605,16 @@ impl Side {
         let mut lightmap_scale = None;
         let mut smoothing_groups = None;
         let mut extra = Vec::new();
+        let mut extra_slots = Vec::new();
+        let mut typed = 0;
 
         for item in block.items {
             let Item::Pair(pair) = item else {
                 extra.push(item);
+                extra_slots.push(typed);
                 continue;
             };
+            typed += 1;
             match pair.key.to_ascii_lowercase().as_str() {
                 "id" if id.is_none() => id = Some(parse_value(&context, &pair)?),
                 "plane" if plane.is_none() => {
@@ -626,7 +634,11 @@ impl Side {
                 "smoothing_groups" if smoothing_groups.is_none() => {
                     smoothing_groups = Some(parse_value(&context, &pair)?)
                 }
-                _ => extra.push(Item::Pair(pair)),
+                _ => {
+                    typed -= 1;
+                    extra.push(Item::Pair(pair));
+                    extra_slots.push(typed);
+                }
             }
         }
 
@@ -640,27 +652,42 @@ impl Side {
             lightmap_scale,
             smoothing_groups,
             extra,
+            extra_slots,
         })
     }
 
-    /// Converts the side back into a `side` block, typed fields first in Hammer's order.
+    /// Converts the side back into a `side` block: typed fields in Hammer's order, with
+    /// every extra item put back where it was among them.
     pub fn to_block(&self) -> Block {
+        let typed: Vec<Pair> = [
+            Some(Pair::new("id", self.id.to_string())),
+            Some(Pair::new("plane", format_plane(&self.plane))),
+            Some(Pair::new("material", self.material.clone())),
+            Some(Pair::new("uaxis", self.uaxis.to_string())),
+            Some(Pair::new("vaxis", self.vaxis.to_string())),
+            self.rotation.map(|rotation| Pair::new("rotation", rotation.to_string())),
+            self.lightmap_scale.map(|scale| Pair::new("lightmapscale", scale.to_string())),
+            self.smoothing_groups.map(|groups| Pair::new("smoothing_groups", groups.to_string())),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let slot = |index: usize| self.extra_slots.get(index).copied().unwrap_or(usize::MAX);
+        let extras_where = |keep: &dyn Fn(usize) -> bool| {
+            self.extra
+                .iter()
+                .enumerate()
+                .filter(move |(index, _)| keep(slot(*index)))
+                .map(|(_, item)| Item::clone(item))
+                .collect::<Vec<_>>()
+        };
+        let count = typed.len();
         let mut block = Block::new("side");
-        block.push_pair("id", self.id.to_string());
-        block.push_pair("plane", format_plane(&self.plane));
-        block.push_pair("material", self.material.clone());
-        block.push_pair("uaxis", self.uaxis.to_string());
-        block.push_pair("vaxis", self.vaxis.to_string());
-        if let Some(rotation) = self.rotation {
-            block.push_pair("rotation", rotation.to_string());
+        for (position, pair) in typed.into_iter().enumerate() {
+            block.items.extend(extras_where(&|slot| slot == position));
+            block.items.push(Item::Pair(pair));
         }
-        if let Some(scale) = self.lightmap_scale {
-            block.push_pair("lightmapscale", scale.to_string());
-        }
-        if let Some(groups) = self.smoothing_groups {
-            block.push_pair("smoothing_groups", groups.to_string());
-        }
-        block.items.extend(self.extra.iter().cloned());
+        block.items.extend(extras_where(&|slot| slot >= count));
         block
     }
 
