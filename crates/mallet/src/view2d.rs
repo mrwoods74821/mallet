@@ -5,7 +5,7 @@ use glam::{DVec2, DVec3};
 use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::Canvas;
-use crate::scene::Scene;
+use crate::scene::{box_edges, Overlay, Scene, TOOL_COLOR};
 
 const MIN_SCALE: f64 = 1.0 / 256.0;
 const MAX_SCALE: f64 = 32.0;
@@ -37,17 +37,33 @@ impl Axis2D {
         }
     }
 
+    /// World axis indices: horizontal, vertical, then the depth axis the view looks along.
+    pub fn axes(self) -> [usize; 3] {
+        match self {
+            Self::Top => [0, 1, 2],
+            Self::Front => [1, 2, 0],
+            Self::Side => [0, 2, 1],
+        }
+    }
+
     /// Drops the axis this view looks along.
     pub fn project(self, point: DVec3) -> DVec2 {
-        match self {
-            Self::Top => DVec2::new(point.x, point.y),
-            Self::Front => DVec2::new(point.y, point.z),
-            Self::Side => DVec2::new(point.x, point.z),
-        }
+        let [horizontal, vertical, _] = self.axes();
+        DVec2::new(point[horizontal], point[vertical])
+    }
+
+    /// Turns a 2D view offset into a world offset with no movement along the depth axis.
+    pub fn lift(self, offset: DVec2) -> DVec3 {
+        let [horizontal, vertical, _] = self.axes();
+        let mut world = DVec3::ZERO;
+        world[horizontal] = offset.x;
+        world[vertical] = offset.y;
+        world
     }
 }
 
 /// Pan and zoom state of one 2D viewport.
+#[derive(Clone, Debug)]
 pub struct View2D {
     pub axis: Axis2D,
     /// World position at the centre of the viewport.
@@ -125,32 +141,52 @@ impl View2D {
     }
 
     /// Draws the grid, every wireframe that overlaps the view, and the corner label.
-    pub fn draw(&self, canvas: &mut dyn Canvas, rect: Rect, scene: &Scene, grid: f64, active: bool) {
+    ///
+    /// Selected meshes are drawn last, in red, at the overlay's move offset; then the block
+    /// tool's box and this view's selection marquee.
+    pub fn draw(&self, canvas: &mut dyn Canvas, rect: Rect, scene: &Scene, grid: f64, active: bool, overlay: &Overlay) {
         canvas.fill(rect, Color32::BLACK);
         self.draw_grid(canvas, rect, grid);
 
         let view_min = self.to_world(rect, rect.left_bottom());
         let view_max = self.to_world(rect, rect.right_top());
-        let mut segments = Vec::new();
-        for mesh in &scene.meshes {
-            let min = self.axis.project(mesh.bounds.min);
-            let max = self.axis.project(mesh.bounds.max);
+        let unselected = scene.meshes.iter().filter(|mesh| !mesh.selected);
+        let selected = scene.meshes.iter().filter(|mesh| mesh.selected);
+        for mesh in unselected.chain(selected) {
+            let (color, offset) = mesh.appearance(overlay);
+            let min = self.axis.project(mesh.bounds.min + offset);
+            let max = self.axis.project(mesh.bounds.max + offset);
             if max.x < view_min.x || min.x > view_max.x || max.y < view_min.y || min.y > view_max.y {
                 continue;
             }
-            segments.clear();
-            for [a, b] in &mesh.edges {
-                let (a, b) = (self.axis.project(*a), self.axis.project(*b));
-                if a.distance_squared(b) < 1e-6 {
-                    continue;
-                }
-                segments.push([self.to_screen(rect, a), self.to_screen(rect, b)]);
+            self.draw_edges(canvas, rect, &mesh.edges, offset, color);
+        }
+
+        if let Some(block) = &overlay.block {
+            self.draw_edges(canvas, rect, &box_edges(block), DVec3::ZERO, TOOL_COLOR);
+        }
+        if let Some((axis, a, b)) = overlay.marquee {
+            if axis == self.axis {
+                let corners = [a, DVec2::new(b.x, a.y), b, DVec2::new(a.x, b.y)];
+                let segments: Vec<[Pos2; 2]> = (0..4)
+                    .map(|i| [self.to_screen(rect, corners[i]), self.to_screen(rect, corners[(i + 1) % 4])])
+                    .collect();
+                canvas.lines(&segments, TOOL_COLOR);
             }
-            canvas.lines(&segments, mesh.color);
         }
 
         let label_color = if active { Color32::WHITE } else { Color32::GRAY };
         canvas.label(rect.left_top() + egui::vec2(6.0, 4.0), self.axis.label(), label_color);
+    }
+
+    fn draw_edges(&self, canvas: &mut dyn Canvas, rect: Rect, edges: &[[DVec3; 2]], offset: DVec3, color: Color32) {
+        let segments: Vec<[Pos2; 2]> = edges
+            .iter()
+            .map(|[a, b]| (self.axis.project(*a + offset), self.axis.project(*b + offset)))
+            .filter(|(a, b)| a.distance_squared(*b) >= 1e-6)
+            .map(|(a, b)| [self.to_screen(rect, a), self.to_screen(rect, b)])
+            .collect();
+        canvas.lines(&segments, color);
     }
 
     fn draw_grid(&self, canvas: &mut dyn Canvas, rect: Rect, grid: f64) {

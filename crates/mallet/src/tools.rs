@@ -7,8 +7,9 @@ use mallet_vmf::edit::Edit;
 use mallet_vmf::{Entity, EntityItem};
 use serde_json::{json, Value};
 
-use crate::editor::{Editor, ShotTarget, MAX_GRID, MIN_GRID};
+use crate::editor::{Editor, SelectMode, ShotTarget, Tool, MAX_GRID, MIN_GRID};
 use crate::mcp::ToolResult;
+use crate::scene::Owner;
 
 /// How many entities `list_entities` returns when no limit is given.
 const DEFAULT_LIST_LIMIT: u64 = 200;
@@ -68,6 +69,53 @@ pub fn definitions() -> Value {
             "Remove a key from an entity. Undoable.",
             json!({ "id": id, "key": { "type": "string" } }),
             &["id", "key"],
+        ),
+        tool(
+            "get_selection",
+            "List what is selected and the selection's bounds. World brushes are selected one by one; \
+             entities are selected whole.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "select",
+            "Change the selection, the same one the editor window shows. Unknown ids are ignored.",
+            json!({
+                "solids": { "type": "array", "items": { "type": "integer" }, "description": "World brush ids." },
+                "entities": { "type": "array", "items": { "type": "integer" }, "description": "Entity ids." },
+                "mode": {
+                    "type": "string",
+                    "enum": ["replace", "add", "remove", "toggle"],
+                    "description": "How to combine with the current selection; default replace."
+                }
+            }),
+            &[],
+        ),
+        tool("clear_selection", "Deselect everything.", json!({}), &[]),
+        tool(
+            "move_selection",
+            "Move the selection with texture lock. Entity origins move too. Undoable.",
+            json!({ "offset": vec3 }),
+            &["offset"],
+        ),
+        tool(
+            "clone_selection",
+            "Copy the selection with fresh ids, move the copies by offset and select them, like Shift-dragging \
+             in Hammer. Undoable.",
+            json!({ "offset": vec3 }),
+            &["offset"],
+        ),
+        tool("delete_selection", "Delete the selected brushes and entities. Undoable.", json!({}), &[]),
+        tool(
+            "create_block",
+            "Create an axis-aligned box brush in the world between two corners and select it. Undoable. \
+             Returns the new brush id.",
+            json!({
+                "min": vec3,
+                "max": vec3,
+                "material": { "type": "string", "description": "Material for every face; default is the editor's current material." }
+            }),
+            &["min", "max"],
         ),
         tool("undo", "Undo the last edit, whether it was made by hand or by a tool.", json!({}), &[]),
         tool("redo", "Redo the last undone edit.", json!({}), &[]),
@@ -173,6 +221,47 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
             entity: id_arg(args)?,
             key: string_arg(args, "key")?.to_owned(),
         })),
+        "get_selection" => Ok(ToolResult::json(&selection_json(editor))),
+        "select" => {
+            let mode = match optional_string(args, "mode")?.unwrap_or("replace") {
+                "replace" => SelectMode::Replace,
+                "add" => SelectMode::Add,
+                "remove" => SelectMode::Remove,
+                "toggle" => SelectMode::Toggle,
+                other => return Err(format!("unknown mode \"{other}\"")),
+            };
+            let solids = id_list(args, "solids")?.into_iter().map(Owner::Solid);
+            let entities = id_list(args, "entities")?.into_iter().map(Owner::Entity);
+            editor.select(solids.chain(entities), mode);
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
+        "clear_selection" => {
+            editor.clear_selection();
+            Ok(ToolResult::text("Selection cleared."))
+        }
+        "move_selection" => {
+            editor.move_selection(required_vec3(args, "offset")?)?;
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
+        "clone_selection" => {
+            editor.clone_selection(required_vec3(args, "offset")?)?;
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
+        "delete_selection" => {
+            let count = editor.delete_selection()?;
+            Ok(ToolResult::text(format!("Deleted {count} objects. Undo with the undo tool or Ctrl+Z.")))
+        }
+        "create_block" => {
+            let min = required_vec3(args, "min")?;
+            let max = required_vec3(args, "max")?;
+            let previous = optional_string(args, "material")?
+                .map(|material| std::mem::replace(&mut editor.material, material.to_owned()));
+            let result = editor.create_block(min, max);
+            if let Some(previous) = previous {
+                editor.material = previous;
+            }
+            Ok(ToolResult::json(&json!({ "solid": result? })))
+        }
         "undo" | "redo" => {
             let changed = editor.step_history(name == "redo")?;
             let text = match (changed, name) {
@@ -242,6 +331,12 @@ fn status_json(editor: &Editor) -> Value {
             "max": bounds.max.to_array(),
         })),
         "grid": editor.grid,
+        "tool": match editor.tool {
+            Tool::Select => "selection",
+            Tool::Block => "block",
+        },
+        "selected": editor.selection.len(),
+        "material": editor.material,
         "camera": {
             "position": editor.camera.position.to_array(),
             "yaw": editor.camera.yaw,
@@ -251,6 +346,26 @@ fn status_json(editor: &Editor) -> Value {
         "views_2d": views,
         "can_undo": history.is_some_and(|history| history.can_undo()),
         "can_redo": history.is_some_and(|history| history.can_redo()),
+    })
+}
+
+fn selection_json(editor: &Editor) -> Value {
+    let mut solids = Vec::new();
+    let mut entities = Vec::new();
+    for owner in &editor.selection {
+        match *owner {
+            Owner::Solid(id) => solids.push(id),
+            Owner::Entity(id) => entities.push(id),
+        }
+    }
+    let bounds = editor.scene.selection_bounds();
+    json!({
+        "solids": solids,
+        "entities": entities,
+        "bounds": (!bounds.is_empty()).then(|| json!({
+            "min": bounds.min.to_array(),
+            "max": bounds.max.to_array(),
+        })),
     })
 }
 
@@ -410,6 +525,24 @@ fn optional_numbers<const N: usize>(args: &Value, key: &str) -> Result<Option<[f
             }
             Ok(Some(numbers))
         }
+        Some(_) => Err(error()),
+    }
+}
+
+fn required_vec3(args: &Value, key: &str) -> Result<DVec3, String> {
+    optional_numbers::<3>(args, key)?
+        .map(DVec3::from_array)
+        .ok_or_else(|| format!("\"{key}\" is required"))
+}
+
+fn id_list(args: &Value, key: &str) -> Result<Vec<u32>, String> {
+    let error = || format!("\"{key}\" must be an array of whole numbers");
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_u64().and_then(|id| u32::try_from(id).ok()).ok_or_else(error))
+            .collect(),
         Some(_) => Err(error()),
     }
 }

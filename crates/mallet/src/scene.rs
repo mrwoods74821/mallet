@@ -1,11 +1,14 @@
-//! Wireframe geometry prepared once per map change and shared by all four viewports.
+//! Wireframe geometry prepared once per map change and shared by all four viewports,
+//! plus hit testing for selection.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use eframe::egui::Color32;
-use glam::DVec3;
-use mallet_vmf::geometry::{faces_bounds, solid_faces, Bounds};
+use glam::{DVec2, DVec3};
+use mallet_vmf::geometry::{faces_bounds, solid_faces, Bounds, Plane};
 use mallet_vmf::{Solid, Vmf};
+
+use crate::view2d::Axis2D;
 
 /// Colour used when a brush or entity has no editor colour.
 const DEFAULT_COLOR: Color32 = Color32::from_rgb(220, 220, 220);
@@ -16,11 +19,55 @@ const POINT_ENTITY_HALF_SIZE: f64 = 8.0;
 /// Edge coordinates are rounded to this many steps per unit when removing shared edges.
 const EDGE_QUANTIZE: f64 = 100.0;
 
+/// What a mesh belongs to, and so what clicking it selects.
+///
+/// World brushes are selected one by one. Any part of an entity selects the whole entity,
+/// like Hammer's default "groups" selection mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Owner {
+    /// A world brush, by solid id.
+    Solid(u32),
+    /// A point or brush entity, by entity id.
+    Entity(u32),
+}
+
+/// Colour of selected brushes and entities, as in Hammer.
+pub const SELECTED_COLOR: Color32 = Color32::from_rgb(255, 0, 0);
+/// Colour of the block tool's pending box and the selection marquee.
+pub const TOOL_COLOR: Color32 = Color32::from_rgb(255, 255, 255);
+
+/// Temporary shapes drawn on top of the map while a tool is in use.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Overlay {
+    /// How far selected meshes are drawn from where they are, while being dragged.
+    pub move_offset: DVec3,
+    /// The block tool's box, waiting for Enter.
+    pub block: Option<Bounds>,
+    /// A selection rectangle being dragged in one 2D view, as two world corners.
+    pub marquee: Option<(Axis2D, DVec2, DVec2)>,
+}
+
+impl WireMesh {
+    /// Colour and offset to draw this mesh with, given the current overlay.
+    pub fn appearance(&self, overlay: &Overlay) -> (Color32, DVec3) {
+        if self.selected {
+            (SELECTED_COLOR, overlay.move_offset)
+        } else {
+            (self.color, DVec3::ZERO)
+        }
+    }
+}
+
 /// The edges of one brush or point entity.
 pub struct WireMesh {
     pub color: Color32,
     pub edges: Vec<[DVec3; 2]>,
     pub bounds: Bounds,
+    /// Planes enclosing the mesh, used for 3D picking.
+    pub planes: Vec<Plane>,
+    /// `None` when the brush or entity has no id and cannot be selected.
+    pub owner: Option<Owner>,
+    pub selected: bool,
 }
 
 /// Everything the viewports draw.
@@ -45,16 +92,17 @@ impl Scene {
                 scene.entity_count += 1;
             }
             let entity_color = entity.editor_color();
+            let entity_owner = entity.id().map(Owner::Entity);
             let mut has_solids = false;
             for solid in entity.solids() {
                 has_solids = true;
                 scene.solid_count += 1;
-                let color = if is_world {
-                    solid.editor_color()
+                let (color, owner) = if is_world {
+                    (solid.editor_color(), solid.id().map(Owner::Solid))
                 } else {
-                    entity_color.or_else(|| solid.editor_color())
+                    (entity_color.or_else(|| solid.editor_color()), entity_owner)
                 };
-                if let Some(mesh) = brush_mesh(solid, to_color(color)) {
+                if let Some(mesh) = brush_mesh(solid, to_color(color), owner) {
                     scene.bounds.add_bounds(&mesh.bounds);
                     scene.meshes.push(mesh);
                 }
@@ -63,13 +111,123 @@ impl Scene {
                 continue;
             }
             if let Some(origin) = entity.origin() {
-                let mesh = box_mesh(origin, POINT_ENTITY_HALF_SIZE, to_color(entity_color));
+                let half = DVec3::splat(POINT_ENTITY_HALF_SIZE);
+                let bounds = Bounds {
+                    min: origin - half,
+                    max: origin + half,
+                };
+                let mesh = WireMesh {
+                    color: to_color(entity_color),
+                    edges: box_edges(&bounds),
+                    bounds,
+                    planes: box_planes(&bounds),
+                    owner: entity_owner,
+                    selected: false,
+                };
                 scene.bounds.add_bounds(&mesh.bounds);
                 scene.meshes.push(mesh);
             }
         }
         scene
     }
+
+    /// Whether any mesh belongs to `owner`.
+    pub fn contains(&self, owner: Owner) -> bool {
+        self.meshes.iter().any(|mesh| mesh.owner == Some(owner))
+    }
+
+    /// Flags the meshes whose owner is in the selection.
+    pub fn mark_selected(&mut self, selection: &BTreeSet<Owner>) {
+        for mesh in &mut self.meshes {
+            mesh.selected = mesh.owner.is_some_and(|owner| selection.contains(&owner));
+        }
+    }
+
+    /// Bounds of every selected mesh; empty when nothing is selected.
+    pub fn selection_bounds(&self) -> Bounds {
+        let mut bounds = Bounds::EMPTY;
+        for mesh in self.meshes.iter().filter(|mesh| mesh.selected) {
+            bounds.add_bounds(&mesh.bounds);
+        }
+        bounds
+    }
+
+    /// Every selectable owner, without duplicates.
+    pub fn owners(&self) -> BTreeSet<Owner> {
+        self.meshes.iter().filter_map(|mesh| mesh.owner).collect()
+    }
+
+    /// Picks what is under a 2D view point: the smallest mesh whose projected bounds,
+    /// grown by `tolerance` world units, contain it.
+    pub fn pick_2d(&self, axis: Axis2D, point: DVec2, tolerance: f64) -> Option<Owner> {
+        self.meshes
+            .iter()
+            .filter_map(|mesh| {
+                let owner = mesh.owner?;
+                let min = axis.project(mesh.bounds.min) - DVec2::splat(tolerance);
+                let max = axis.project(mesh.bounds.max) + DVec2::splat(tolerance);
+                let inside = point.cmpge(min).all() && point.cmple(max).all();
+                inside.then(|| (owner, (max - min).x * (max - min).y))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(owner, _)| owner)
+    }
+
+    /// Picks the nearest mesh hit by a ray.
+    pub fn pick_ray(&self, origin: DVec3, direction: DVec3) -> Option<Owner> {
+        self.meshes
+            .iter()
+            .filter_map(|mesh| Some((mesh.owner?, ray_convex(origin, direction, &mesh.planes)?)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(owner, _)| owner)
+    }
+
+    /// Owners with at least one mesh, all of whose meshes lie fully inside a 2D rectangle.
+    pub fn owners_inside(&self, axis: Axis2D, corner_a: DVec2, corner_b: DVec2) -> BTreeSet<Owner> {
+        let (min, max) = (corner_a.min(corner_b), corner_a.max(corner_b));
+        let mut inside = BTreeSet::new();
+        let mut outside = BTreeSet::new();
+        for mesh in &self.meshes {
+            let Some(owner) = mesh.owner else { continue };
+            let contained = axis.project(mesh.bounds.min).cmpge(min).all() && axis.project(mesh.bounds.max).cmple(max).all();
+            if contained {
+                inside.insert(owner);
+            } else {
+                outside.insert(owner);
+            }
+        }
+        inside.difference(&outside).copied().collect()
+    }
+}
+
+/// Distance along the ray to where it enters a convex volume, or `None` on a miss.
+/// A ray starting inside the volume hits at distance zero.
+fn ray_convex(origin: DVec3, direction: DVec3, planes: &[Plane]) -> Option<f64> {
+    if planes.is_empty() {
+        return None;
+    }
+    let mut enter: f64 = 0.0;
+    let mut exit = f64::INFINITY;
+    for plane in planes {
+        let facing = plane.normal.dot(direction);
+        let distance = plane.distance(origin);
+        if facing.abs() < 1e-12 {
+            if distance > 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let t = -distance / facing;
+        if facing < 0.0 {
+            enter = enter.max(t);
+        } else {
+            exit = exit.min(t);
+        }
+        if enter > exit {
+            return None;
+        }
+    }
+    Some(enter)
 }
 
 fn to_color(color: Option<[u8; 3]>) -> Color32 {
@@ -80,7 +238,7 @@ fn quantize(point: DVec3) -> [i64; 3] {
     (point * EDGE_QUANTIZE).round().as_i64vec3().to_array()
 }
 
-fn brush_mesh(solid: &Solid, color: Color32) -> Option<WireMesh> {
+fn brush_mesh(solid: &Solid, color: Color32, owner: Option<Owner>) -> Option<WireMesh> {
     let faces = solid_faces(solid);
     if faces.is_empty() {
         return None;
@@ -103,12 +261,15 @@ fn brush_mesh(solid: &Solid, color: Color32) -> Option<WireMesh> {
         color,
         edges,
         bounds: faces_bounds(&faces),
+        planes: faces.iter().map(|face| face.plane).collect(),
+        owner,
+        selected: false,
     })
 }
 
-fn box_mesh(center: DVec3, half: f64, color: Color32) -> WireMesh {
-    let min = center - DVec3::splat(half);
-    let max = center + DVec3::splat(half);
+/// The 12 edges of an axis-aligned box.
+pub fn box_edges(bounds: &Bounds) -> Vec<[DVec3; 2]> {
+    let (min, max) = (bounds.min, bounds.max);
     let corner = |x: bool, y: bool, z: bool| {
         DVec3::new(
             if x { max.x } else { min.x },
@@ -124,9 +285,23 @@ fn box_mesh(center: DVec3, half: f64, color: Color32) -> WireMesh {
             edges.push([corner(a, b, false), corner(a, b, true)]);
         }
     }
-    WireMesh {
-        color,
-        edges,
-        bounds: Bounds { min, max },
-    }
+    edges
+}
+
+fn box_planes(bounds: &Bounds) -> Vec<Plane> {
+    [DVec3::X, DVec3::Y, DVec3::Z]
+        .into_iter()
+        .flat_map(|axis| {
+            [
+                Plane {
+                    normal: axis,
+                    dist: axis.dot(bounds.max),
+                },
+                Plane {
+                    normal: -axis,
+                    dist: -axis.dot(bounds.min),
+                },
+            ]
+        })
+        .collect()
 }

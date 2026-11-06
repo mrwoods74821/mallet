@@ -6,7 +6,7 @@ use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::Canvas;
 use crate::keymap::{Action, KeyMap};
-use crate::scene::Scene;
+use crate::scene::{box_edges, Overlay, Scene, TOOL_COLOR};
 
 /// World units per second, matching Hammer's default forward speed.
 const MOVE_SPEED: f64 = 1000.0;
@@ -132,13 +132,35 @@ impl Camera3D {
         active
     }
 
-    /// Draws every wireframe in perspective, clipping edges at the near plane.
-    pub fn draw(&self, canvas: &mut dyn Canvas, rect: Rect, scene: &Scene, active: bool) {
+    /// Whether mouselook is on.
+    pub fn mouse_look(&self) -> bool {
+        self.mouse_look
+    }
+
+    /// Focal length in pixels for a viewport of this size.
+    fn focal(&self, rect: Rect) -> f64 {
+        f64::from(rect.width()) * 0.5 / (self.fov.to_radians() * 0.5).tan()
+    }
+
+    /// The world-space ray from the camera through a point of the viewport.
+    pub fn ray(&self, rect: Rect, pos: Pos2) -> (DVec3, DVec3) {
+        let forward = self.forward();
+        let right = self.right();
+        let up = right.cross(forward);
+        let focal = self.focal(rect);
+        let x = f64::from(pos.x - rect.center().x) / focal;
+        let y = -f64::from(pos.y - rect.center().y) / focal;
+        (self.position, (forward + right * x + up * y).normalize())
+    }
+
+    /// Draws every wireframe in perspective, clipping edges at the near plane. Selected
+    /// meshes are drawn last in red at the overlay's move offset, then the block tool's box.
+    pub fn draw(&self, canvas: &mut dyn Canvas, rect: Rect, scene: &Scene, active: bool, overlay: &Overlay) {
         canvas.fill(rect, Color32::BLACK);
         let forward = self.forward();
         let right = self.right();
         let up = right.cross(forward);
-        let focal = f64::from(rect.width()) * 0.5 / (self.fov.to_radians() * 0.5).tan();
+        let focal = self.focal(rect);
         let center = rect.center();
         let to_camera = |point: DVec3| {
             let offset = point - self.position;
@@ -150,16 +172,10 @@ impl Camera3D {
                 center.y - (camera.y / camera.z * focal) as f32,
             )
         };
-
-        let mut segments = Vec::new();
-        for mesh in &scene.meshes {
-            let radius = mesh.bounds.size().length() * 0.5;
-            if to_camera(mesh.bounds.center()).z + radius < NEAR {
-                continue;
-            }
-            segments.clear();
-            for [a, b] in &mesh.edges {
-                let (mut a, mut b) = (to_camera(*a), to_camera(*b));
+        let draw_edges = |canvas: &mut dyn Canvas, edges: &[[DVec3; 2]], offset: DVec3, color: Color32| {
+            let mut segments = Vec::with_capacity(edges.len());
+            for [a, b] in edges {
+                let (mut a, mut b) = (to_camera(*a + offset), to_camera(*b + offset));
                 if a.z < NEAR && b.z < NEAR {
                     continue;
                 }
@@ -170,7 +186,21 @@ impl Camera3D {
                 }
                 segments.push([to_screen(a), to_screen(b)]);
             }
-            canvas.lines(&segments, mesh.color);
+            canvas.lines(&segments, color);
+        };
+
+        let unselected = scene.meshes.iter().filter(|mesh| !mesh.selected);
+        let selected = scene.meshes.iter().filter(|mesh| mesh.selected);
+        for mesh in unselected.chain(selected) {
+            let (color, offset) = mesh.appearance(overlay);
+            let radius = mesh.bounds.size().length() * 0.5;
+            if to_camera(mesh.bounds.center() + offset).z + radius < NEAR {
+                continue;
+            }
+            draw_edges(canvas, &mesh.edges, offset, color);
+        }
+        if let Some(block) = &overlay.block {
+            draw_edges(canvas, &box_edges(block), DVec3::ZERO, TOOL_COLOR);
         }
 
         let label_color = if active { Color32::WHITE } else { Color32::GRAY };

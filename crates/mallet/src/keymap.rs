@@ -14,6 +14,12 @@ pub enum Action {
     Redo,
     GridSmaller,
     GridLarger,
+    SelectionTool,
+    BlockTool,
+    SelectAll,
+    ClearSelection,
+    DeleteSelection,
+    CreateBlock,
     CenterViews2D,
     CenterView3D,
     ToggleMouseLook,
@@ -51,6 +57,14 @@ impl Chord {
     pub const fn ctrl(key: Key) -> Self {
         Self {
             ctrl: true,
+            ..Self::key(key)
+        }
+    }
+
+    /// Shift plus the key.
+    pub const fn shift(key: Key) -> Self {
+        Self {
+            shift: true,
             ..Self::key(key)
         }
     }
@@ -101,6 +115,12 @@ impl KeyMap {
                 (Action::Redo, Chord::ctrl(Key::Y)),
                 (Action::GridSmaller, Chord::key(Key::OpenBracket)),
                 (Action::GridLarger, Chord::key(Key::CloseBracket)),
+                (Action::SelectionTool, Chord::shift(Key::S)),
+                (Action::BlockTool, Chord::shift(Key::B)),
+                (Action::SelectAll, Chord::ctrl(Key::A)),
+                (Action::ClearSelection, Chord::key(Key::Escape)),
+                (Action::DeleteSelection, Chord::key(Key::Delete)),
+                (Action::CreateBlock, Chord::key(Key::Enter)),
                 (Action::CenterViews2D, Chord::ctrl(Key::E)),
                 (Action::CenterView3D, Chord::ctrl_shift(Key::E)),
                 (Action::ToggleMouseLook, Chord::key(Key::Z)),
