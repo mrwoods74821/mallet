@@ -26,11 +26,27 @@ use eframe::egui;
 
 fn main() -> eframe::Result {
     let path = std::env::args_os().nth(1).map(PathBuf::from);
+    let present_mode = match std::env::var("MALLET_PRESENT").as_deref() {
+        Ok("fifo") => eframe::wgpu::PresentMode::Fifo,
+        Ok("mailbox") => eframe::wgpu::PresentMode::Mailbox,
+        Ok("immediate") => eframe::wgpu::PresentMode::Immediate,
+        Ok("novsync") => eframe::wgpu::PresentMode::AutoNoVsync,
+        _ => eframe::wgpu::PresentMode::AutoVsync,
+    };
+    let latency = std::env::var("MALLET_FRAME_LATENCY")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .or(Some(1));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Mallet")
             .with_inner_size([1600.0, 1000.0])
             .with_drag_and_drop(true),
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            present_mode,
+            desired_maximum_frame_latency: latency,
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(

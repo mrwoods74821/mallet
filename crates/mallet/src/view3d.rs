@@ -23,6 +23,10 @@ const ACCELERATION: f64 = 14.0;
 const STOP_SPEED: f64 = 1.0;
 /// The longest frame time used for movement, so a stalled frame cannot fling the camera.
 const MAX_FRAME_SECONDS: f64 = 0.05;
+/// How quickly the smoothed frame time follows the measured one, per frame.
+const FRAME_TIME_SMOOTHING: f64 = 0.1;
+/// How many frames of raw mouse movement mouselook averages over.
+const LOOK_FRAMES: usize = 4;
 /// Default draw distance in world units.
 pub const DEFAULT_DRAW_DISTANCE: f64 = 8192.0;
 /// Distance of the near clipping plane.
@@ -43,8 +47,10 @@ pub struct Camera3D {
     mouse_look: bool,
     /// Current movement, eased towards what the movement keys ask for.
     velocity: DVec3,
-    /// Raw mouse movement of the previous frame, for smoothing.
-    last_look: egui::Vec2,
+    /// Raw mouse movement of the latest frames, newest last, for smoothing.
+    recent_look: std::collections::VecDeque<egui::Vec2>,
+    /// Frame time smoothed over recent frames; 0 until the first frame.
+    frame_time: f64,
 }
 
 impl Camera3D {
@@ -57,7 +63,8 @@ impl Camera3D {
             far: DEFAULT_DRAW_DISTANCE,
             mouse_look: false,
             velocity: DVec3::ZERO,
-            last_look: egui::Vec2::ZERO,
+            recent_look: std::collections::VecDeque::with_capacity(LOOK_FRAMES),
+            frame_time: 0.0,
         }
     }
 
@@ -82,7 +89,7 @@ impl Camera3D {
 
     fn set_mouse_look(&mut self, ctx: &egui::Context, enabled: bool) {
         self.mouse_look = enabled;
-        self.last_look = egui::Vec2::ZERO;
+        self.recent_look.clear();
         let grab = if enabled {
             egui::CursorGrab::Confined
         } else {
@@ -98,10 +105,13 @@ impl Camera3D {
     /// Input is only read while the viewport is hovered or mouselook is on, like Hammer,
     /// where Z toggles mouselook and Escape leaves it.
     ///
-    /// To avoid jitter, movement uses the real time since the last frame, the camera eases
-    /// towards the speed the keys ask for instead of jumping to it, and raw mouse movement
-    /// is averaged with the previous frame's, like Source's `m_filter`, since raw mouse
-    /// data arrives in uneven bursts per frame.
+    /// To avoid judder, movement uses a frame time smoothed over recent frames rather than
+    /// each frame's own. The GPU queue makes frames start in uneven bursts, but they are
+    /// still shown one per screen refresh, so equal steps per frame look smooth while
+    /// steps sized by each burst frame's start time look like a low frame rate. Raw mouse
+    /// movement arrives in the same bursts, so mouselook averages it over the last few
+    /// frames, like Source's `m_filter`. The camera also eases towards the speed the keys
+    /// ask for instead of jumping to it.
     pub fn update(&mut self, ctx: &egui::Context, hovered: bool, keymap: &KeyMap) -> bool {
         if !hovered && !self.mouse_look {
             return false;
@@ -118,7 +128,13 @@ impl Camera3D {
 
         let mut active = self.mouse_look;
         ctx.input(|input| {
-            let dt = f64::from(input.unstable_dt).clamp(0.0, MAX_FRAME_SECONDS);
+            let measured = f64::from(input.unstable_dt);
+            if self.frame_time == 0.0 {
+                self.frame_time = measured.clamp(0.001, MAX_FRAME_SECONDS);
+            } else if measured < MAX_FRAME_SECONDS {
+                self.frame_time += (measured - self.frame_time) * FRAME_TIME_SMOOTHING;
+            }
+            let dt = self.frame_time;
             if self.mouse_look {
                 let raw: egui::Vec2 = input
                     .events
@@ -128,8 +144,12 @@ impl Camera3D {
                         _ => None,
                     })
                     .fold(egui::Vec2::ZERO, |total, delta| total + delta);
-                let smoothed = (raw + self.last_look) * 0.5;
-                self.last_look = raw;
+                if self.recent_look.len() == LOOK_FRAMES {
+                    self.recent_look.pop_front();
+                }
+                self.recent_look.push_back(raw);
+                let smoothed = self.recent_look.iter().fold(egui::Vec2::ZERO, |total, delta| total + *delta)
+                    / LOOK_FRAMES as f32;
                 self.yaw -= f64::from(smoothed.x) * LOOK_SENSITIVITY;
                 self.pitch = (self.pitch - f64::from(smoothed.y) * LOOK_SENSITIVITY).clamp(-MAX_PITCH, MAX_PITCH);
             }
