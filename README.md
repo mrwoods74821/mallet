@@ -43,6 +43,10 @@ These follow Hammer's defaults.
 | Z | Toggle mouselook in the 3D view (Escape leaves it) |
 | W A S D, arrow keys | Move and turn the 3D camera |
 
+View > Net Graph toggles a frame timing overlay in the 3D view's bottom-right corner:
+frame rate, CPU time per frame, and how much geometry culling left to draw. For the best
+speed on large maps, run the release build (`cargo build --release -p mallet`).
+
 ## AI agents
 
 While Mallet runs, its MCP server listens on `http://127.0.0.1:7414/mcp`. The included

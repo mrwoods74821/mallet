@@ -66,18 +66,28 @@ every CPU core. Materials that cannot be found render as Hammer's pink and black
 
 ## Drawing
 
-The 2D viewports draw through the small `Canvas` trait. On screen it wraps an egui painter;
-for screenshots it wraps a tiny-skia image. Both use the same viewport code, so a
-screenshot matches what the window shows, apart from viewport labels.
+All four viewports are drawn by `Renderer3D` with wgpu, using the device eframe already
+created, into their own offscreen images. The window shows those images through egui, and
+MCP screenshots read the same images back, so they match and work while the window is
+minimized. egui only draws the light overlays on top: labels, handle squares, the marquee
+and the net graph. The CPU drawing code behind the `Canvas` trait (egui painter or
+tiny-skia image) remains as the fallback when no GPU renderer exists yet.
 
-The camera viewport is drawn by `Renderer3D` with wgpu, using the device eframe already
-created. It renders into its own colour and depth textures: the window shows that image
-through egui, and MCP screenshots read the same image back, so they match exactly and work
-while the window is minimized. Faces are fanned into triangles with Source's texture
-coordinates (`point · axis / scale + offset`, divided by the texture size) and shaded by
-direction like Hammer's textured mode. Unselected geometry is cached until the scene's
-`generation` changes; selected geometry, red outlines and tool previews are rebuilt each
-frame so drags show live. Without a GPU the camera falls back to a CPU wireframe.
+Geometry is cached on the GPU and rebuilt only when the scene's `geometry_generation`
+changes, never for selection changes or camera moves:
+
+- The camera's faces are fanned into triangles with Source's texture coordinates
+  (`point · axis / scale + offset`, divided by the texture size), shaded by direction like
+  Hammer's textured mode, and grouped into 2048-unit chunks. Each frame, chunks whose
+  bounds are outside the view frustum are skipped.
+- The 2D views share one buffer of every brush edge in world space; each view only sets an
+  orthographic matrix, so panning and zooming cost almost nothing.
+- The selection, its red outline and tool previews are small and rebuilt every frame so
+  drags show live. In 3D the selection is drawn again over the cached geometry at equal
+  depth, tinted red.
+
+`get_status` reports per-frame timings and how many chunks and triangles the camera drew,
+and View > Net Graph shows the same numbers in the camera view's bottom-right corner.
 
 Brushes whose planes do not enclose a volume are skipped, as Hammer's Check Problems would
 report them.
