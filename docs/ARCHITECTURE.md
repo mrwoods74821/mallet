@@ -57,7 +57,7 @@ it in 140 ms against 554 ms, and the file is 2.8 MB. `MALLET_BIG_VMF=<map> cargo
 --release -p mallet-format big -- --nocapture` measures it on any map.
 
 The compilers read VMF only. For a `.mallet` map, `Editor::compile_context` points the
-compile at `mallet_compile/<name>.vmf` beside the map, and `start_compile` writes that copy
+compile at `mallet_compile/<name>.vmf` beside the map (or the folder Mallet Options names), and `start_compile` writes that copy
 of the map as it is, saved or not, before the first step.
 
 `shell.rs` sets up the Windows file types from Mallet Options > Files, for the current
@@ -270,8 +270,8 @@ report them.
 ## MCP server
 
 The editor starts an MCP server at `http://127.0.0.1:7414/mcp` (Streamable HTTP transport,
-JSON responses). Set `MALLET_MCP_PORT` to choose another port, or to `0` or `off` to
-disable it. The status bar shows the address while it runs.
+JSON responses). Mallet Options > AI agents chooses another port or turns it off;
+`MALLET_MCP_PORT` overrides the port, and `0` or `off` disables it. The status bar shows the address while it runs.
 
 Security:
 

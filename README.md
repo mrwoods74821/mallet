@@ -42,8 +42,8 @@ once. On a 28.5 MB VMF it is 2.8 MB, opens in about a third of the time and save
 four times faster. Save As picks the format by the extension, File > Export a Copy writes
 the map in either format without switching to the copy, and Mallet tells the formats
 apart by their contents, so a renamed file still opens. The compilers only read VMF, so
-compiling a `.mallet` map first writes a VMF copy to a `mallet_compile` folder beside it;
-the BSP and logs end up there too. The layout is described in
+compiling a `.mallet` map first writes a VMF copy to a `mallet_compile` folder beside it
+(Mallet Options > Compiling can name another); the BSP and logs end up there too. The layout is described in
 [crates/mallet-format](crates/mallet-format/src/lib.rs).
 
 Edit > Mallet Options > Files chooses the format Save As offers first for new maps, and
@@ -67,7 +67,7 @@ These follow Hammer's defaults.
 | Keys | Action |
 | --- | --- |
 | Ctrl+N / Ctrl+O / Ctrl+S | New map tab / open in a tab / save (a new map asks where to save) |
-| File > Recent Maps | The 20 maps opened or saved last, the latest first |
+| File > Recent Maps | The maps opened or saved last, the latest first (20 unless Mallet Options > Files says otherwise) |
 | Ctrl+W / Ctrl+Tab / Ctrl+Shift+Tab | Close tab (asks about unsaved changes) / next tab / previous tab |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Shift+S / Shift+B / Shift+E / Shift+A | Selection tool / Block tool / Entity tool / Texture application |
@@ -138,14 +138,33 @@ map's name.
 
 ## Mallet Options
 
-Edit > Mallet Options... (or the gear on the toolbar) holds every setting: the game
-folder and FGD files, the compile programs (VBSP, VVIS, VRAD, VBSPInfo, BSPZip,
-SourceCubemap and the game, each found automatically, with a menu of every copy found,
-including 64-bit and Hammer++ builds), how compiles run, the viewports (draw distance,
-field of view, camera speed, mouselook sensitivity, default grid, how far the mouse wheel
-scrolls the texture browser), map files and Windows file types, the key bindings and the
-MCP server address. Settings are
-saved in `%APPDATA%\Mallet\config.json`.
+Edit > Mallet Options... (or the gear on the toolbar) holds every setting, each applied
+as you change it:
+
+- **Game**: the game folder, the Steam folder searched for an installed game, mounted
+  games and FGD files.
+- **Compile tools**: VBSP, VVIS, VRAD, VBSPInfo, BSPZip, SourceCubemap and the game, each
+  found automatically, with a menu of every copy found, including 64-bit and Hammer++
+  builds.
+- **Compiling**: how compiles run, the folder `.mallet` maps compile in and how much
+  compiler output the compile window keeps.
+- **Viewports**: draw distance, field of view, camera speed and acceleration, arrow key
+  turning, how far the mouse wheel moves the camera, mouselook sensitivity and smoothing,
+  how far the wheel zooms the 2D views, how close a click must be to select a brush, the
+  grid of new maps, how dense the grid may get and how often grid lines are highlighted.
+- **Colours**: the background, grid, axis, selection, tool, handle and texture-face
+  colours of the views, Hammer's by default.
+- **Editing**: the texture new brushes get, the Entity tool's class and how many recent
+  textures are listed.
+- **Files**: the format new maps are saved in, how many recent maps are kept, and the
+  Windows file types.
+- **Texture browser**: scrolling, thumbnail size, loading threads and how many
+  thumbnails stay in memory.
+- **Interface**: the size of menus, panels and text, and vertical sync.
+- **Keyboard** and **AI agents**: the key bindings, and whether the MCP server runs and on
+  which port.
+
+Settings are saved in `%APPDATA%\Mallet\config.json`.
 
 Where you leave the main window and every panel (Face Edit, the texture browser, Compile,
 Options and the rest), and their sizes, are remembered between runs in
@@ -153,6 +172,7 @@ Options and the rest), and their sizes, are remembered between runs in
 
 ## AI agents
 
-While Mallet runs, its MCP server listens on `http://127.0.0.1:7414/mcp`. The included
+While Mallet runs, its MCP server listens on `http://127.0.0.1:7414/mcp`; Mallet Options >
+AI agents can change the port or turn it off. The included
 `.mcp.json` registers it for clients such as Claude Code. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the tool list and design notes.
