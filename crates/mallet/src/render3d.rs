@@ -13,7 +13,7 @@ use std::ops::Range;
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 use eframe::wgpu::{self, util::DeviceExt};
 use glam::{DVec3, Mat4, Vec3, Vec4};
-use mallet_content::{parallel_map, Materials};
+use mallet_content::{parallel_map, AlphaMode, Material, Materials};
 
 use crate::scene::{box_edges, Overlay, Remap, Scene, SceneFace, WireMesh, HANDLE_COLOR, SELECTED_COLOR, TOOL_COLOR};
 use crate::view2d::View2D;
@@ -41,6 +41,8 @@ struct FaceVertex {
     uv: [f32; 2],
     color: [f32; 4],
     highlight: f32,
+    /// Alpha-test reference (0 for none) and blend opacity (0 for opaque).
+    alpha: [f32; 2],
 }
 
 #[repr(C)]
@@ -50,11 +52,35 @@ struct LineVertex {
     color: [f32; 4],
 }
 
-/// A texture uploaded to the GPU, with the full size used for texture coordinates.
+/// A texture uploaded to the GPU, with the full size used for texture coordinates and the
+/// way its material uses alpha.
 struct GpuTexture {
     bind_group: wgpu::BindGroup,
     width: f32,
     height: f32,
+    alpha: AlphaMode,
+}
+
+/// A translucent face, kept on the CPU so it can be sorted back to front every frame.
+struct TranslucentFace {
+    center: Vec3,
+    key: String,
+    vertices: Vec<FaceVertex>,
+}
+
+/// Every face of the map: opaque and alpha-tested faces in chunked GPU buffers, and
+/// translucent faces for sorting.
+struct StaticFaces {
+    generation: u64,
+    opaque: FaceMesh,
+    translucent: Vec<TranslucentFace>,
+}
+
+/// How the camera viewport draws the map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraStyle {
+    Textured,
+    Wireframe,
 }
 
 /// How a pipeline uses the depth buffer.
@@ -68,6 +94,8 @@ enum Depth {
     Ignore,
     /// For passes without a depth buffer.
     None,
+    /// Blended translucent faces: tested against the depth buffer but not written to it.
+    Translucent,
 }
 
 /// Faces in one vertex buffer, split into spatial chunks for culling, each drawn in runs
@@ -115,6 +143,7 @@ pub struct Renderer3D {
     queue: wgpu::Queue,
     face_pipeline: wgpu::RenderPipeline,
     overdraw_pipeline: wgpu::RenderPipeline,
+    translucent_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     flat_line_pipeline: wgpu::RenderPipeline,
     uniform_layout: wgpu::BindGroupLayout,
@@ -124,13 +153,13 @@ pub struct Renderer3D {
     textures: HashMap<String, Option<GpuTexture>>,
     missing: GpuTexture,
     /// Every face, cached until the geometry changes.
-    faces: Option<(u64, FaceMesh)>,
+    faces: Option<StaticFaces>,
     /// Every edge, cached until the geometry changes; shared by the 2D views.
     edges: Option<(u64, LineMesh)>,
     /// The geometry generation whose materials have been loaded.
     textures_checked: u64,
-    camera_target: Option<Target>,
-    view_targets: [Option<Target>; 3],
+    /// One image per viewport slot.
+    targets: [Option<Target>; 4],
     pub stats: RenderStats,
 }
 
@@ -194,7 +223,8 @@ impl Renderer3D {
             bind_group_layouts: &[&uniform_layout],
             push_constant_ranges: &[],
         });
-        let face_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Float32];
+        let face_attributes =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Float32, 4 => Float32x2];
         let line_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4];
         let face_buffer = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<FaceVertex>() as u64,
@@ -216,19 +246,21 @@ impl Renderer3D {
         };
         let face_pipeline = faces(Depth::Test);
         let overdraw_pipeline = faces(Depth::Overdraw);
+        let translucent_pipeline = faces(Depth::Translucent);
         let line_pipeline = lines(Depth::Ignore);
         let flat_line_pipeline = lines(Depth::None);
 
-        let upload = |image: &Image, width, height| {
-            upload(device, queue, &texture_layout, &sampler, &mip_chain(image), width, height)
+        let upload = |image: &Image, width, height, alpha| {
+            upload(device, queue, &texture_layout, &sampler, &mip_chain(image), (width, height), alpha)
         };
-        let missing = upload(&checkerboard(), MISSING_TEXTURE_SIZE, MISSING_TEXTURE_SIZE);
-        let white = upload(&Image::solid(Color32::WHITE), 1.0, 1.0);
+        let missing = upload(&checkerboard(), MISSING_TEXTURE_SIZE, MISSING_TEXTURE_SIZE, AlphaMode::Opaque);
+        let white = upload(&Image::solid(Color32::WHITE), 1.0, 1.0, AlphaMode::Opaque);
         Self {
             device: device.clone(),
             queue: queue.clone(),
             face_pipeline,
             overdraw_pipeline,
+            translucent_pipeline,
             line_pipeline,
             flat_line_pipeline,
             uniform_layout,
@@ -239,8 +271,7 @@ impl Renderer3D {
             faces: None,
             edges: None,
             textures_checked: 0,
-            camera_target: None,
-            view_targets: [None, None, None],
+            targets: [None, None, None, None],
             stats: RenderStats::default(),
         }
     }
@@ -252,14 +283,20 @@ impl Renderer3D {
         self.textures_checked = 0;
     }
 
-    /// Draws the scene from the camera into a `width` × `height` image. Returns the
-    /// image's view and whether the image was recreated, so callers holding a reference
-    /// to the old one can refresh it.
+    /// Draws the scene from the camera into viewport slot `slot`'s image of `size`
+    /// pixels. Returns the image's view and whether the image was recreated, so callers
+    /// holding a reference to the old one can refresh it.
     ///
-    /// Static geometry comes from a cache split into chunks; chunks outside the camera's
-    /// view are skipped. The selection is drawn again on top, tinted, at its live position.
+    /// Textured: static geometry comes from a cache split into chunks, and chunks outside
+    /// the camera's view are skipped. Faces are one-sided, so brushes look solid from
+    /// outside and open from inside, as in Hammer. Translucent faces are drawn after the
+    /// rest, sorted back to front. The selection is drawn again on top, tinted, at its
+    /// live position. Wireframe: every brush edge in its editor colour.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
+        slot: usize,
+        style: CameraStyle,
         scene: &Scene,
         overlay: &Overlay,
         camera: &Camera3D,
@@ -267,17 +304,26 @@ impl Renderer3D {
         materials: Option<&mut Materials>,
     ) -> (&wgpu::TextureView, bool) {
         let size = [size[0].max(1), size[1].max(1)];
-        let recreated = ensure_target(&self.device, &self.uniform_layout, &mut self.camera_target, size, true);
-        if self.textures_checked != scene.geometry_generation {
-            self.load_textures(scene, materials);
-            self.textures_checked = scene.geometry_generation;
-        }
-        if self.faces.as_ref().is_none_or(|(generation, _)| *generation != scene.geometry_generation) {
-            let mesh = self.face_mesh(scene.meshes.iter(), None, 0.0, true);
-            self.faces = Some((scene.geometry_generation, mesh));
+        let recreated = ensure_target(&self.device, &self.uniform_layout, &mut self.targets[slot], size, true);
+        if style == CameraStyle::Textured {
+            if self.textures_checked != scene.geometry_generation {
+                self.load_textures(scene, materials);
+                self.textures_checked = scene.geometry_generation;
+            }
+            if self.faces.as_ref().is_none_or(|faces| faces.generation != scene.geometry_generation) {
+                let (opaque, translucent) = self.face_mesh(scene.meshes.iter(), None, 0.0, true);
+                self.faces = Some(StaticFaces {
+                    generation: scene.geometry_generation,
+                    opaque,
+                    translucent,
+                });
+            }
+        } else {
+            self.ensure_edges(scene);
         }
         let selected: Vec<&WireMesh> = scene.meshes.iter().filter(|mesh| mesh.selected).collect();
-        let tinted = self.face_mesh(selected.iter().copied(), overlay.transform.as_ref(), SELECTION_TINT, false);
+        let tinted = (style == CameraStyle::Textured)
+            .then(|| self.face_mesh(selected.iter().copied(), overlay.transform.as_ref(), SELECTION_TINT, false).0);
         let mut outline = Vec::new();
         for mesh in &selected {
             push_edges(&mut outline, &mesh.edges, overlay.transform.as_ref(), SELECTED_COLOR);
@@ -290,7 +336,11 @@ impl Renderer3D {
         let aspect = size[0] as f32 / size[1] as f32;
         let matrix = view_projection(camera, aspect);
         let planes = frustum_planes(matrix);
-        let target = self.camera_target.as_ref().expect("target was just created");
+        let translucent = match (&self.faces, style) {
+            (Some(faces), CameraStyle::Textured) => self.sorted_translucent(&faces.translucent, camera, &planes),
+            _ => None,
+        };
+        let target = self.targets[slot].as_ref().expect("target was just created");
         self.queue
             .write_buffer(&target.uniform_buffer, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
 
@@ -299,24 +349,45 @@ impl Renderer3D {
         {
             let mut pass = begin_pass(&mut encoder, target);
             pass.set_bind_group(0, &target.uniform_group, &[]);
-            if let Some((_, mesh)) = &self.faces {
-                pass.set_pipeline(&self.face_pipeline);
-                pass.set_vertex_buffer(0, mesh.buffer.slice(..));
-                stats.chunks = mesh.chunks.len();
-                for chunk in mesh.chunks.iter().filter(|chunk| box_visible(&planes, chunk.min, chunk.max)) {
-                    stats.chunks_drawn += 1;
-                    stats.triangles_drawn += chunk.triangles;
-                    for (key, range) in &chunk.batches {
-                        pass.set_bind_group(1, &self.texture_for(key).bind_group, &[]);
-                        pass.draw(range.clone(), 0..1);
+            match (style, &self.faces) {
+                (CameraStyle::Textured, Some(faces)) => {
+                    pass.set_pipeline(&self.face_pipeline);
+                    pass.set_vertex_buffer(0, faces.opaque.buffer.slice(..));
+                    stats.chunks = faces.opaque.chunks.len();
+                    for chunk in faces.opaque.chunks.iter().filter(|chunk| box_visible(&planes, chunk.min, chunk.max)) {
+                        stats.chunks_drawn += 1;
+                        stats.triangles_drawn += chunk.triangles;
+                        for (key, range) in &chunk.batches {
+                            pass.set_bind_group(1, &self.texture_for(key).bind_group, &[]);
+                            pass.draw(range.clone(), 0..1);
+                        }
+                    }
+                    if let Some(tinted) = &tinted {
+                        pass.set_pipeline(&self.overdraw_pipeline);
+                        pass.set_vertex_buffer(0, tinted.buffer.slice(..));
+                        for (key, range) in tinted.chunks.iter().flat_map(|chunk| &chunk.batches) {
+                            pass.set_bind_group(1, &self.texture_for(key).bind_group, &[]);
+                            pass.draw(range.clone(), 0..1);
+                        }
+                    }
+                    if let Some((buffer, batches)) = &translucent {
+                        pass.set_pipeline(&self.translucent_pipeline);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        for (key, range) in batches {
+                            stats.triangles_drawn += range.len() / 3;
+                            pass.set_bind_group(1, &self.texture_for(key).bind_group, &[]);
+                            pass.draw(range.clone(), 0..1);
+                        }
                     }
                 }
-            }
-            pass.set_pipeline(&self.overdraw_pipeline);
-            pass.set_vertex_buffer(0, tinted.buffer.slice(..));
-            for (key, range) in tinted.chunks.iter().flat_map(|chunk| &chunk.batches) {
-                pass.set_bind_group(1, &self.texture_for(key).bind_group, &[]);
-                pass.draw(range.clone(), 0..1);
+                (CameraStyle::Wireframe, _) => {
+                    if let Some((_, edges)) = &self.edges {
+                        pass.set_pipeline(&self.line_pipeline);
+                        pass.set_vertex_buffer(0, edges.buffer.slice(..));
+                        pass.draw(0..edges.count, 0..1);
+                    }
+                }
+                (CameraStyle::Textured, None) => {}
             }
             if let Some(lines) = &outline {
                 pass.set_pipeline(&self.line_pipeline);
@@ -325,11 +396,61 @@ impl Renderer3D {
             }
         }
         self.queue.submit([encoder.finish()]);
-        self.stats = stats;
-        (&self.camera_target.as_ref().expect("target exists").color_view, recreated)
+        if style == CameraStyle::Textured {
+            self.stats = stats;
+        }
+        (&self.targets[slot].as_ref().expect("target exists").color_view, recreated)
     }
 
-    /// Draws one 2D view into an image of `pixels` size; `points` is the viewport's size
+    /// Builds this frame's buffer of translucent faces in view, farthest first, with runs
+    /// of the same texture merged into one draw.
+    #[allow(clippy::type_complexity)]
+    fn sorted_translucent(
+        &self,
+        faces: &[TranslucentFace],
+        camera: &Camera3D,
+        planes: &[Vec4; 6],
+    ) -> Option<(wgpu::Buffer, Vec<(String, Range<u32>)>)> {
+        let eye = camera.position.as_vec3();
+        let mut visible: Vec<&TranslucentFace> = faces
+            .iter()
+            .filter(|face| box_visible(planes, face.center, face.center))
+            .collect();
+        if visible.is_empty() {
+            return None;
+        }
+        visible.sort_by(|a, b| b.center.distance_squared(eye).total_cmp(&a.center.distance_squared(eye)));
+        let mut vertices = Vec::new();
+        let mut batches: Vec<(String, Range<u32>)> = Vec::new();
+        for face in visible {
+            let start = vertices.len() as u32;
+            vertices.extend_from_slice(&face.vertices);
+            let end = vertices.len() as u32;
+            match batches.last_mut() {
+                Some((key, range)) if *key == face.key => range.end = end,
+                _ => batches.push((face.key.clone(), start..end)),
+            }
+        }
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mallet translucent faces"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        Some((buffer, batches))
+    }
+
+    /// Rebuilds the cached buffer of every brush edge when the geometry changed.
+    fn ensure_edges(&mut self, scene: &Scene) {
+        if self.edges.as_ref().is_none_or(|(generation, _)| *generation != scene.geometry_generation) {
+            let mut vertices = Vec::new();
+            for mesh in &scene.meshes {
+                push_edges(&mut vertices, &mesh.edges, None, mesh.color);
+            }
+            self.edges = self.line_mesh(&vertices).map(|mesh| (scene.geometry_generation, mesh));
+        }
+    }
+
+    /// Draws one 2D view into viewport slot `slot`'s image of `pixels` size; `points` is the viewport's size
     /// in layout points, which the view's zoom is measured in. Returns the image's view
     /// and whether it was recreated.
     ///
@@ -339,7 +460,7 @@ impl Renderer3D {
     #[allow(clippy::too_many_arguments)]
     pub fn render_2d(
         &mut self,
-        index: usize,
+        slot: usize,
         view: &View2D,
         points: Vec2,
         pixels: [u32; 2],
@@ -348,14 +469,8 @@ impl Renderer3D {
         grid: f64,
     ) -> (&wgpu::TextureView, bool) {
         let pixels = [pixels[0].max(1), pixels[1].max(1)];
-        let recreated = ensure_target(&self.device, &self.uniform_layout, &mut self.view_targets[index], pixels, false);
-        if self.edges.as_ref().is_none_or(|(generation, _)| *generation != scene.geometry_generation) {
-            let mut vertices = Vec::new();
-            for mesh in &scene.meshes {
-                push_edges(&mut vertices, &mesh.edges, None, mesh.color);
-            }
-            self.edges = self.line_mesh(&vertices).map(|mesh| (scene.geometry_generation, mesh));
-        }
+        let recreated = ensure_target(&self.device, &self.uniform_layout, &mut self.targets[slot], pixels, false);
+        self.ensure_edges(scene);
 
         let local = Rect::from_min_size(Pos2::ZERO, points);
         let mut under = Vec::new();
@@ -377,7 +492,7 @@ impl Renderer3D {
         let under = self.line_mesh(&under);
         let over = self.line_mesh(&over);
 
-        let target = self.view_targets[index].as_ref().expect("target was just created");
+        let target = self.targets[slot].as_ref().expect("target was just created");
         let matrix = orthographic(view, points);
         self.queue
             .write_buffer(&target.uniform_buffer, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
@@ -393,16 +508,13 @@ impl Renderer3D {
             }
         }
         self.queue.submit([encoder.finish()]);
-        (&self.view_targets[index].as_ref().expect("target exists").color_view, recreated)
+        (&self.targets[slot].as_ref().expect("target exists").color_view, recreated)
     }
 
-    /// Copies the last rendered image of the camera (`None`) or of a 2D view (its index)
-    /// back from the GPU as RGBA bytes, row by row.
-    pub fn read_pixels(&self, view: Option<usize>) -> Option<(u32, u32, Vec<u8>)> {
-        let target = match view {
-            None => self.camera_target.as_ref()?,
-            Some(index) => self.view_targets.get(index)?.as_ref()?,
-        };
+    /// Copies the last rendered image of a viewport slot back from the GPU as RGBA bytes,
+    /// row by row.
+    pub fn read_pixels(&self, slot: usize) -> Option<(u32, u32, Vec<u8>)> {
+        let target = self.targets.get(slot)?.as_ref()?;
         let [width, height] = target.size;
         let row = width * 4;
         let padded_row = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -467,23 +579,24 @@ impl Renderer3D {
         }
         let keys: Vec<String> = wanted.into_iter().collect();
         let names: Vec<&str> = keys.iter().map(String::as_str).collect();
-        let images = match materials {
-            Some(materials) => materials.textures(&names),
-            None => vec![None; keys.len()],
+        let loaded: Vec<Material> = match materials {
+            Some(materials) => materials.materials(&names),
+            None => Vec::new(),
         };
-        let prepared = parallel_map(&images, |image| {
-            image.as_ref().map(|image| {
+        let prepared = parallel_map(&loaded, |material| {
+            material.texture.as_ref().map(|image| {
                 let pixels = Image {
                     width: image.pixel_width,
                     height: image.pixel_height,
                     rgba: image.rgba.clone(),
                 };
-                (mip_chain(&pixels), image.width as f32, image.height as f32)
+                (mip_chain(&pixels), (image.width as f32, image.height as f32), material.alpha)
             })
         });
-        for (key, prepared) in keys.into_iter().zip(prepared) {
-            let texture = prepared.map(|(levels, width, height)| {
-                upload(&self.device, &self.queue, &self.texture_layout, &self.sampler, &levels, width, height)
+        let mut prepared = prepared.into_iter();
+        for key in keys {
+            let texture = prepared.next().flatten().map(|(levels, size, alpha)| {
+                upload(&self.device, &self.queue, &self.texture_layout, &self.sampler, &levels, size, alpha)
             });
             self.textures.insert(key, texture);
         }
@@ -495,14 +608,16 @@ impl Renderer3D {
     }
 
     /// Builds a vertex buffer for the faces of `meshes`. With `chunked`, brushes are
-    /// grouped by which world cube their centre is in, so whole chunks can be culled.
+    /// grouped by which world cube their centre is in, so whole chunks can be culled, and
+    /// translucent faces are returned separately for sorting.
     fn face_mesh<'a>(
         &self,
         meshes: impl Iterator<Item = &'a WireMesh>,
         remap: Option<&Remap>,
         highlight: f32,
         chunked: bool,
-    ) -> FaceMesh {
+    ) -> (FaceMesh, Vec<TranslucentFace>) {
+        let mut translucent = Vec::new();
         type ChunkFaces = (Vec3, Vec3, HashMap<String, Vec<FaceVertex>>);
         let mut chunks: HashMap<[i32; 3], ChunkFaces> = HashMap::new();
         for mesh in meshes {
@@ -526,7 +641,18 @@ impl Renderer3D {
             for face in &mesh.faces {
                 let key = face.material.as_deref().map_or_else(|| WHITE_KEY.to_owned(), material_key);
                 let texture = self.texture_for(&key);
-                triangulate(face, texture, tint, highlight, remap, chunk.2.entry(key).or_default());
+                if chunked && matches!(texture.alpha, AlphaMode::Blend(_)) {
+                    let mut vertices = Vec::new();
+                    triangulate(face, texture, tint, highlight, remap, &mut vertices);
+                    let center = face.vertices.iter().sum::<DVec3>() / face.vertices.len().max(1) as f64;
+                    translucent.push(TranslucentFace {
+                        center: center.as_vec3(),
+                        key,
+                        vertices,
+                    });
+                } else {
+                    triangulate(face, texture, tint, highlight, remap, chunk.2.entry(key).or_default());
+                }
             }
         }
 
@@ -554,7 +680,7 @@ impl Renderer3D {
             contents: if all.is_empty() { &[0u8; 4] } else { bytemuck::cast_slice(&all) },
             usage: wgpu::BufferUsages::VERTEX,
         });
-        FaceMesh { buffer, chunks: built }
+        (FaceMesh { buffer, chunks: built }, translucent)
     }
 
     fn line_mesh(&self, vertices: &[LineVertex]) -> Option<LineMesh> {
@@ -587,7 +713,8 @@ fn push_edges(out: &mut Vec<LineVertex>, edges: &[[DVec3; 2]], remap: Option<&Re
     }
 }
 
-/// Creates or resizes a viewport's image. Returns whether it was recreated.
+/// Creates a viewport's image, or recreates it when its size changed or the slot switched
+/// between 3D (with a depth buffer) and 2D. Returns whether it was recreated.
 fn ensure_target(
     device: &wgpu::Device,
     uniform_layout: &wgpu::BindGroupLayout,
@@ -595,7 +722,10 @@ fn ensure_target(
     size: [u32; 2],
     with_depth: bool,
 ) -> bool {
-    if slot.as_ref().is_some_and(|target| target.size == size) {
+    if slot
+        .as_ref()
+        .is_some_and(|target| target.size == size && target.depth_view.is_some() == with_depth)
+    {
         return false;
     }
     let extent = wgpu::Extent3d {
@@ -741,8 +871,8 @@ fn upload(
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
     levels: &[Image],
-    width: f32,
-    height: f32,
+    (width, height): (f32, f32),
+    alpha: AlphaMode,
 ) -> GpuTexture {
     let image = &levels[0];
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -795,7 +925,12 @@ fn upload(
             },
         ],
     });
-    GpuTexture { bind_group, width, height }
+    GpuTexture {
+        bind_group,
+        width,
+        height,
+        alpha,
+    }
 }
 
 /// Hammer's pink and black checkerboard for missing textures.
@@ -850,7 +985,9 @@ fn mip_chain(image: &Image) -> Vec<Image> {
     levels
 }
 
-/// Fans a convex face into triangles with Source texture coordinates:
+/// Fans a convex face into triangles wound counter-clockwise as seen from outside, so
+/// back-face culling hides faces seen from behind, as in Hammer. Texture coordinates follow
+/// Source:
 /// `u = (point · axis / scale + offset) / texture width`, and likewise for `v`.
 fn triangulate(
     face: &SceneFace,
@@ -874,11 +1011,22 @@ fn triangulate(
         ],
         color,
         highlight,
+        alpha: match texture.alpha {
+            AlphaMode::Opaque => [0.0, 0.0],
+            AlphaMode::Test(reference) => [reference, 0.0],
+            AlphaMode::Blend(opacity) => [0.0, opacity.max(f32::EPSILON)],
+        },
     };
-    for index in 1..face.vertices.len().saturating_sub(1) {
-        out.push(vertex(face.vertices[0]));
-        out.push(vertex(face.vertices[index]));
-        out.push(vertex(face.vertices[index + 1]));
+    let points = &face.vertices;
+    if points.len() < 3 {
+        return;
+    }
+    let counter_clockwise = (points[1] - points[0]).cross(points[2] - points[0]).dot(face.normal) >= 0.0;
+    for index in 1..points.len() - 1 {
+        let (second, third) = if counter_clockwise { (index, index + 1) } else { (index + 1, index) };
+        out.push(vertex(points[0]));
+        out.push(vertex(points[second]));
+        out.push(vertex(points[third]));
     }
 }
 
@@ -907,11 +1055,11 @@ fn pipeline(
 ) -> wgpu::RenderPipeline {
     let depth_stencil = match depth {
         Depth::None => None,
-        Depth::Test | Depth::Overdraw | Depth::Ignore => Some(wgpu::DepthStencilState {
+        Depth::Test | Depth::Overdraw | Depth::Ignore | Depth::Translucent => Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: depth != Depth::Ignore,
+            depth_write_enabled: matches!(depth, Depth::Test | Depth::Overdraw),
             depth_compare: match depth {
-                Depth::Test => wgpu::CompareFunction::Less,
+                Depth::Test | Depth::Translucent => wgpu::CompareFunction::Less,
                 Depth::Overdraw => wgpu::CompareFunction::LessEqual,
                 _ => wgpu::CompareFunction::Always,
             },
@@ -930,7 +1078,8 @@ fn pipeline(
         },
         primitive: wgpu::PrimitiveState {
             topology,
-            cull_mode: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: (topology == wgpu::PrimitiveTopology::TriangleList).then_some(wgpu::Face::Back),
             ..Default::default()
         },
         depth_stencil,
@@ -940,7 +1089,7 @@ fn pipeline(
             entry_point: Some(fragment_entry),
             targets: &[Some(wgpu::ColorTargetState {
                 format: COLOR_FORMAT,
-                blend: None,
+                blend: (depth == Depth::Translucent).then_some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),

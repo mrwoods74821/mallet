@@ -124,7 +124,7 @@ impl Camera3D {
             }
 
             let scroll = f64::from(input.raw_scroll_delta.y);
-            if hovered && scroll != 0.0 {
+            if (hovered || self.mouse_look) && scroll != 0.0 {
                 self.position += forward * WHEEL_STEP * scroll / POINTS_PER_NOTCH;
             }
             active |= wish != DVec3::ZERO || yaw_input != 0.0 || pitch_input != 0.0;

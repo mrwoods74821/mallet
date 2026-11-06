@@ -18,7 +18,7 @@ use mallet_vmf::{format_vec3, Entity, IdAllocator, Solid, Vmf};
 use mallet_content::{GameFs, Materials};
 
 use crate::canvas::PixmapCanvas;
-use crate::render3d::Renderer3D;
+use crate::render3d::{CameraStyle, Renderer3D};
 use crate::document::Document;
 use crate::input::InputFrame;
 use crate::scene::{Overlay, Owner, Scene};
@@ -60,6 +60,61 @@ pub const VIEWPORT_GAP: f32 = 2.0;
 const DEFAULT_AREA: Vec2 = Vec2::new(1600.0, 950.0);
 const GAP_COLOR: Color32 = Color32::from_gray(30);
 
+/// What one of the four viewport slots shows. Click a viewport's label to change it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewMode {
+    Textured,
+    Wireframe,
+    Top,
+    Front,
+    Side,
+}
+
+impl ViewMode {
+    pub const ALL: [ViewMode; 5] = [Self::Textured, Self::Wireframe, Self::Top, Self::Front, Self::Side];
+
+    /// The label in the viewport's corner, as Hammer prints it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Textured => "camera (textured)",
+            Self::Wireframe => "camera (wireframe)",
+            Self::Top => "top (x/y)",
+            Self::Front => "front (y/z)",
+            Self::Side => "side (x/z)",
+        }
+    }
+
+    /// The entry in the viewport type menu.
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            Self::Textured => "3D Textured",
+            Self::Wireframe => "3D Wireframe",
+            Self::Top => "2D Top (x/y)",
+            Self::Front => "2D Front (y/z)",
+            Self::Side => "2D Side (x/z)",
+        }
+    }
+
+    /// Which of the editor's three 2D views this shows, if it is a 2D mode.
+    pub fn view_index(self) -> Option<usize> {
+        match self {
+            Self::Top => Some(0),
+            Self::Front => Some(1),
+            Self::Side => Some(2),
+            Self::Textured | Self::Wireframe => None,
+        }
+    }
+
+    /// How the camera draws, if this is a 3D mode.
+    pub fn camera_style(self) -> Option<CameraStyle> {
+        match self {
+            Self::Textured => Some(CameraStyle::Textured),
+            Self::Wireframe => Some(CameraStyle::Wireframe),
+            Self::Top | Self::Front | Self::Side => None,
+        }
+    }
+}
+
 /// Part of the viewport area a screenshot covers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShotTarget {
@@ -70,17 +125,6 @@ pub enum ShotTarget {
     Side,
 }
 
-impl ShotTarget {
-    fn index(self) -> Option<usize> {
-        match self {
-            Self::All => None,
-            Self::Camera => Some(0),
-            Self::Top => Some(1),
-            Self::Front => Some(2),
-            Self::Side => Some(3),
-        }
-    }
-}
 
 /// How long the parts of recent frames took, for finding slowdowns.
 #[derive(Clone, Copy, Debug, Default)]
@@ -99,8 +143,12 @@ pub struct FrameTimings {
 pub struct Editor {
     pub document: Option<Document>,
     pub scene: Scene,
-    /// Top, front and side views, in that order.
+    /// Top, front and side views, in that order. Every slot showing one of these shares
+    /// its pan and zoom.
     pub views: [View2D; 3],
+    /// What each of the four viewport slots shows, in the order camera top-left, then
+    /// top-right, bottom-left, bottom-right in Hammer's default layout.
+    pub layout: [ViewMode; 4],
     pub camera: Camera3D,
     pub grid: f64,
     /// Latest status line, shown at the bottom of the window.
@@ -141,6 +189,7 @@ impl Default for Editor {
                 View2D::new(Axis2D::Front),
                 View2D::new(Axis2D::Side),
             ],
+            layout: [ViewMode::Textured, ViewMode::Top, ViewMode::Front, ViewMode::Side],
             camera: Camera3D::new(),
             grid: DEFAULT_GRID,
             message: "Open a map with File > Open or drop a .vmf onto the window.".to_owned(),
@@ -494,10 +543,35 @@ impl Editor {
 
     /// Fits the whole map into the three 2D views.
     pub fn fit_2d(&mut self) {
-        for (view, rect) in self.views.iter_mut().zip(&self.viewport_rects[1..]) {
-            view.fit(&self.scene.bounds, *rect);
+        for index in 0..self.views.len() {
+            let rect = self.view_rect(index);
+            self.views[index].fit(&self.scene.bounds, rect);
         }
     }
+
+    /// The rectangle of the slot showing a 2D view, or of some slot when none shows it.
+    fn view_rect(&self, view_index: usize) -> Rect {
+        let slot = self
+            .layout
+            .iter()
+            .position(|mode| mode.view_index() == Some(view_index))
+            .unwrap_or(1);
+        self.viewport_rects[slot]
+    }
+
+    /// The viewport slot a screenshot or input target refers to: `camera` is the first
+    /// 3D slot, `top`, `front` and `side` the first slot showing that view.
+    pub fn slot_for(&self, target: ShotTarget) -> Result<usize, String> {
+        let (name, slot) = match target {
+            ShotTarget::All => return Err("pick one viewport: camera, top, front or side".to_owned()),
+            ShotTarget::Camera => ("camera", self.layout.iter().position(|mode| mode.camera_style().is_some())),
+            ShotTarget::Top => ("top", self.layout.iter().position(|mode| *mode == ViewMode::Top)),
+            ShotTarget::Front => ("front", self.layout.iter().position(|mode| *mode == ViewMode::Front)),
+            ShotTarget::Side => ("side", self.layout.iter().position(|mode| *mode == ViewMode::Side)),
+        };
+        slot.ok_or_else(|| format!("no viewport currently shows the {name} view"))
+    }
+
 
     /// Moves the 3D camera back until the whole map is in view.
     pub fn fit_3d(&mut self) {
@@ -522,14 +596,9 @@ impl Editor {
         self.materials.as_ref().map(|materials| materials.filesystem().game_dir())
     }
 
-    /// Physical pixels per layout point in the window.
-    pub fn pixels_per_point(&self) -> f32 {
-        self.pixels_per_point
-    }
-
-    /// The size in physical pixels of the camera viewport.
-    pub fn camera_pixels(&self) -> [u32; 2] {
-        let size = self.viewport_rects[0].size() * self.pixels_per_point;
+    /// The size in physical pixels of a viewport slot.
+    pub fn slot_pixels(&self, slot: usize) -> [u32; 2] {
+        let size = self.viewport_rects[slot].size() * self.pixels_per_point;
         [size.x.round().max(1.0) as u32, size.y.round().max(1.0) as u32]
     }
 
@@ -549,11 +618,11 @@ impl Editor {
     /// world units on the view's two axes; in the camera view it is pixels from the
     /// viewport's top-left corner.
     pub fn viewport_point(&self, target: ShotTarget, point: DVec2) -> Result<Pos2, String> {
-        let index = target.index().ok_or("pick one viewport: camera, top, front or side")?;
-        let rect = self.viewport_rects[index];
-        Ok(match index {
-            0 => rect.min + Vec2::new(point.x as f32, point.y as f32),
-            _ => self.views[index - 1].to_screen(rect, point),
+        let slot = self.slot_for(target)?;
+        let rect = self.viewport_rects[slot];
+        Ok(match self.layout[slot].view_index() {
+            None => rect.min + Vec2::new(point.x as f32, point.y as f32),
+            Some(view) => self.views[view].to_screen(rect, point),
         })
     }
 
@@ -563,12 +632,13 @@ impl Editor {
     /// window, and the CPU drawing code before that. Neither needs the window to be
     /// visible. Viewport labels are left out.
     pub fn render_png(&mut self, target: ShotTarget) -> Result<Vec<u8>, String> {
-        if let Some(index) = target.index() {
-            let (canvas, scale) = self.render_any(index)?;
+        if target != ShotTarget::All {
+            let slot = self.slot_for(target)?;
+            let (canvas, scale) = self.render_any(slot)?;
             if scale == 1.0 {
                 return canvas.encode_png();
             }
-            let size = self.viewport_rects[index].size();
+            let size = self.viewport_rects[slot].size();
             let mut scaled = canvas_for(size)?;
             scaled.draw_canvas_scaled(&canvas, 0.0, 0.0, scale);
             return scaled.encode_png();
@@ -587,51 +657,56 @@ impl Editor {
 
     /// Renders one viewport, on the GPU when possible, and returns it with the scale that
     /// brings it to layout-point size.
-    fn render_any(&mut self, index: usize) -> Result<(PixmapCanvas, f32), String> {
-        let gpu_image = match index {
-            0 => self.render_camera_gpu().map(|image| (image, 1.0 / self.pixels_per_point)),
-            _ => self.render_view_gpu(index - 1).map(|image| (image, 1.0)),
+    fn render_any(&mut self, slot: usize) -> Result<(PixmapCanvas, f32), String> {
+        let mode = self.layout[slot];
+        let gpu_image = match (mode.camera_style(), mode.view_index()) {
+            (Some(style), _) => self
+                .render_camera_gpu(slot, style)
+                .map(|image| (image, 1.0 / self.pixels_per_point)),
+            (None, Some(view)) => self.render_view_gpu(slot, view).map(|image| (image, 1.0)),
+            (None, None) => None,
         };
         match gpu_image {
             Some(image) => Ok(image),
-            None => Ok((self.render_viewport(index)?, 1.0)),
+            None => Ok((self.render_viewport(slot)?, 1.0)),
         }
     }
 
     /// Renders a 2D view on the GPU at layout-point size, with its handles and marquee
     /// drawn on top, and reads it back.
-    fn render_view_gpu(&mut self, index: usize) -> Option<PixmapCanvas> {
+    fn render_view_gpu(&mut self, slot: usize, view: usize) -> Option<PixmapCanvas> {
         let overlay = self.display_overlay();
-        let points = self.viewport_rects[index + 1].size();
+        let points = self.viewport_rects[slot].size();
         let pixels = [points.x.round().max(1.0) as u32, points.y.round().max(1.0) as u32];
         let gpu = self.gpu.as_mut()?;
-        gpu.render_2d(index, &self.views[index], points, pixels, &self.scene, &overlay, self.grid);
-        let (width, height, rgba) = gpu.read_pixels(Some(index))?;
+        gpu.render_2d(slot, &self.views[view], points, pixels, &self.scene, &overlay, self.grid);
+        let (width, height, rgba) = gpu.read_pixels(slot)?;
         let mut canvas = PixmapCanvas::from_rgba(width, height, rgba)?;
         let local = Rect::from_min_size(Pos2::ZERO, points);
-        self.views[index].draw_overlay(&mut canvas, local, &overlay, false);
+        self.views[view].draw_overlay(&mut canvas, local, &overlay, false);
         Some(canvas)
     }
 
-    /// Renders the textured camera view on the GPU, when the window has created the
-    /// renderer, and reads it back.
-    fn render_camera_gpu(&mut self) -> Option<PixmapCanvas> {
+    /// Renders a 3D slot on the GPU, when the window has created the renderer, and reads
+    /// it back.
+    fn render_camera_gpu(&mut self, slot: usize, style: CameraStyle) -> Option<PixmapCanvas> {
         let overlay = self.display_overlay();
-        let size = self.camera_pixels();
+        let size = self.slot_pixels(slot);
         let gpu = self.gpu.as_mut()?;
-        gpu.render(&self.scene, &overlay, &self.camera, size, self.materials.as_mut());
-        let (width, height, rgba) = gpu.read_pixels(None)?;
+        gpu.render(slot, style, &self.scene, &overlay, &self.camera, size, self.materials.as_mut());
+        let (width, height, rgba) = gpu.read_pixels(slot)?;
         PixmapCanvas::from_rgba(width, height, rgba)
     }
 
-    fn render_viewport(&self, index: usize) -> Result<PixmapCanvas, String> {
-        let size = self.viewport_rects[index].size();
+    /// Draws a slot on the CPU, the fallback before the GPU renderer exists.
+    fn render_viewport(&self, slot: usize) -> Result<PixmapCanvas, String> {
+        let size = self.viewport_rects[slot].size();
         let local = Rect::from_min_size(Pos2::ZERO, size);
         let mut canvas = canvas_for(size)?;
         let overlay = self.display_overlay();
-        match index {
-            0 => self.camera.draw(&mut canvas, local, &self.scene, false, &overlay),
-            _ => self.views[index - 1].draw(&mut canvas, local, &self.scene, self.grid, false, &overlay),
+        match self.layout[slot].view_index() {
+            None => self.camera.draw(&mut canvas, local, &self.scene, false, &overlay),
+            Some(view) => self.views[view].draw(&mut canvas, local, &self.scene, self.grid, false, &overlay),
         }
         Ok(canvas)
     }

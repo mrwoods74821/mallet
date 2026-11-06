@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use eframe::egui::Pos2;
 
 use crate::config::Config;
-use crate::editor::{Editor, SelectMode, ShotTarget, Tool, MAX_GRID, MIN_GRID};
+use crate::editor::{Editor, SelectMode, ShotTarget, Tool, ViewMode, MAX_GRID, MIN_GRID};
 use crate::input::{self, InputFrame};
 use crate::mcp::ToolResult;
 use crate::scene::Owner;
@@ -209,6 +209,15 @@ pub fn definitions() -> Value {
             &["view"],
         ),
         tool(
+            "set_viewport_type",
+            "Change what one of the four viewports shows, like clicking its label. Slots are 0 top-left,              1 top-right, 2 bottom-left, 3 bottom-right.",
+            json!({
+                "slot": { "type": "integer", "minimum": 0, "maximum": 3 },
+                "type": { "type": "string", "enum": ["textured", "wireframe", "top", "front", "side"] }
+            }),
+            &["slot", "type"],
+        ),
+        tool(
             "screenshot",
             "Render viewports to a PNG at their on-screen size. Works while the window is covered or minimized. \
              With viewport all, the layout is camera top-left, top top-right, front bottom-left, side bottom-right; \
@@ -378,6 +387,23 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
             Ok(ToolResult::text("Views centred on the map."))
         }
         "set_camera" => set_camera(editor, args),
+        "set_viewport_type" => {
+            let slot = args
+                .get("slot")
+                .and_then(Value::as_u64)
+                .filter(|slot| *slot < 4)
+                .ok_or("\"slot\" must be 0 to 3")? as usize;
+            let mode = match string_arg(args, "type")? {
+                "textured" => ViewMode::Textured,
+                "wireframe" => ViewMode::Wireframe,
+                "top" => ViewMode::Top,
+                "front" => ViewMode::Front,
+                "side" => ViewMode::Side,
+                other => return Err(format!("unknown viewport type \"{other}\"")),
+            };
+            editor.layout[slot] = mode;
+            Ok(ToolResult::json(&layout_json(editor)))
+        }
         "set_view_2d" => set_view_2d(editor, args),
         "screenshot" => {
             let target = match optional_string(args, "viewport")?.unwrap_or("all") {
@@ -423,6 +449,7 @@ fn status_json(editor: &Editor) -> Value {
         "grid": editor.grid,
         "game_dir": editor.game_dir().map(|dir| dir.display().to_string()),
         "textured_3d": editor.gpu.is_some(),
+        "viewports": layout_json(editor),
         "timings_ms": {
             "update": editor.timings.update_ms,
             "camera": editor.timings.camera_ms,
@@ -491,6 +518,10 @@ fn input_action(editor: &Editor, action: &Value) -> Result<Vec<InputFrame>, Stri
         editor.viewport_point(viewport, DVec2::new(x, y))
     };
     Ok(input::drag(point(&path[0])?, point(&path[1])?, button, modifiers))
+}
+
+fn layout_json(editor: &Editor) -> Value {
+    json!(editor.layout.iter().map(|mode| mode.label()).collect::<Vec<_>>())
 }
 
 fn selection_json(editor: &Editor) -> Value {

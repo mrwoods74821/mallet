@@ -13,8 +13,8 @@ use eframe::egui_wgpu;
 
 use crate::canvas::{Canvas, PainterCanvas};
 use crate::config::{self, Config};
-use crate::render3d::Renderer3D;
-use crate::editor::{self, Editor, SelectMode, Tool, VIEWPORT_GAP};
+use crate::render3d::{CameraStyle, Renderer3D};
+use crate::editor::{self, Editor, SelectMode, Tool, ViewMode, VIEWPORT_GAP};
 use crate::keymap::{Action, KeyMap};
 use crate::netgraph::NetGraph;
 use crate::scene::Remap;
@@ -93,10 +93,10 @@ pub struct MalletApp {
     title: String,
     mcp_url: Option<String>,
     drag: Option<Drag>,
-    /// The GPU camera image as registered with egui, once the 3D view has been drawn.
-    camera_texture: Option<egui::TextureId>,
-    /// The GPU images of the top, front and side views as registered with egui.
-    view_textures: [Option<egui::TextureId>; 3],
+    /// Each viewport slot's GPU image as registered with egui.
+    slot_textures: [Option<egui::TextureId>; 4],
+    /// Where the cursor was when mouselook started, to put it back afterwards.
+    look_return: Option<Pos2>,
     /// Frame timing overlay in the camera viewport's bottom-right corner.
     net_graph: NetGraph,
     show_net_graph: bool,
@@ -115,8 +115,8 @@ impl MalletApp {
             title: String::new(),
             mcp_url: None,
             drag: None,
-            camera_texture: None,
-            view_textures: [None; 3],
+            slot_textures: [None; 4],
+            look_return: None,
             net_graph: NetGraph::default(),
             show_net_graph: true,
         };
@@ -313,101 +313,186 @@ impl MalletApp {
             modifiers: input.modifiers,
         });
         let space_held = ui.input(|input| input.key_down(egui::Key::Space));
+        let mut camera_updated = false;
+        let (mut camera_ms, mut views_ms) = (0.0, 0.0);
+        self.cursor = None;
+        for (slot, rect) in rects.into_iter().enumerate() {
+            let started = Instant::now();
+            let response = ui.interact(rect, Id::new(("viewport", slot)), Sense::click_and_drag());
+            let mode = editor.layout[slot];
+            match (mode.camera_style(), mode.view_index()) {
+                (Some(style), _) => {
+                    self.camera_slot(ui, slot, style, rect, &response, editor, frame, &pointer, &mut camera_updated);
+                    camera_ms += elapsed_ms(started);
+                }
+                (None, Some(view)) => {
+                    self.view_slot(ui, slot, view, rect, &response, editor, frame, &pointer, space_held);
+                    views_ms += elapsed_ms(started);
+                }
+                (None, None) => {}
+            }
+            viewport_menu(ui, slot, rect, editor);
+        }
+        editor.timings.camera_ms = camera_ms;
+        editor.timings.views_2d_ms = views_ms;
+    }
 
+    /// Handles and draws a 3D viewport slot. The camera is shared, so it only takes
+    /// input once per frame: in the hovered 3D slot, or the first one during mouselook.
+    ///
+    /// While mouselook is on the cursor is kept at the viewport's centre, so it never
+    /// wanders into another viewport (where the mouse wheel would zoom that view instead),
+    /// and it goes back to where it was when mouselook ends.
+    #[allow(clippy::too_many_arguments)]
+    fn camera_slot(
+        &mut self,
+        ui: &mut egui::Ui,
+        slot: usize,
+        style: CameraStyle,
+        rect: Rect,
+        response: &Response,
+        editor: &mut Editor,
+        frame: &eframe::Frame,
+        pointer: &PointerState,
+        camera_updated: &mut bool,
+    ) {
         let ctx = ui.ctx().clone();
-        let response = ui.interact(rects[0], Id::new("viewport_3d"), Sense::click_and_drag());
-        let moving = editor.camera.update(&ctx, response.hovered(), &self.keymap);
+        let was_looking = editor.camera.mouse_look();
+        let mut moving = false;
+        if !*camera_updated && (response.hovered() || was_looking) {
+            *camera_updated = true;
+            moving = editor.camera.update(&ctx, response.hovered() || was_looking, &self.keymap);
+            let looking = editor.camera.mouse_look();
+            if looking && !was_looking {
+                self.look_return = pointer.position;
+            }
+            if looking {
+                let center = rect.center();
+                if pointer.position.is_none_or(|position| position.distance(center) > 1.0) {
+                    ctx.send_viewport_cmd(ViewportCommand::CursorPosition(center));
+                }
+            } else if was_looking {
+                if let Some(position) = self.look_return.take() {
+                    ctx.send_viewport_cmd(ViewportCommand::CursorPosition(position));
+                }
+            }
+        }
         if response.clicked_by(PointerButton::Primary) && editor.tool == Tool::Select && !editor.camera.mouse_look() {
             if let Some(position) = pointer.position {
-                let (origin, direction) = editor.camera.ray(rects[0], position);
+                let (origin, direction) = editor.camera.ray(rect, position);
                 let hit = editor.scene.pick_ray(origin, direction);
                 pick(editor, hit, pointer.modifiers);
             }
         }
         let active = response.hovered() || moving;
-        let camera_started = Instant::now();
-        let painter = ui.painter_at(rects[0]);
+        let painter = ui.painter_at(rect);
         let canvas = &mut PainterCanvas(&painter);
         match frame.wgpu_render_state() {
             Some(render_state) => {
-                let texture = self.render_camera(render_state, editor);
+                let texture = self.render_camera(render_state, editor, slot, style);
                 let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-                painter.image(texture, rects[0], full, egui::Color32::WHITE);
-                let label = if editor.materials.is_some() { "camera (textured)" } else { "camera (no game set)" };
+                painter.image(texture, rect, full, egui::Color32::WHITE);
+                let label = match style {
+                    CameraStyle::Textured if editor.materials.is_none() => "camera (no game set)",
+                    _ => editor.layout[slot].label(),
+                };
                 let color = if active { egui::Color32::WHITE } else { egui::Color32::GRAY };
-                canvas.label(rects[0].left_top() + egui::vec2(6.0, 4.0), label, color);
-                if self.show_net_graph {
+                canvas.label(rect.left_top() + egui::vec2(6.0, 4.0), label, color);
+                if self.show_net_graph && style == CameraStyle::Textured {
                     let stats = editor.gpu.as_ref().map(|gpu| gpu.stats).unwrap_or_default();
-                    self.net_graph.draw(&painter, rects[0], &stats);
+                    self.net_graph.draw(&painter, rect, &stats);
                 }
             }
-            None => editor.camera.draw(canvas, rects[0], &editor.scene, active, &editor.display_overlay()),
+            None => editor.camera.draw(canvas, rect, &editor.scene, active, &editor.display_overlay()),
         }
         if moving {
             ctx.request_repaint();
         }
-        editor.timings.camera_ms = elapsed_ms(camera_started);
+    }
 
-        let views_started = Instant::now();
-        self.cursor = None;
-        for index in 0..editor.views.len() {
-            let rect = rects[index + 1];
-            let response = ui.interact(rect, Id::new(("viewport_2d", index)), Sense::click_and_drag());
-            editor.views[index].handle_input(ui, &response, rect);
-            let view = editor.views[index].clone();
-            if !space_held {
-                self.use_tool_2d(index, &view, rect, &response, editor, &pointer);
-                if let Some(icon) = self.cursor_icon(index, &view, rect, &response, editor) {
-                    ctx.set_cursor_icon(icon);
-                }
-            }
-            let painter = ui.painter_at(rect);
-            let canvas = &mut PainterCanvas(&painter);
-            let overlay = editor.display_overlay();
-            match frame.wgpu_render_state() {
-                Some(render_state) => {
-                    let texture = self.render_view(render_state, editor, index, rect);
-                    let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-                    painter.image(texture, rect, full, egui::Color32::WHITE);
-                    view.draw_overlay(canvas, rect, &overlay, response.hovered());
-                }
-                None => view.draw(canvas, rect, &editor.scene, editor.grid, response.hovered(), &overlay),
-            }
-            if let Some(position) = response.hover_pos() {
-                self.cursor = Some(snap(view.to_world(rect, position), editor.grid));
+    /// Handles and draws a 2D viewport slot showing one of the editor's three 2D views.
+    #[allow(clippy::too_many_arguments)]
+    fn view_slot(
+        &mut self,
+        ui: &mut egui::Ui,
+        slot: usize,
+        view_index: usize,
+        rect: Rect,
+        response: &Response,
+        editor: &mut Editor,
+        frame: &eframe::Frame,
+        pointer: &PointerState,
+        space_held: bool,
+    ) {
+        if !editor.camera.mouse_look() {
+            editor.views[view_index].handle_input(ui, response, rect);
+        }
+        let view = editor.views[view_index].clone();
+        if !space_held {
+            self.use_tool_2d(slot, &view, rect, response, editor, pointer);
+            if let Some(icon) = self.cursor_icon(slot, &view, rect, response, editor) {
+                ui.ctx().set_cursor_icon(icon);
             }
         }
-        editor.timings.views_2d_ms = elapsed_ms(views_started);
-    }
-
-    /// Renders the textured camera view on the GPU and returns it as an egui texture.
-    fn render_camera(&mut self, render_state: &egui_wgpu::RenderState, editor: &mut Editor) -> egui::TextureId {
+        let painter = ui.painter_at(rect);
+        let canvas = &mut PainterCanvas(&painter);
         let overlay = editor.display_overlay();
-        let size = editor.camera_pixels();
-        let renderer = editor
-            .gpu
-            .get_or_insert_with(|| Renderer3D::new(&render_state.device, &render_state.queue));
-        let (view, recreated) = renderer.render(&editor.scene, &overlay, &editor.camera, size, editor.materials.as_mut());
-        show_texture(render_state, &mut self.camera_texture, view, recreated)
+        match frame.wgpu_render_state() {
+            Some(render_state) => {
+                let texture = self.render_view(render_state, editor, slot, view_index, rect);
+                let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                painter.image(texture, rect, full, egui::Color32::WHITE);
+                view.draw_overlay(canvas, rect, &overlay, response.hovered());
+            }
+            None => view.draw(canvas, rect, &editor.scene, editor.grid, response.hovered(), &overlay),
+        }
+        if let Some(position) = response.hover_pos() {
+            self.cursor = Some(snap(view.to_world(rect, position), editor.grid));
+        }
     }
 
-    /// Renders one 2D view on the GPU and returns it as an egui texture.
-    fn render_view(
+    /// Renders a 3D slot on the GPU and returns it as an egui texture.
+    fn render_camera(
         &mut self,
         render_state: &egui_wgpu::RenderState,
         editor: &mut Editor,
-        index: usize,
-        rect: Rect,
+        slot: usize,
+        style: CameraStyle,
     ) -> egui::TextureId {
         let overlay = editor.display_overlay();
-        let pixels = rect.size() * editor.pixels_per_point();
-        let pixels = [pixels.x.round() as u32, pixels.y.round() as u32];
+        let size = editor.slot_pixels(slot);
         let renderer = editor
             .gpu
             .get_or_insert_with(|| Renderer3D::new(&render_state.device, &render_state.queue));
         let (view, recreated) =
-            renderer.render_2d(index, &editor.views[index], rect.size(), pixels, &editor.scene, &overlay, editor.grid);
-        show_texture(render_state, &mut self.view_textures[index], view, recreated)
+            renderer.render(slot, style, &editor.scene, &overlay, &editor.camera, size, editor.materials.as_mut());
+        show_texture(render_state, &mut self.slot_textures[slot], view, recreated)
+    }
+
+    /// Renders a 2D slot on the GPU and returns it as an egui texture.
+    fn render_view(
+        &mut self,
+        render_state: &egui_wgpu::RenderState,
+        editor: &mut Editor,
+        slot: usize,
+        view_index: usize,
+        rect: Rect,
+    ) -> egui::TextureId {
+        let overlay = editor.display_overlay();
+        let pixels = editor.slot_pixels(slot);
+        let renderer = editor
+            .gpu
+            .get_or_insert_with(|| Renderer3D::new(&render_state.device, &render_state.queue));
+        let (view, recreated) = renderer.render_2d(
+            slot,
+            &editor.views[view_index],
+            rect.size(),
+            pixels,
+            &editor.scene,
+            &overlay,
+            editor.grid,
+        );
+        show_texture(render_state, &mut self.slot_textures[slot], view, recreated)
     }
 
     /// Chooses the drag that a left-button press at `origin` starts with the active tool:
@@ -659,6 +744,38 @@ fn open_or_new(editor: &mut Editor, path: Option<PathBuf>) {
         editor.new_map();
         editor.message = failure;
     }
+}
+
+/// Draws a viewport's label as a button: clicking it opens a menu to switch the slot
+/// between the 3D and 2D view types.
+fn viewport_menu(ui: &mut egui::Ui, slot: usize, rect: Rect, editor: &mut Editor) {
+    let mode = editor.layout[slot];
+    let font = egui::FontId::proportional(13.0);
+    let width = ui.fonts(|fonts| fonts.layout_no_wrap(mode.label().to_owned(), font, egui::Color32::WHITE).size().x);
+    let label = Rect::from_min_size(rect.left_top() + egui::vec2(3.0, 2.0), egui::vec2(width + 8.0, 19.0));
+    let response = ui
+        .interact(label, Id::new(("viewport_label", slot)), Sense::click())
+        .on_hover_text("Change this viewport's type");
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        ui.painter_at(rect)
+            .rect_stroke(label, 2.0, egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)), egui::StrokeKind::Inside);
+    }
+    let popup = Id::new(("viewport_menu", slot));
+    if response.clicked() {
+        ui.memory_mut(|memory| memory.toggle_popup(popup));
+    }
+    egui::popup::popup_below_widget(ui, popup, &response, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+        ui.set_min_width(140.0);
+        for (index, choice) in ViewMode::ALL.into_iter().enumerate() {
+            if index == 2 {
+                ui.separator();
+            }
+            if ui.selectable_label(choice == mode, choice.menu_label()).clicked() {
+                editor.layout[slot] = choice;
+            }
+        }
+    });
 }
 
 /// Registers a GPU image with egui the first time, and refreshes egui's reference when the
