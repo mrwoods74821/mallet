@@ -521,6 +521,7 @@ impl Editor {
                 let grid = document.vmf.grid_spacing();
                 self.set_document(document);
                 self.message = format!("Loaded {}", path.display());
+                self.remember_map(path);
                 if let Some(grid) = grid.filter(|grid| (MIN_GRID..=MAX_GRID).contains(grid)) {
                     self.grid = grid;
                 }
@@ -576,8 +577,11 @@ impl Editor {
             Ok(()) => format!("Saved {}", document.display_path()),
             Err(error) => format!("Could not save {}: {error}", document.display_path()),
         };
-        match (result, &document.path) {
-            (Ok(()), Some(path)) => Ok(path.clone()),
+        match (result, document.path.clone()) {
+            (Ok(()), Some(path)) => {
+                self.remember_map(&path);
+                Ok(path)
+            }
             _ => Err(self.message.clone()),
         }
     }
@@ -1029,6 +1033,12 @@ impl Editor {
         self.config.fgds = paths;
         self.save_config();
         Ok(count)
+    }
+
+    /// Puts a map at the top of File > Recent Maps and saves the list.
+    pub fn remember_map(&mut self, path: &Path) {
+        self.config.remember_map(path);
+        self.save_config();
     }
 
     /// Writes the settings, reporting a failure in the status bar.

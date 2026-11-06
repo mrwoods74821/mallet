@@ -26,6 +26,8 @@ pub struct Config {
     pub fgds: Vec<PathBuf>,
     /// Games listed in Garry's Mod's `cfg/mount.cfg` that Mallet leaves unmounted.
     pub unmounted_games: Vec<String>,
+    /// Maps opened or saved lately, the latest first.
+    pub recent_maps: Vec<PathBuf>,
     /// Programs chosen for each compile tool; a missing one is found automatically.
     pub tools: ToolPaths,
     pub compile: CompileOptions,
@@ -140,7 +142,27 @@ impl Default for ViewOptions {
 impl Config {
     /// Loads the settings, or defaults when there are none yet or they cannot be read.
     pub fn load() -> Self {
-        config_path().map_or_else(Self::default, |path| Self::load_from(&path))
+        let Some(path) = config_path() else {
+            return Self::default();
+        };
+        if path.is_file() || profile().is_none() {
+            return Self::load_from(&path);
+        }
+        // A new profile starts from the main settings, without their map history.
+        let main = std::env::var_os("APPDATA").map(|appdata| Path::new(&appdata).join("Mallet").join("config.json"));
+        let mut config = main.map_or_else(Self::default, |main| Self::load_from(&main));
+        config.recent_maps.clear();
+        config
+    }
+
+    /// Puts a map at the top of the recent list, keeping it short and free of repeats.
+    pub fn remember_map(&mut self, path: &Path) {
+        let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
+        let key = |path: &Path| path.to_string_lossy().replace('/', "\\").to_lowercase();
+        let wanted = key(&path);
+        self.recent_maps.retain(|recent| key(recent) != wanted);
+        self.recent_maps.insert(0, path);
+        self.recent_maps.truncate(MAX_RECENT_MAPS);
     }
 
     /// Loads settings from a file, or defaults when it is missing or unreadable.
@@ -166,9 +188,29 @@ impl Config {
     }
 }
 
+/// How many maps File > Recent Maps keeps.
+pub const MAX_RECENT_MAPS: usize = 20;
+
+/// The `MALLET_PROFILE` in use, if any: a separate set of settings and layouts, as test
+/// copies use.
+pub fn profile() -> Option<String> {
+    std::env::var("MALLET_PROFILE")
+        .ok()
+        .map(|profile| profile.trim().to_owned())
+        .filter(|profile| !profile.is_empty())
+}
+
+/// The name of Mallet's folder in `%APPDATA%`: `Mallet`, or `Mallet-<profile>`.
+pub fn app_folder() -> String {
+    match profile() {
+        Some(profile) => format!("Mallet-{profile}"),
+        None => "Mallet".to_owned(),
+    }
+}
+
 /// Mallet's folder in `%APPDATA%`, holding settings, presets and compile logs.
 pub fn data_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|appdata| Path::new(&appdata).join("Mallet"))
+    std::env::var_os("APPDATA").map(|appdata| Path::new(&appdata).join(app_folder()))
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -338,6 +380,18 @@ mod tests {
         config
             .tools
             .set(ToolKind::SourceCubemap, Some(PathBuf::from("D:/scm.exe")));
+        for map in ["C:/maps/a.vmf", "C:/maps/b.vmf", "C:\\MAPS\\A.vmf"] {
+            config.remember_map(Path::new(map));
+        }
+        assert_eq!(
+            config.recent_maps.len(),
+            2,
+            "the same map in another case or slash is one map"
+        );
+        assert!(config.recent_maps[0]
+            .to_string_lossy()
+            .to_lowercase()
+            .ends_with("a.vmf"));
         config.view.camera_speed = 500.0;
         config.save_to(&path).unwrap();
         assert_eq!(Config::load_from(&path), config);

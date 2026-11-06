@@ -44,10 +44,7 @@ fn main() -> eframe::Result {
     // eframe keeps the window's size and place and every panel's position and size in
     // %APPDATA%\<app id>\data. MALLET_PROFILE picks a separate store, so test copies do
     // not move your windows around.
-    let app_id = match std::env::var("MALLET_PROFILE") {
-        Ok(profile) if !profile.trim().is_empty() => format!("Mallet-{}", profile.trim()),
-        _ => "Mallet".to_owned(),
-    };
+    let app_id = config::app_folder();
     let options = eframe::NativeOptions {
         persist_window: true,
         viewport: egui::ViewportBuilder::default()

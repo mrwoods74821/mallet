@@ -388,6 +388,13 @@ pub fn definitions() -> Value {
             &[],
         ),
         tool(
+            "list_recent_maps",
+            "The maps opened or saved lately, the latest first, as File > Recent Maps lists them. Open one \
+             with open_map.",
+            json!({}),
+            &[],
+        ),
+        tool(
             "show_about",
             "Open or close Help > About Mallet.",
             json!({ "open": { "type": "boolean" } }),
@@ -940,6 +947,15 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
             } else {
                 "The texture browser is closed."
             }))
+        }
+        "list_recent_maps" => {
+            let maps: Vec<Value> = editor
+                .config
+                .recent_maps
+                .iter()
+                .map(|path| json!({ "path": path.display().to_string(), "exists": path.is_file() }))
+                .collect();
+            Ok(ToolResult::json(&json!({ "maps": maps })))
         }
         "show_about" => {
             editor.about_open = args.get("open").and_then(Value::as_bool).unwrap_or(true);

@@ -274,6 +274,7 @@ impl MalletApp {
         let mut save_as = false;
         let mut choose_game = false;
         let mut choose_fgds = false;
+        let mut recent = RecentChoice::None;
         let mut show_net_graph = editor.config.view.net_graph;
         let mut draw_distance = editor.config.view.draw_distance;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -284,6 +285,7 @@ impl MalletApp {
                 ui.menu_button("File", |ui| {
                     menu_item(ui, &self.keymap, "New", Action::NewFile, &mut chosen);
                     menu_item(ui, &self.keymap, "Open...", Action::OpenFile, &mut chosen);
+                    recent_maps_menu(ui, &editor.config.recent_maps, &mut recent);
                     menu_item(ui, &self.keymap, "Save", Action::SaveFile, &mut chosen);
                     menu_item(ui, &self.keymap, "Close Tab", Action::CloseTab, &mut chosen);
                     if ui.button("Save As...").clicked() {
@@ -370,6 +372,20 @@ impl MalletApp {
         }
         if choose_fgds {
             choose_fgd_files(editor);
+        }
+        match recent {
+            RecentChoice::None => {}
+            RecentChoice::Open(path) => {
+                let _ = editor.open_in_tab(&path);
+            }
+            RecentChoice::ForgetMissing => {
+                editor.config.recent_maps.retain(|path| path.is_file());
+                editor.save_config();
+            }
+            RecentChoice::Clear => {
+                editor.config.recent_maps.clear();
+                editor.save_config();
+            }
         }
         if show_net_graph != editor.config.view.net_graph || draw_distance != editor.config.view.draw_distance {
             editor.config.view.net_graph = show_net_graph;
@@ -988,6 +1004,60 @@ impl eframe::App for MalletApp {
             ctx.request_repaint();
         }
     }
+}
+
+/// What was picked in File > Recent Maps.
+enum RecentChoice {
+    None,
+    Open(PathBuf),
+    ForgetMissing,
+    Clear,
+}
+
+/// File > Recent Maps: the latest first, numbered like Hammer's, with the folder beside
+/// each name. Maps that no longer exist are greyed out.
+fn recent_maps_menu(ui: &mut egui::Ui, maps: &[PathBuf], choice: &mut RecentChoice) {
+    ui.add_enabled_ui(!maps.is_empty(), |ui| {
+        ui.menu_button("Recent Maps", |ui| {
+            let mut missing = false;
+            for (index, path) in maps.iter().enumerate() {
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |name| name.to_string_lossy().into_owned(),
+                );
+                let folder = path
+                    .parent()
+                    .map(|folder| folder.display().to_string())
+                    .unwrap_or_default();
+                let exists = path.is_file();
+                missing |= !exists;
+                let label = if index < 9 {
+                    format!("{}  {name}", index + 1)
+                } else {
+                    format!("    {name}")
+                };
+                let button = egui::Button::new(label).shortcut_text(folder);
+                let response = ui.add_enabled(exists, button);
+                if exists {
+                    if response.on_hover_text(path.display().to_string()).clicked() {
+                        *choice = RecentChoice::Open(path.clone());
+                        ui.close_menu();
+                    }
+                } else {
+                    response.on_disabled_hover_text(format!("{} no longer exists", path.display()));
+                }
+            }
+            ui.separator();
+            if missing && ui.button("Forget missing maps").clicked() {
+                *choice = RecentChoice::ForgetMissing;
+                ui.close_menu();
+            }
+            if ui.button("Clear the list").clicked() {
+                *choice = RecentChoice::Clear;
+                ui.close_menu();
+            }
+        });
+    });
 }
 
 /// Copies the viewport settings from Mallet Options onto the camera every frame, so

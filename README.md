@@ -48,6 +48,7 @@ These follow Hammer's defaults.
 | Keys | Action |
 | --- | --- |
 | Ctrl+N / Ctrl+O / Ctrl+S | New map tab / open in a tab / save (a new map asks where to save) |
+| File > Recent Maps | The 20 maps opened or saved last, the latest first |
 | Ctrl+W / Ctrl+Tab / Ctrl+Shift+Tab | Close tab (asks about unsaved changes) / next tab / previous tab |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Shift+S / Shift+B / Shift+E / Shift+A | Selection tool / Block tool / Entity tool / Texture application |

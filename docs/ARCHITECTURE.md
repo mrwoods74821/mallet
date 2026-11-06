@@ -268,6 +268,7 @@ Tools:
 | `compile_map` | Save and compile, returning at once or waiting up to `wait_seconds` |
 | `compile_status`, `cancel_compile` | Steps, progress, problems, leak and output of the compile |
 | `show_compile`, `show_options`, `show_about` | Open the compile window or Mallet Options on a tab, or Help > About |
+| `list_recent_maps` | The maps opened or saved lately, latest first |
 | `load_pointfile`, `clear_pointfile` | Show or hide a leak line |
 | `list_materials` | The game's materials, filtered, or the ones the map uses with counts |
 | `get_faces`, `select_faces`, `pick_face` | Brush faces: details, texture tool selection, and the face under a camera pixel |
