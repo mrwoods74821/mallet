@@ -128,7 +128,22 @@ pub struct Face {
 ///
 /// Each side's plane starts as a huge square and is clipped by every other plane, keeping
 /// the part inside the brush. Sides with degenerate planes or no remaining area are skipped.
+/// A brush whose planes do not enclose a volume would leave faces reaching the size of the
+/// starting square; such a brush is invalid and gets no faces at all.
 pub fn solid_faces(solid: &Solid) -> Vec<Face> {
+    let faces = clipped_faces(solid);
+    let open = faces
+        .iter()
+        .flat_map(|face| &face.vertices)
+        .any(|vertex| vertex.abs().max_element() >= MAX_EXTENT * 0.5);
+    if open {
+        Vec::new()
+    } else {
+        faces
+    }
+}
+
+fn clipped_faces(solid: &Solid) -> Vec<Face> {
     let planes: Vec<Option<Plane>> = solid
         .sides()
         .map(|side| Plane::from_points(side.plane))
