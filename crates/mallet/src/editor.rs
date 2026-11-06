@@ -127,7 +127,7 @@ pub enum ShotTarget {
 
 
 /// How long the parts of recent frames took, for finding slowdowns.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct FrameTimings {
     /// Time in the app's update for the latest frame.
     pub update_ms: f32,
@@ -137,6 +137,12 @@ pub struct FrameTimings {
     pub views_2d_ms: f32,
     /// CPU time of the whole previous frame, including egui's tessellation and painting.
     pub previous_frame_cpu_ms: f32,
+    /// Time between recent back-to-back frames: shortest, average and longest.
+    pub interval_min_ms: f32,
+    pub interval_average_ms: f32,
+    pub interval_max_ms: f32,
+    /// The latest frame intervals, oldest first, for spotting uneven frame pacing.
+    pub recent_intervals_ms: Vec<f32>,
 }
 
 /// Everything about the open map and how it is being viewed.
@@ -166,6 +172,8 @@ pub struct Editor {
     pub frames_drawn: u64,
     /// Where the time of recent frames went.
     pub timings: FrameTimings,
+    /// The graphics adapter and backend the window draws with.
+    pub gpu_info: String,
     /// Textures from the configured game, when one is set.
     pub materials: Option<Materials>,
     /// The GPU renderer for the textured camera view, created once the window has a GPU.
@@ -200,6 +208,7 @@ impl Default for Editor {
             input_queue: VecDeque::new(),
             frames_drawn: 0,
             timings: FrameTimings::default(),
+            gpu_info: String::new(),
             materials: None,
             gpu: None,
             last_block: DEFAULT_BLOCK,

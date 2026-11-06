@@ -162,6 +162,7 @@ pub fn definitions() -> Value {
                         "type": "object",
                         "properties": {
                             "key": { "type": "string" },
+                            "hold_frames": { "type": "integer", "minimum": 1, "description": "Frames to hold the key before releasing it; default 1." },
                             "click": vec2,
                             "drag": { "type": "array", "items": vec2, "minItems": 2, "maxItems": 2 },
                             "viewport": { "type": "string", "enum": ["camera", "top", "front", "side"] },
@@ -450,12 +451,19 @@ fn status_json(editor: &Editor) -> Value {
         "grid": editor.grid,
         "game_dir": editor.game_dir().map(|dir| dir.display().to_string()),
         "textured_3d": editor.gpu.is_some(),
+        "gpu": editor.gpu_info,
         "viewports": layout_json(editor),
         "timings_ms": {
             "update": editor.timings.update_ms,
             "camera": editor.timings.camera_ms,
             "views_2d": editor.timings.views_2d_ms,
             "previous_frame_cpu": editor.timings.previous_frame_cpu_ms,
+            "recent_frame_interval": {
+                "min": editor.timings.interval_min_ms,
+                "average": editor.timings.interval_average_ms,
+                "max": editor.timings.interval_max_ms,
+            },
+            "recent_intervals": editor.timings.recent_intervals_ms.iter().map(|ms| (ms * 100.0).round() / 100.0).collect::<Vec<_>>(),
         },
         "camera_culling": editor.gpu.as_ref().map(|gpu| json!({
             "chunks": gpu.stats.chunks,
@@ -493,7 +501,8 @@ fn input_action(editor: &Editor, action: &Value) -> Result<Vec<InputFrame>, Stri
     };
     let modifiers = input::parse_modifiers(&names)?;
     if let Some(key) = optional_string(action, "key")? {
-        return input::key_press(key, modifiers);
+        let frames = action.get("hold_frames").and_then(Value::as_u64).unwrap_or(1) as usize;
+        return input::key_press(key, modifiers, frames);
     }
     let button = input::parse_button(optional_string(action, "button")?.unwrap_or("primary"))?;
     let viewport = match string_arg(action, "viewport")? {

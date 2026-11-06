@@ -668,7 +668,18 @@ impl eframe::App for MalletApp {
         let mut editor = editor::lock(&shared);
         editor.timings.previous_frame_cpu_ms = frame.info().cpu_usage.map_or(0.0, |seconds| seconds * 1000.0);
         let interval = ctx.input(|input| input.unstable_dt);
+        if editor.gpu_info.is_empty() {
+            if let Some(render_state) = frame.wgpu_render_state() {
+                let info = render_state.adapter.get_info();
+                editor.gpu_info = format!("{} ({:?})", info.name, info.backend);
+            }
+        }
         self.net_graph.record(editor.timings.previous_frame_cpu_ms, interval);
+        let [min, average, max] = self.net_graph.interval_stats();
+        editor.timings.interval_min_ms = min;
+        editor.timings.interval_average_ms = average;
+        editor.timings.interval_max_ms = max;
+        editor.timings.recent_intervals_ms = self.net_graph.recent_intervals(40);
         self.handle_input(ctx, &mut editor);
         self.update_title(ctx, &editor);
         self.menu_bar(ctx, &mut editor);

@@ -50,6 +50,23 @@ impl NetGraph {
         }
     }
 
+    /// The most recent back-to-back frame intervals in milliseconds, oldest first.
+    pub fn recent_intervals(&self, count: usize) -> Vec<f32> {
+        let skip = self.intervals.len().saturating_sub(count);
+        self.intervals.iter().skip(skip).map(|seconds| seconds * 1000.0).collect()
+    }
+
+    /// Shortest, average and longest time between recent back-to-back frames, in
+    /// milliseconds.
+    pub fn interval_stats(&self) -> [f32; 3] {
+        if self.intervals.is_empty() {
+            return [0.0; 3];
+        }
+        let min = self.intervals.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = self.intervals.iter().copied().fold(0.0, f32::max);
+        [min * 1000.0, average(&self.intervals) * 1000.0, max * 1000.0]
+    }
+
     /// Draws the overlay in the bottom-right corner of `viewport`, straight over the scene
     /// with no background; a dark shadow keeps the text readable on bright textures.
     ///

@@ -46,8 +46,9 @@ pub fn parse_button(name: &str) -> Result<PointerButton, String> {
     }
 }
 
-/// A key press and release, such as `Enter` or `B`, using egui's key names.
-pub fn key_press(name: &str, modifiers: Modifiers) -> Result<Vec<InputFrame>, String> {
+/// A key press and release, such as `Enter` or `B`, using egui's key names. The key is
+/// held down for `frames` frames before it is released.
+pub fn key_press(name: &str, modifiers: Modifiers, frames: usize) -> Result<Vec<InputFrame>, String> {
     let key = Key::from_name(name).ok_or_else(|| format!("unknown key \"{name}\""))?;
     let event = |pressed| Event::Key {
         key,
@@ -56,10 +57,12 @@ pub fn key_press(name: &str, modifiers: Modifiers) -> Result<Vec<InputFrame>, St
         repeat: false,
         modifiers,
     };
-    Ok(vec![
-        InputFrame::new(modifiers, vec![event(true)]),
-        InputFrame::new(modifiers, vec![event(false)]),
-    ])
+    let mut sequence = vec![InputFrame::new(modifiers, vec![event(true)])];
+    for _ in 1..frames.max(1) {
+        sequence.push(InputFrame::new(modifiers, Vec::new()));
+    }
+    sequence.push(InputFrame::new(modifiers, vec![event(false)]));
+    Ok(sequence)
 }
 
 /// Moves the pointer to a screen position, presses and releases a button there.
