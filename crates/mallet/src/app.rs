@@ -247,7 +247,7 @@ impl MalletApp {
             return;
         }
         for action in triggered {
-            if action == Action::ClearSelection && editor.camera.mouse_look() {
+            if editor.camera.mouse_look() && (action == Action::ClearSelection || self.keymap.is_crouch_chord(action)) {
                 continue;
             }
             self.dispatch(action, editor);

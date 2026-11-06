@@ -48,6 +48,18 @@ pub enum Action {
     LookDown,
 }
 
+/// The actions that move or turn the 3D camera while their key is held.
+const MOVEMENT_ACTIONS: [Action; 8] = [
+    Action::MoveForward,
+    Action::MoveBack,
+    Action::StrafeLeft,
+    Action::StrafeRight,
+    Action::TurnLeft,
+    Action::TurnRight,
+    Action::LookUp,
+    Action::LookDown,
+];
+
 /// A key plus the exact modifiers that must be held with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Chord {
@@ -193,15 +205,29 @@ impl KeyMap {
         })
     }
 
-    /// Whether a movement action's key is held. Ctrl and Alt suppress it, and so does a
-    /// key in `blocked`: one that went down as part of a shortcut such as Ctrl+S, which
-    /// must not move the camera when Ctrl is let go first.
-    pub fn held(&self, input: &InputState, action: Action, blocked: &HashSet<Key>) -> bool {
-        !input.modifiers.ctrl
+    /// Whether a movement action's key is held. Alt suppresses it, Ctrl does too unless
+    /// `crouch` is set, and so does a key in `blocked`: one that went down as part of a
+    /// shortcut such as Ctrl+S, which must not move the camera when Ctrl is let go first.
+    pub fn held(&self, input: &InputState, action: Action, blocked: &HashSet<Key>, crouch: bool) -> bool {
+        (crouch || !input.modifiers.ctrl)
             && !input.modifiers.alt
             && self
                 .bindings
                 .iter()
                 .any(|(bound, chord)| *bound == action && input.key_down(chord.key) && !blocked.contains(&chord.key))
+    }
+
+    /// Whether an action is a Ctrl shortcut on a movement key, such as Ctrl+S. In
+    /// mouselook Ctrl is crouch, so these chords slow the camera instead of firing.
+    pub fn is_crouch_chord(&self, action: Action) -> bool {
+        self.chord(action)
+            .is_some_and(|chord| chord.ctrl && !chord.alt && self.is_movement_key(chord.key))
+    }
+
+    /// Whether a key is bound to moving or turning the 3D camera.
+    pub fn is_movement_key(&self, key: Key) -> bool {
+        self.bindings
+            .iter()
+            .any(|(action, chord)| chord.key == key && MOVEMENT_ACTIONS.contains(action))
     }
 }

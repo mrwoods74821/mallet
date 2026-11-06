@@ -23,6 +23,9 @@ const WHEEL_STEP: f64 = 64.0;
 const POINTS_PER_NOTCH: f64 = 50.0;
 /// How quickly the camera reaches its target speed, per second; higher is snappier.
 const ACCELERATION: f64 = 14.0;
+/// The share of the camera speed flown while crouching (Ctrl in mouselook), like
+/// Source's crouch speed.
+const CROUCH_SPEED_SCALE: f64 = 1.0 / 3.0;
 /// Below this speed, in units per second, a coasting camera stops.
 const STOP_SPEED: f64 = 1.0;
 /// The longest frame time used for movement, so a stalled frame cannot fling the camera.
@@ -59,7 +62,7 @@ pub struct Camera3D {
     recent_look: std::collections::VecDeque<egui::Vec2>,
     /// Frame time smoothed over recent frames; 0 until the first frame.
     frame_time: f64,
-    /// Keys pressed with Ctrl or Alt, which do not move the camera until released.
+    /// Keys pressed as part of a shortcut, which do not move the camera until released.
     shortcut_keys: HashSet<egui::Key>,
 }
 
@@ -146,6 +149,9 @@ impl Camera3D {
     /// movement arrives in the same bursts, so mouselook averages it over the last few
     /// frames, like Source's `m_filter`. The camera also eases towards the speed the keys
     /// ask for instead of jumping to it.
+    ///
+    /// In mouselook, holding Ctrl crouches: the camera flies at a third of its speed, and
+    /// Ctrl with a movement key moves instead of starting a shortcut.
     pub fn update(&mut self, ctx: &egui::Context, hovered: bool, keymap: &KeyMap) -> bool {
         // Watch every key event, even while another view is hovered, so a shortcut's key
         // never turns into movement later.
@@ -161,7 +167,9 @@ impl Camera3D {
                 {
                     if !pressed {
                         self.shortcut_keys.remove(key);
-                    } else if modifiers.ctrl || modifiers.alt || modifiers.command {
+                    } else if modifiers.alt
+                        || ((modifiers.ctrl || modifiers.command) && !(self.mouse_look && keymap.is_movement_key(*key)))
+                    {
                         self.shortcut_keys.insert(*key);
                     }
                 }
@@ -181,7 +189,9 @@ impl Camera3D {
         }
 
         let mut active = self.mouse_look;
+        let looking = self.mouse_look;
         ctx.input(|input| {
+            let crouching = looking && input.modifiers.ctrl;
             let measured = f64::from(input.unstable_dt);
             if self.frame_time == 0.0 {
                 self.frame_time = measured.clamp(0.001, MAX_FRAME_SECONDS);
@@ -212,7 +222,7 @@ impl Camera3D {
             }
 
             let turn = |positive: Action, negative: Action| {
-                let held = |action| f64::from(u8::from(keymap.held(input, action, &self.shortcut_keys)));
+                let held = |action| f64::from(u8::from(keymap.held(input, action, &self.shortcut_keys, looking)));
                 held(positive) - held(negative)
             };
             let yaw_input = turn(Action::TurnLeft, Action::TurnRight);
@@ -226,7 +236,12 @@ impl Camera3D {
             let mut wish = DVec3::ZERO;
             wish += forward * turn(Action::MoveForward, Action::MoveBack);
             wish += right * turn(Action::StrafeRight, Action::StrafeLeft);
-            let target = wish.normalize_or_zero() * self.move_speed;
+            let speed = if crouching {
+                self.move_speed * CROUCH_SPEED_SCALE
+            } else {
+                self.move_speed
+            };
+            let target = wish.normalize_or_zero() * speed;
             self.velocity += (target - self.velocity) * (ACCELERATION * dt).min(1.0);
             if target == DVec3::ZERO && self.velocity.length() < STOP_SPEED {
                 self.velocity = DVec3::ZERO;
