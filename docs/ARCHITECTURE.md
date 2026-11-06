@@ -47,6 +47,22 @@ brush picks nothing. 3D clicks cast a ray against each brush's planes, skipping 
 the camera is inside; in mouselook the ray goes through the crosshair. The camera smooths
 raw mouse movement over two frames and eases its speed, using real frame times.
 
+## Map tabs
+
+Several maps can be open at once, one per tab. The active tab's map state (document and
+undo history, scene, views, camera, selection, tool previews) lives directly in `Editor`,
+so all other code only ever deals with one map; switching tabs parks that state in a
+`MapState` and moves the other tab's state in. Settings, the game's materials and the GPU
+renderer are shared, so textures load once for every tab. GPU caches are keyed by the
+scene's generation numbers, which are unique across tabs, so a switch simply redraws.
+
+## Window layout
+
+The chrome around the viewports lives in `app/chrome.rs`, laid out like Hammer++: an icon
+toolbar (Phosphor icons) under the menus, the tab strip, the tool palette on the left and
+the object panel on the right. Keyboard shortcuts are ignored while a text field has
+focus.
+
 ## Shared editor state
 
 `Editor` (in `crates/mallet/src/editor.rs`) owns the open document, the wireframe scene,
@@ -132,7 +148,8 @@ Tools:
 | --- | --- |
 | `get_status` | Open map, counts, bounds, grid, camera, 2D views, undo/redo state |
 | `set_game_dir` | Mount a game's content for textures and remember it |
-| `new_map`, `open_map`, `save_map` | Start an empty map, load a VMF, save in place or to a new path |
+| `new_map`, `open_map`, `save_map` | Start an empty map or load a VMF in a new tab; save in place or to a new path |
+| `list_tabs`, `switch_tab`, `close_tab` | Work with the open map tabs; closing unsaved work needs `discard` |
 | `list_entities`, `get_entity` | Browse entities, filtered by classname (`trigger_*` prefix match) |
 | `set_entity_key`, `remove_entity_key` | Undoable key edits |
 | `get_selection`, `select`, `clear_selection` | Read or change the selection the window shows |

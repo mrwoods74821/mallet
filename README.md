@@ -21,13 +21,22 @@ libraries; choose another with Tools > Game Folder... (the folder that contains
 Without a path it starts with a new, empty map, like Hammer. You can also open a map with
 File > Open or by dropping a `.vmf` onto the window.
 
+## Layout
+
+The window follows Hammer++: menus with an icon toolbar underneath, browser-style map
+tabs, the tool palette on the left, the four viewports, and an object panel on the right
+with the selection mode, current texture and selection details. Tools that are not built
+yet are shown greyed out. Each tab is its own map with its own views, camera, selection
+and undo history; a dot marks unsaved changes.
+
 ## Controls
 
 These follow Hammer's defaults.
 
 | Keys | Action |
 | --- | --- |
-| Ctrl+N / Ctrl+O / Ctrl+S | New map / open / save (a new map asks where to save) |
+| Ctrl+N / Ctrl+O / Ctrl+S | New map tab / open in a tab / save (a new map asks where to save) |
+| Ctrl+W / Ctrl+Tab / Ctrl+Shift+Tab | Close tab (asks about unsaved changes) / next tab / previous tab |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Shift+S / Shift+B | Selection tool / Block tool |
 | Click | In 2D, click a brush's centre × or its outline to select it; in 3D, click it (or aim the crosshair at it in mouselook). Entities are selected whole; Ctrl+click toggles |
