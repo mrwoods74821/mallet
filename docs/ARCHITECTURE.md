@@ -10,6 +10,7 @@ maps through a built-in MCP server.
 | --- | --- |
 | `mallet-kv` | Reads and writes Valve KeyValues text. Keeps every key, block and duplicate in order and writes Hammer's exact layout (tabs, CRLF). |
 | `mallet-vmf` | Typed VMF model on top of `mallet-kv`, brush geometry, and the edit/undo layer. No UI dependencies. |
+| `mallet-content` | Game content: `gameinfo.txt` search paths, VPK archives, VMT materials and VTF textures. |
 | `mallet` | The editor application: window, viewports, key bindings and the MCP server. |
 
 ## Lossless loading and saving
@@ -54,14 +55,32 @@ the camera, the 2D views and the grid. It sits behind a mutex shared by:
 Tool calls therefore never wait for a frame. They keep working while the window is covered
 or minimized, because Windows sends no repaints to a minimized window.
 
+## Game content
+
+`GameFs` mounts the `game` search paths of a game's `gameinfo.txt` in priority order:
+loose folders, `folder/*` wildcards such as GMod's addons, and VPK archives (only their
+directory trees are read up front). `Materials` turns a material name into the texture
+Hammer shows: `%tooltexture` first, then `$basetexture`, following `patch` materials. VTF
+images are decoded at the largest mip level no bigger than 512 pixels, and loading runs on
+every CPU core. Materials that cannot be found render as Hammer's pink and black checkers.
+
 ## Drawing
 
-Viewports draw through the small `Canvas` trait. On screen it wraps an egui painter;
+The 2D viewports draw through the small `Canvas` trait. On screen it wraps an egui painter;
 for screenshots it wraps a tiny-skia image. Both use the same viewport code, so a
 screenshot matches what the window shows, apart from viewport labels.
 
-The 3D view is a CPU wireframe for now. Textured rendering, lighting preview and model
-display will move it to wgpu.
+The camera viewport is drawn by `Renderer3D` with wgpu, using the device eframe already
+created. It renders into its own colour and depth textures: the window shows that image
+through egui, and MCP screenshots read the same image back, so they match exactly and work
+while the window is minimized. Faces are fanned into triangles with Source's texture
+coordinates (`point · axis / scale + offset`, divided by the texture size) and shaded by
+direction like Hammer's textured mode. Unselected geometry is cached until the scene's
+`generation` changes; selected geometry, red outlines and tool previews are rebuilt each
+frame so drags show live. Without a GPU the camera falls back to a CPU wireframe.
+
+Brushes whose planes do not enclose a volume are skipped, as Hammer's Check Problems would
+report them.
 
 ## MCP server
 
@@ -81,6 +100,7 @@ Tools:
 | Tool | What it does |
 | --- | --- |
 | `get_status` | Open map, counts, bounds, grid, camera, 2D views, undo/redo state |
+| `set_game_dir` | Mount a game's content for textures and remember it |
 | `new_map`, `open_map`, `save_map` | Start an empty map, load a VMF, save in place or to a new path |
 | `list_entities`, `get_entity` | Browse entities, filtered by classname (`trigger_*` prefix match) |
 | `set_entity_key`, `remove_entity_key` | Undoable key edits |
@@ -109,7 +129,8 @@ make any map change through `Editor::apply_edit` so it stays undoable.
 
 1. Rotate handles, texture application, and entity creation,
    all as `Edit`s with matching MCP tools.
-2. Game configuration, VPK mounting, VMT/VTF materials and MDL models in the 3D view (wgpu).
+2. MDL models for prop entities, a texture browser, and streaming texture loads so the
+   first frame of a large map does not wait for every texture.
 3. Clip, vertex and displacement tools.
 4. Lighting: a real-time preview first, then a bake through VRAD with lightmaps read back.
 5. Entity I/O editor, instances, VisGroups and Check Problems.

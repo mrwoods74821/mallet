@@ -13,6 +13,11 @@ lets AI agents inspect the map, edit entities and take viewport screenshots.
 cargo run --release -p mallet -- path/to/map.vmf
 ```
 
+The 3D view shows textures from a Source game. On first start Mallet looks for Garry's
+Mod, Half-Life 2, the Source SDK Base 2013 games or Counter-Strike: Source in your Steam
+libraries; choose another with Tools > Game Folder... (the folder that contains
+`gameinfo.txt`). The choice is saved in `%APPDATA%\Mallet\config.json`.
+
 Without a path it starts with a new, empty map, like Hammer. You can also open a map with
 File > Open or by dropping a `.vmf` onto the window.
 
