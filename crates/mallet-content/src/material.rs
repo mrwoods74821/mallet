@@ -51,8 +51,15 @@ impl Material {
 /// Loads and caches materials from a game's files.
 #[derive(Debug)]
 pub struct Materials {
-    filesystem: GameFs,
+    loader: MaterialLoader,
     cache: HashMap<String, Material>,
+}
+
+/// Loads materials without caching. Cheap to clone and safe to send to worker threads,
+/// so textures can stream in the background.
+#[derive(Debug, Clone)]
+pub struct MaterialLoader {
+    filesystem: Arc<GameFs>,
 }
 
 /// Material keys that matter to the editor, collected from a VMT and the materials it
@@ -108,13 +115,20 @@ impl Properties {
 impl Materials {
     pub fn new(filesystem: GameFs) -> Self {
         Self {
-            filesystem,
+            loader: MaterialLoader {
+                filesystem: Arc::new(filesystem),
+            },
             cache: HashMap::new(),
         }
     }
 
     pub fn filesystem(&self) -> &GameFs {
-        &self.filesystem
+        &self.loader.filesystem
+    }
+
+    /// A loader for worker threads, sharing this game's mounted files.
+    pub fn loader(&self) -> MaterialLoader {
+        self.loader.clone()
     }
 
     /// The texture Hammer shows for a material such as `TOOLS/TOOLSNODRAW`, or `None`
@@ -130,7 +144,7 @@ impl Materials {
         let mut missing: Vec<&String> = keys.iter().filter(|key| !self.cache.contains_key(*key)).collect();
         missing.sort();
         missing.dedup();
-        let loaded = parallel_map(&missing, |key| self.load(key));
+        let loaded = parallel_map(&missing, |key| self.loader.load(key));
         for (key, material) in missing.into_iter().zip(loaded) {
             self.cache.insert(key.clone(), material);
         }
@@ -139,8 +153,13 @@ impl Materials {
             .collect()
     }
 
-    fn load(&self, key: &str) -> Material {
-        let Some(properties) = self.properties(key, 0) else {
+}
+
+impl MaterialLoader {
+    /// Loads a material such as `TOOLS/TOOLSNODRAW`: its texture and alpha mode.
+    pub fn load(&self, material: &str) -> Material {
+        let key = material_key(material);
+        let Some(properties) = self.properties(&key, 0) else {
             return Material::missing();
         };
         let texture = properties
