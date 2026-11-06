@@ -32,7 +32,9 @@ mutating the map directly.
 Edits that add brushes or entities carry them with ids already assigned by
 `IdAllocator`, which starts above every id in the map, including ids inside blocks kept
 verbatim. Moving a brush shifts its texture offsets so textures stay locked to it, and
-moves a displacement's start position with it.
+moves a displacement's start position with it. Resizing (`Edit::Rescale`) maps every plane
+point from the old bounding box to the new one; its undo is `Edit::ReplaceSolids` holding
+the original brushes, so undo is exact instead of scaling back with rounding errors.
 
 ## Selection
 
@@ -84,6 +86,7 @@ Tools:
 | `set_entity_key`, `remove_entity_key` | Undoable key edits |
 | `get_selection`, `select`, `clear_selection` | Read or change the selection the window shows |
 | `move_selection`, `clone_selection`, `delete_selection` | Undoable selection edits; moves keep textures locked |
+| `resize_selection` | Stretch the selection to a new bounding box, like dragging its handles |
 | `create_block` | Box brush between two corners, like the Block tool |
 | `undo`, `redo` | Step the shared history |
 | `set_grid`, `center_views` | Grid size and framing |
@@ -104,7 +107,7 @@ make any map change through `Editor::apply_edit` so it stays undoable.
 
 ## Roadmap
 
-1. Selection handles for resizing and rotating, texture application, and entity creation,
+1. Rotate handles, texture application, and entity creation,
    all as `Edit`s with matching MCP tools.
 2. Game configuration, VPK mounting, VMT/VTF materials and MDL models in the 3D view (wgpu).
 3. Clip, vertex and displacement tools.

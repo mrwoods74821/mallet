@@ -27,8 +27,9 @@ These follow Hammer's defaults.
 | Shift+S / Shift+B | Selection tool / Block tool |
 | Click | Select a world brush or a whole entity (Ctrl+click toggles) |
 | Drag on empty space | Select everything fully inside the rectangle (Ctrl adds) |
-| Drag the selection | Move it on the grid, with texture lock; hold Shift on release to clone |
-| Drag with the Block tool, then Enter | Create a box brush; its depth matches the last block |
+| Drag the selection | Move it so its corner snaps to the grid, with texture lock; hold Shift on release to clone |
+| Drag a white handle | Resize the selection or the pending block from that edge or corner |
+| Drag with the Block tool, then Enter | Create a box brush; drag inside it to move it, drag handles in any view to resize it (its depth starts from the last block) |
 | Delete / Escape / Ctrl+A | Delete selection / deselect or cancel the block / select all |
 | `[` / `]` | Smaller / larger grid |
 | Ctrl+E / Ctrl+Shift+E | Centre 2D views / 3D view on the map |
