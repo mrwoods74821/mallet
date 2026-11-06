@@ -33,8 +33,6 @@ use crate::view2d::{Axis2D, Handle, View2D};
 use crate::view3d::Camera3D;
 use crate::{mcp, tools};
 
-/// Port the MCP server listens on unless `MALLET_MCP_PORT` says otherwise.
-const DEFAULT_MCP_PORT: u16 = 7414;
 /// How close, in pixels, a 2D click has to be to a brush's outline to pick it.
 const PICK_TOLERANCE_PIXELS: f64 = 4.0;
 /// How long `send_input` waits for the window to handle its input.
@@ -185,18 +183,13 @@ impl MalletApp {
     }
 
     fn start_mcp(&mut self, ctx: &egui::Context) {
-        let setting = std::env::var("MALLET_MCP_PORT").ok();
-        let port = match setting.as_deref().map(str::trim) {
-            None | Some("") => DEFAULT_MCP_PORT,
-            Some("off") => return,
-            Some(value) => match value.parse() {
-                Ok(0) => return,
-                Ok(port) => port,
-                Err(_) => {
-                    editor::lock(&self.editor).message = format!("MALLET_MCP_PORT \"{value}\" is not a port number");
-                    return;
-                }
-            },
+        let port = match mcp::configured_port() {
+            Ok(Some(port)) => port,
+            Ok(None) => return,
+            Err(message) => {
+                editor::lock(&self.editor).message = message;
+                return;
+            }
         };
         let shared = Arc::clone(&self.editor);
         let ctx = ctx.clone();
@@ -209,6 +202,12 @@ impl MalletApp {
             }
             let result = tools::run(&mut editor::lock(&shared), name, arguments);
             ctx.request_repaint();
+            // A map handed over by a second copy, opened from Explorer: come to the front.
+            let focus = arguments.get("focus").and_then(serde_json::Value::as_bool) == Some(true);
+            if name == "open_map" && focus {
+                ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(ViewportCommand::Focus);
+            }
             if name == "compile_map" && !result.is_error {
                 let wait = arguments
                     .get("wait_seconds")
@@ -1413,16 +1412,19 @@ fn run(action: Action, editor: &mut Editor) {
     }
 }
 
-/// File > Save As. The map's own format is offered first (Mallet's for a new map), and
-/// the other one beside it, so saving a VMF as a `.mallet` map is a pick away.
+/// File > Save As. The map's own format is offered first (for a new map, the one chosen
+/// in Mallet Options > Files), and the other one beside it, so saving a VMF as a `.mallet`
+/// map is a pick away.
 fn save_as_dialog(editor: &mut Editor) {
     let Some(document) = &editor.document else {
         return;
     };
     let format = if document.path.is_some() {
         document.format()
-    } else {
+    } else if editor.config.files.new_maps_as_mallet {
         MapFormat::Mallet
+    } else {
+        MapFormat::Vmf
     };
     if let Some(path) = map_save_dialog(&document.file_name(), format, "Save As") {
         let _ = editor.save(Some(path));

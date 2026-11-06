@@ -12,9 +12,11 @@ use crate::compile::default_presets;
 use crate::config::{self, ToolKind};
 use crate::editor::Editor;
 use crate::keymap::KeyMap;
+use crate::shell;
 
 const GOOD: Color32 = Color32::from_rgb(90, 190, 110);
 const ERROR: Color32 = Color32::from_rgb(235, 90, 80);
+const WARNING: Color32 = Color32::from_rgb(230, 180, 70);
 const MUTED: Color32 = Color32::from_gray(140);
 const SECTION_WIDTH: f32 = 170.0;
 
@@ -25,16 +27,18 @@ pub(super) enum Section {
     Tools,
     Compiling,
     Viewports,
+    Files,
     Keyboard,
     Agents,
 }
 
 impl Section {
-    const ALL: [Section; 6] = [
+    const ALL: [Section; 7] = [
         Section::Game,
         Section::Tools,
         Section::Compiling,
         Section::Viewports,
+        Section::Files,
         Section::Keyboard,
         Section::Agents,
     ];
@@ -45,6 +49,7 @@ impl Section {
             Section::Tools => (icon::WRENCH, "Compile tools"),
             Section::Compiling => (icon::HAMMER, "Compiling"),
             Section::Viewports => (icon::MONITOR, "Viewports"),
+            Section::Files => (icon::FILES, "Files"),
             Section::Keyboard => (icon::KEYBOARD, "Keyboard"),
             Section::Agents => (icon::ROBOT, "AI agents"),
         };
@@ -57,6 +62,7 @@ impl Section {
             "tools" => Section::Tools,
             "compiling" => Section::Compiling,
             "viewports" => Section::Viewports,
+            "files" => Section::Files,
             "keyboard" => Section::Keyboard,
             "agents" => Section::Agents,
             _ => return None,
@@ -131,6 +137,7 @@ impl MalletApp {
                                     Section::Tools => tools_section(ui, editor, content, &mut state.dirty),
                                     Section::Compiling => compiling_section(ui, editor, &mut state.dirty),
                                     Section::Viewports => viewports_section(ui, editor, &mut state.dirty),
+                                    Section::Files => files_section(ui, editor, &mut state.dirty),
                                     Section::Keyboard => keyboard_section(ui, keymap),
                                     Section::Agents => agents_section(ui, mcp_url.as_deref()),
                                 });
@@ -544,6 +551,114 @@ fn viewports_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
         *view = config::ViewOptions::default();
         *dirty = true;
     }
+}
+
+fn files_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
+    heading(
+        ui,
+        "Files",
+        "Maps can be saved as VMF, which Hammer and the compilers read, or as .mallet, Mallet's own format: \
+         the same map, about a tenth of the size and several times faster to open and save.",
+    );
+    ui.label("Save new maps as");
+    ui.horizontal(|ui| {
+        let files = &mut editor.config.files;
+        *dirty |= ui
+            .radio_value(&mut files.new_maps_as_mallet, true, ".mallet (Mallet Map)")
+            .changed();
+        *dirty |= ui
+            .radio_value(&mut files.new_maps_as_mallet, false, ".vmf (Valve Map File)")
+            .changed();
+    });
+    ui.label(
+        RichText::new("Save As still offers both. Compiling a .mallet map writes a VMF copy for the compilers.")
+            .color(MUTED),
+    );
+
+    ui.add_space(14.0);
+    ui.strong("Windows file types");
+    ui.label(
+        RichText::new(
+            "For your Windows account only; nothing else changes. While Mallet runs, opening a map from \
+             Explorer adds it as a tab instead of starting another Mallet.",
+        )
+        .color(MUTED),
+    );
+    ui.add_space(4.0);
+    let types = shell::file_types();
+    let mallet = file_type_row(
+        ui,
+        "Open .mallet maps in Mallet",
+        "Double-clicking a .mallet file opens it here, and Explorer shows Mallet's icon for it.",
+        &types.mallet,
+    );
+    let vmf = file_type_row(
+        ui,
+        "Mallet in \"Open with\" for VMF files",
+        "Right-click a VMF and choose Open with > Mallet. Hammer stays the program VMF files open in.",
+        &types.vmf_open_with,
+    );
+    let result = match (mallet, vmf) {
+        (Some(true), _) => Some(shell::register_mallet()),
+        (Some(false), _) => Some(shell::unregister_mallet()),
+        (_, Some(true)) => Some(shell::add_vmf_open_with()),
+        (_, Some(false)) => Some(shell::remove_vmf_open_with()),
+        (None, None) => None,
+    };
+    match result {
+        Some(Ok(())) => editor.message = "Updated the Windows file types".to_owned(),
+        Some(Err(error)) => editor.message = format!("Could not update the Windows file types: {error}"),
+        None => {}
+    }
+}
+
+/// One file type: whether it is set up, and a button to set it up or undo it. Returns
+/// `Some(true)` to set it up for this copy of Mallet, `Some(false)` to undo it.
+fn file_type_row(ui: &mut egui::Ui, title: &str, note: &str, state: &shell::Registration) -> Option<bool> {
+    let mut choice = None;
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let (glyph, color, text) = match state {
+            shell::Registration::ThisCopy => (icon::CHECK_CIRCLE, GOOD, "On".to_owned()),
+            shell::Registration::OtherCopy(path) => {
+                (icon::WARNING_CIRCLE, WARNING, format!("Set up for {}", path.display()))
+            }
+            shell::Registration::No => (icon::CIRCLE, MUTED, "Off".to_owned()),
+        };
+        ui.label(RichText::new(glyph).color(color));
+        ui.strong(title);
+        ui.label(RichText::new(text).color(color));
+    });
+    ui.label(RichText::new(note).color(MUTED));
+    ui.horizontal(|ui| match state {
+        shell::Registration::ThisCopy => {
+            if ui.button("Turn off").clicked() {
+                choice = Some(false);
+            }
+        }
+        shell::Registration::OtherCopy(_) => {
+            if ui
+                .button("Use this copy of Mallet")
+                .on_hover_text(
+                    std::env::current_exe()
+                        .map(|exe| exe.display().to_string())
+                        .unwrap_or_default(),
+                )
+                .clicked()
+            {
+                choice = Some(true);
+            }
+            if ui.button("Turn off").clicked() {
+                choice = Some(false);
+            }
+        }
+        shell::Registration::No => {
+            if ui.button("Turn on").clicked() {
+                choice = Some(true);
+            }
+        }
+    });
+    choice
 }
 
 fn keyboard_section(ui: &mut egui::Ui, keymap: &KeyMap) {

@@ -32,6 +32,24 @@ pub struct Config {
     pub tools: ToolPaths,
     pub compile: CompileOptions,
     pub view: ViewOptions,
+    pub files: FileOptions,
+}
+
+/// How maps are saved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileOptions {
+    /// Save As offers Mallet's own `.mallet` format first for a map that has never been
+    /// saved; when off, it offers VMF first.
+    pub new_maps_as_mallet: bool,
+}
+
+impl Default for FileOptions {
+    fn default() -> Self {
+        Self {
+            new_maps_as_mallet: true,
+        }
+    }
 }
 
 /// Programs chosen in Mallet Options. `None` means "find it automatically".

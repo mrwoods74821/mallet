@@ -46,6 +46,12 @@ compiling a `.mallet` map first writes a VMF copy to a `mallet_compile` folder b
 the BSP and logs end up there too. The layout is described in
 [crates/mallet-format](crates/mallet-format/src/lib.rs).
 
+Edit > Mallet Options > Files chooses the format Save As offers first for new maps, and
+sets up Windows for your account: `.mallet` files open in Mallet with its icon, and VMF
+files can list Mallet under "Open with" while Hammer stays their default. Opening a map
+from Explorer while Mallet runs adds it as a tab in that window instead of starting a
+second Mallet, as Hammer does.
+
 ## Layout
 
 The window follows Hammer++: menus with an icon toolbar underneath, browser-style map
@@ -136,7 +142,8 @@ folder and FGD files, the compile programs (VBSP, VVIS, VRAD, VBSPInfo, BSPZip,
 SourceCubemap and the game, each found automatically, with a menu of every copy found,
 including 64-bit and Hammer++ builds), how compiles run, the viewports (draw distance,
 field of view, camera speed, mouselook sensitivity, default grid, how far the mouse wheel
-scrolls the texture browser), the key bindings and the MCP server address. Settings are
+scrolls the texture browser), map files and Windows file types, the key bindings and the
+MCP server address. Settings are
 saved in `%APPDATA%\Mallet\config.json`.
 
 Where you leave the main window and every panel (Face Edit, the texture browser, Compile,

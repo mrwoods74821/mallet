@@ -93,6 +93,24 @@ impl<F: Fn(&str, &Value) -> ToolResult + Send + 'static> ToolHandler for F {}
 /// Starts the server on a background thread and returns its endpoint URL.
 ///
 /// `tools` is the JSON array returned from `tools/list`; `handler` runs each tool call.
+/// The port the server listens on unless `MALLET_MCP_PORT` says otherwise.
+pub const DEFAULT_PORT: u16 = 7414;
+
+/// The port from `MALLET_MCP_PORT`, or the default; `None` when it is 0 or `off`, which
+/// turns the server off.
+pub fn configured_port() -> Result<Option<u16>, String> {
+    let setting = std::env::var("MALLET_MCP_PORT").ok();
+    match setting.as_deref().map(str::trim) {
+        None | Some("") => Ok(Some(DEFAULT_PORT)),
+        Some("off") => Ok(None),
+        Some(value) => match value.parse() {
+            Ok(0) => Ok(None),
+            Ok(port) => Ok(Some(port)),
+            Err(_) => Err(format!("MALLET_MCP_PORT \"{value}\" is not a port number")),
+        },
+    }
+}
+
 pub fn start(port: u16, tools: Value, handler: impl ToolHandler) -> io::Result<String> {
     let server = Server::http(("127.0.0.1", port)).map_err(io::Error::other)?;
     thread::Builder::new().name("mcp".to_owned()).spawn(move || {

@@ -60,6 +60,15 @@ The compilers read VMF only. For a `.mallet` map, `Editor::compile_context` poin
 compile at `mallet_compile/<name>.vmf` beside the map, and `start_compile` writes that copy
 of the map as it is, saved or not, before the first step.
 
+`shell.rs` sets up the Windows file types from Mallet Options > Files, for the current
+user only (`HKEY_CURRENT_USER\Software\Classes`, no administrator rights): `.mallet` points
+at the `Mallet.Map` program id, and `Mallet.Vmf` is added to `.vmf\OpenWithProgids` so the
+default program for VMF files is left alone. Both open `"<mallet.exe>" "%1"`. When Mallet
+starts with a map, `handoff.rs` first offers it to a Mallet already listening on the MCP
+port (`open_map` with `focus`, after `AllowSetForegroundWindow` so that copy may come to
+the front) and exits if one takes it, so double-clicking maps fills tabs of one window.
+Copies with their own `MALLET_MCP_PORT` stay apart.
+
 ## Edits and undo
 
 Every change to a map is an `Edit` (`mallet_vmf::edit`). Applying an edit returns its
@@ -277,7 +286,7 @@ Tools:
 | --- | --- |
 | `get_status` | Open map, counts, bounds, grid, camera, 2D views, undo/redo state |
 | `set_game_dir` | Mount a game's content for textures and remember it |
-| `new_map`, `open_map`, `save_map` | Start an empty map or load a VMF or `.mallet` map in a new tab; save in place or to a new path, the extension picking the format |
+| `new_map`, `open_map`, `save_map` | Start an empty map or load a VMF or `.mallet` map in a new tab (`focus` also brings the window to the front); save in place or to a new path, the extension picking the format |
 | `export_map` | Write a copy of the map in either format without switching to it |
 | `list_tabs`, `switch_tab`, `close_tab` | Work with the open map tabs; closing unsaved work needs `discard` |
 | `list_entities`, `get_entity` | Browse entities, filtered by classname (`trigger_*` prefix match) |

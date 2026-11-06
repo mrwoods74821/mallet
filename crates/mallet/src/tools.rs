@@ -55,7 +55,10 @@ pub fn definitions() -> Value {
             "open_map",
             "Open a map, a .vmf or a .mallet file, in a new tab and switch to it. An untouched empty map in \
              the current tab is replaced instead.",
-            json!({ "path": { "type": "string", "description": "Absolute path to the .vmf or .mallet file." } }),
+            json!({
+                "path": { "type": "string", "description": "Absolute path to the .vmf or .mallet file." },
+                "focus": { "type": "boolean", "description": "Also bring the Mallet window to the front; default false." }
+            }),
             &["path"],
         ),
         tool(
@@ -316,7 +319,7 @@ pub fn definitions() -> Value {
             "Open or close Mallet Options, optionally on a section.",
             json!({
                 "open": { "type": "boolean" },
-                "section": { "type": "string", "enum": ["game", "tools", "compiling", "viewports", "keyboard", "agents"] }
+                "section": { "type": "string", "enum": ["game", "tools", "compiling", "viewports", "files", "keyboard", "agents"] }
             }),
             &[],
         ),

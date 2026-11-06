@@ -1,7 +1,8 @@
 //! Mallet: a Hammer-style level editor for Source engine VMF maps.
 //!
 //! Pass a `.vmf` or `.mallet` path as the first argument to open it on start, or drop one onto
-//! the window.
+//! the window. When Mallet is already running, a map passed this way opens in a tab of that
+//! Mallet instead, which is what double-clicking a map in Explorer does.
 //! AI agents can drive the editor through its MCP server; see `mcp`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -14,6 +15,7 @@ mod config;
 mod document;
 mod editor;
 mod faces;
+mod handoff;
 mod input;
 mod keymap;
 mod mcp;
@@ -21,6 +23,7 @@ mod netgraph;
 mod properties;
 mod render3d;
 mod scene;
+mod shell;
 mod tools;
 mod view2d;
 mod view3d;
@@ -31,6 +34,12 @@ use eframe::egui;
 
 fn main() -> eframe::Result {
     let path = std::env::args_os().nth(1).map(PathBuf::from);
+    // A map opened from Explorer while Mallet runs goes to that Mallet, as in Hammer.
+    if let (Some(path), Ok(Some(port))) = (&path, mcp::configured_port()) {
+        if handoff::hand_off(path, port) {
+            return Ok(());
+        }
+    }
     let present_mode = match std::env::var("MALLET_PRESENT").as_deref() {
         Ok("fifo") => eframe::wgpu::PresentMode::Fifo,
         Ok("mailbox") => eframe::wgpu::PresentMode::Mailbox,
