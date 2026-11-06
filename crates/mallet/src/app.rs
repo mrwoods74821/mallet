@@ -1,4 +1,7 @@
-//! Top-level editor window: menu bar, tool bar, status bar and Hammer's four-viewport layout.
+//! Top-level editor window: menus, Hammer's four-viewport layout and the status bar. The
+//! toolbar, map tabs, tool palette and side panel are in `chrome`.
+
+mod chrome;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -30,8 +33,11 @@ const PICK_TOLERANCE_PIXELS: f64 = 4.0;
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 15] = [
+const KEY_ACTIONS: [Action; 18] = [
     Action::NewFile,
+    Action::CloseTab,
+    Action::NextTab,
+    Action::PreviousTab,
     Action::OpenFile,
     Action::SaveFile,
     Action::Undo,
@@ -98,6 +104,10 @@ pub struct MalletApp {
     slot_textures: [Option<egui::TextureId>; 4],
     /// Where the cursor was when mouselook started, to put it back afterwards.
     look_return: Option<Pos2>,
+    /// The tab whose "unsaved changes" question is showing.
+    closing: Option<usize>,
+    /// Material previews for the side panel.
+    texture_previews: chrome::TexturePreviews,
     /// Frame timing overlay in the camera viewport's bottom-right corner.
     net_graph: NetGraph,
     show_net_graph: bool,
@@ -118,9 +128,14 @@ impl MalletApp {
             drag: None,
             slot_textures: [None; 4],
             look_return: None,
+            closing: None,
+            texture_previews: chrome::TexturePreviews::new(),
             net_graph: NetGraph::default(),
             show_net_graph: true,
         };
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        cc.egui_ctx.set_fonts(fonts);
         app.start_mcp(&cc.egui_ctx);
         let mut editor = editor::lock(&app.editor);
         load_game_content(&mut editor);
@@ -172,15 +187,18 @@ impl MalletApp {
                 .filter(|action| keymap.pressed(input, *action))
                 .collect::<Vec<_>>()
         });
+        if ctx.wants_keyboard_input() {
+            return;
+        }
         for action in triggered {
             if action == Action::ClearSelection && editor.camera.mouse_look() {
                 continue;
             }
-            run(action, editor);
+            self.dispatch(action, editor);
         }
         let dropped = ctx.input(|input| input.raw.dropped_files.iter().find_map(|file| file.path.clone()));
         if let Some(path) = dropped {
-            let _ = editor.open(&path);
+            let _ = editor.open_in_tab(&path);
         }
     }
 
@@ -206,6 +224,7 @@ impl MalletApp {
                     menu_item(ui, &self.keymap, "New", Action::NewFile, &mut chosen);
                     menu_item(ui, &self.keymap, "Open...", Action::OpenFile, &mut chosen);
                     menu_item(ui, &self.keymap, "Save", Action::SaveFile, &mut chosen);
+                    menu_item(ui, &self.keymap, "Close Tab", Action::CloseTab, &mut chosen);
                     if ui.button("Save As...").clicked() {
                         save_as = true;
                         ui.close_menu();
@@ -251,7 +270,7 @@ impl MalletApp {
             });
         });
         if let Some(action) = chosen {
-            run(action, editor);
+            self.dispatch(action, editor);
         }
         if save_as {
             save_as_dialog(editor);
@@ -260,27 +279,6 @@ impl MalletApp {
             choose_game_dir(editor);
         }
         self.show_net_graph = show_net_graph;
-    }
-
-    fn tool_bar(&self, ctx: &egui::Context, editor: &mut Editor) {
-        egui::SidePanel::left("tool_bar")
-            .resizable(false)
-            .exact_width(84.0)
-            .show(ctx, |ui| {
-                ui.add_space(4.0);
-                for (tool, name, action) in [
-                    (Tool::Select, "Selection", Action::SelectionTool),
-                    (Tool::Block, "Block", Action::BlockTool),
-                ] {
-                    let button = egui::Button::new(name)
-                        .selected(editor.tool == tool)
-                        .min_size(egui::vec2(76.0, 24.0));
-                    let hint = format!("{name} tool ({})", self.keymap.label(action));
-                    if ui.add(button).on_hover_text(hint).clicked() {
-                        run(action, editor);
-                    }
-                }
-            });
     }
 
     fn status_bar(&self, ctx: &egui::Context, editor: &Editor) {
@@ -364,7 +362,8 @@ impl MalletApp {
         let ctx = ui.ctx().clone();
         let was_looking = editor.camera.mouse_look();
         let mut moving = false;
-        if !*camera_updated && (response.hovered() || was_looking) {
+        let typing = ctx.wants_keyboard_input() && !was_looking;
+        if !*camera_updated && !typing && (response.hovered() || was_looking) {
             *camera_updated = true;
             moving = editor.camera.update(&ctx, response.hovered() || was_looking, &self.keymap);
             let looking = editor.camera.mouse_look();
@@ -683,8 +682,12 @@ impl eframe::App for MalletApp {
         self.handle_input(ctx, &mut editor);
         self.update_title(ctx, &editor);
         self.menu_bar(ctx, &mut editor);
+        self.toolbar(ctx, &mut editor);
+        self.tab_strip(ctx, &mut editor);
         self.status_bar(ctx, &editor);
-        self.tool_bar(ctx, &mut editor);
+        self.tool_palette(ctx, &mut editor);
+        self.side_panel(ctx, &mut editor);
+        self.close_dialog(ctx, &mut editor);
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(egui::Color32::from_gray(30)))
             .show(ctx, |ui| self.viewports(ui, &mut editor, frame));
@@ -857,10 +860,10 @@ fn run(action: Action, editor: &mut Editor) {
                 .add_filter("Valve Map File", &["vmf"])
                 .pick_file()
             {
-                let _ = editor.open(&path);
+                let _ = editor.open_in_tab(&path);
             }
         }
-        Action::NewFile => editor.new_map(),
+        Action::NewFile => editor.new_tab(),
         Action::SaveFile => {
             if editor.is_untitled() {
                 save_as_dialog(editor);

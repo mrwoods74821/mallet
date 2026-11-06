@@ -9,6 +9,9 @@ use eframe::egui::{InputState, Key, Modifiers};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     NewFile,
+    CloseTab,
+    NextTab,
+    PreviousTab,
     OpenFile,
     SaveFile,
     Undo,
@@ -111,6 +114,9 @@ impl KeyMap {
         Self {
             bindings: vec![
                 (Action::NewFile, Chord::ctrl(Key::N)),
+                (Action::CloseTab, Chord::ctrl(Key::W)),
+                (Action::NextTab, Chord::ctrl(Key::Tab)),
+                (Action::PreviousTab, Chord::ctrl_shift(Key::Tab)),
                 (Action::OpenFile, Chord::ctrl(Key::O)),
                 (Action::SaveFile, Chord::ctrl(Key::S)),
                 (Action::Undo, Chord::ctrl(Key::Z)),
