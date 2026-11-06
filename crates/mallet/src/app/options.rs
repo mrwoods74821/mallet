@@ -514,6 +514,16 @@ fn viewports_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
                 .add(egui::Slider::new(&mut view.look_sensitivity, 0.02..=1.0).logarithmic(true))
                 .changed();
             ui.end_row();
+            ui.label("Texture browser scrolling");
+            let mut percent = (view.texture_scroll * 100.0).round();
+            let slider = egui::Slider::new(&mut percent, 25.0..=200.0)
+                .step_by(25.0)
+                .suffix("% of a card per notch");
+            if ui.add(slider).changed() {
+                view.texture_scroll = percent / 100.0;
+                *dirty = true;
+            }
+            ui.end_row();
             ui.label("Grid for new maps");
             egui::ComboBox::from_id_salt("default_grid")
                 .selected_text(format!("{}", view.default_grid))

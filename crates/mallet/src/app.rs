@@ -151,6 +151,8 @@ impl MalletApp {
     /// The server listens on port 7414, or on `MALLET_MCP_PORT` when set; a value of
     /// `0` or `off` disables it.
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
+        // Always dark, like Hammer++, whatever Windows uses or a saved layout says.
+        cc.egui_ctx.set_theme(egui::Theme::Dark);
         let mut app = Self {
             editor: Arc::new(Mutex::new(Editor::default())),
             keymap: KeyMap::hammer_defaults(),

@@ -79,7 +79,8 @@ impl Drop for Loaders {
 /// The game's materials with where each comes from, and counts for the sidebar.
 struct Listing {
     game: PathBuf,
-    materials: Vec<(String, usize)>,
+    /// Each material with every source that has it; the first is where it loads from.
+    materials: Vec<(String, Vec<usize>)>,
     sources: Vec<Source>,
     per_source: HashMap<usize, usize>,
     per_folder: BTreeMap<String, usize>,
@@ -182,6 +183,7 @@ impl MalletApp {
         state.start(&game, &loader);
         state.receive(ctx);
         let used = state.used_materials(editor);
+        let scroll_step = editor.config.view.texture_scroll.clamp(0.25, 2.0) as f32;
         let current = match state.pick {
             Pick::Current => editor.material.to_ascii_lowercase(),
             Pick::Find => self.face_edit.find.to_ascii_lowercase(),
@@ -220,7 +222,7 @@ impl MalletApp {
                     });
                 egui::CentralPanel::default().show_inside(ui, |ui| {
                     let size = [ui.available_width(), ui.available_height()];
-                    state.grid(ui, &used, &current, size, &mut commands);
+                    state.grid(ui, &used, &current, size, scroll_step, &mut commands);
                 });
             });
         state.trim();
@@ -272,8 +274,10 @@ impl TextureBrowserState {
                 let materials = loader.list_sourced();
                 let mut per_source: HashMap<usize, usize> = HashMap::new();
                 let mut per_folder: BTreeMap<String, usize> = BTreeMap::new();
-                for (name, source) in &materials {
-                    *per_source.entry(*source).or_default() += 1;
+                for (name, sources) in &materials {
+                    for source in sources {
+                        *per_source.entry(*source).or_default() += 1;
+                    }
                     let folder = name.split('/').next().unwrap_or_default().to_owned();
                     *per_folder.entry(folder).or_default() += 1;
                 }
@@ -523,7 +527,9 @@ impl TextureBrowserState {
     }
 
     /// The materials passing every filter, in name order.
-    fn filtered(&self, used: &BTreeSet<String>) -> Vec<(String, usize)> {
+    /// Indices into the listing of the materials passing every filter. A material shows
+    /// while any source that has it is ticked.
+    fn filtered(&self, used: &BTreeSet<String>) -> Vec<usize> {
         let Some(listing) = &self.listing else {
             return Vec::new();
         };
@@ -533,12 +539,15 @@ impl TextureBrowserState {
         listing
             .materials
             .iter()
-            .filter(|(_, source)| !self.hidden_sources.contains(source))
-            .filter(|(name, _)| folder.as_ref().is_none_or(|folder| name.starts_with(folder.as_str())))
-            .filter(|(name, _)| !self.brush_only || !NON_BRUSH_FOLDERS.iter().any(|skip| name.starts_with(skip)))
-            .filter(|(name, _)| !self.used_only || used.contains(name.as_str()))
-            .filter(|(name, _)| terms.iter().all(|term| name.contains(term.as_str())))
-            .filter(|(name, _)| match self.info.get(name) {
+            .enumerate()
+            .map(|(index, (name, sources))| (index, name, sources))
+            .filter(|(_, _, sources)| sources.iter().any(|source| !self.hidden_sources.contains(source)))
+            .map(|(index, name, _)| (index, name))
+            .filter(|(_, name)| folder.as_ref().is_none_or(|folder| name.starts_with(folder.as_str())))
+            .filter(|(_, name)| !self.brush_only || !NON_BRUSH_FOLDERS.iter().any(|skip| name.starts_with(skip)))
+            .filter(|(_, name)| !self.used_only || used.contains(name.as_str()))
+            .filter(|(_, name)| terms.iter().all(|term| name.contains(term.as_str())))
+            .filter(|(_, name)| match self.info.get(name.as_str()) {
                 None => keywords.is_empty(),
                 Some(info) => {
                     let kind = if info.translucent {
@@ -555,7 +564,7 @@ impl TextureBrowserState {
                         && (self.show_errors || !info.error)
                 }
             })
-            .cloned()
+            .map(|(index, _)| index)
             .collect()
     }
 
@@ -566,6 +575,7 @@ impl TextureBrowserState {
         used: &BTreeSet<String>,
         current: &str,
         [width, height]: [f32; 2],
+        scroll_step: f32,
         commands: &mut Vec<Command>,
     ) {
         if self.listing.is_none() {
@@ -587,22 +597,58 @@ impl TextureBrowserState {
         let card = ((width - 16.0 - gap * (columns as f32 - 1.0)) / columns as f32).max(32.0);
         let row_height = card + 22.0 + gap;
         let rows = names.len().div_ceil(columns);
+        // The wheel scrolls by whole cards, as set in Mallet Options, instead of egui's
+        // fixed line height. Its input is taken here so the scroll area does not also
+        // scroll.
+        let area = ui.available_rect_before_wrap();
+        let mut wheel = 0.0;
+        if ui.rect_contains_pointer(area) {
+            wheel = ui.input(|input| {
+                input
+                    .events
+                    .iter()
+                    .map(|event| match event {
+                        egui::Event::MouseWheel { unit, delta, modifiers } if !modifiers.ctrl => match unit {
+                            egui::MouseWheelUnit::Line => delta.y,
+                            egui::MouseWheelUnit::Point => delta.y / 50.0,
+                            egui::MouseWheelUnit::Page => delta.y * (height / row_height).max(1.0),
+                        },
+                        _ => 0.0,
+                    })
+                    .sum::<f32>()
+            });
+            if wheel != 0.0 {
+                ui.ctx().input_mut(|input| {
+                    input.smooth_scroll_delta = egui::Vec2::ZERO;
+                    input.raw_scroll_delta = egui::Vec2::ZERO;
+                });
+            }
+        }
         egui::ScrollArea::vertical()
             .id_salt("texture_grid")
             .max_height(height)
             .auto_shrink([false, false])
             .show_rows(ui, row_height, rows, |ui, range| {
+                if wheel != 0.0 {
+                    ui.scroll_with_delta(egui::vec2(0.0, wheel * row_height * scroll_step));
+                }
                 for row in range {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = gap;
-                        for (name, source) in names.iter().skip(row * columns).take(columns) {
-                            let source_name = self
-                                .listing
-                                .as_ref()
-                                .and_then(|listing| listing.sources.get(*source))
-                                .map(|source| source.name.clone())
-                                .unwrap_or_default();
-                            let response = self.card(ui, name, &source_name, card, name == current);
+                        for index in names.iter().skip(row * columns).take(columns) {
+                            let Some((name, sources)) = self.listing.as_ref().and_then(|listing| {
+                                let (name, sources) = listing.materials.get(*index)?;
+                                let names: Vec<String> = sources
+                                    .iter()
+                                    .filter_map(|source| listing.sources.get(*source))
+                                    .map(|source| source.name.clone())
+                                    .collect();
+                                Some((name.clone(), names))
+                            }) else {
+                                continue;
+                            };
+                            let response = self.card(ui, &name, &sources, card, name == current);
+                            let name = &name;
                             if response.clicked() {
                                 self.selected = Some(name.clone());
                                 commands.push(Command::Choose(name.clone(), false));
@@ -618,7 +664,7 @@ impl TextureBrowserState {
     }
 
     /// One card: the thumbnail at its real size up to the card's, and the name under it.
-    fn card(&mut self, ui: &mut egui::Ui, name: &str, source: &str, size: f32, current: bool) -> egui::Response {
+    fn card(&mut self, ui: &mut egui::Ui, name: &str, sources: &[String], size: f32, current: bool) -> egui::Response {
         self.request(name);
         let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size + 22.0), egui::Sense::click());
         let image_rect = egui::Rect::from_min_size(rect.min, egui::Vec2::splat(size));
@@ -676,7 +722,12 @@ impl TextureBrowserState {
         if let Some(Thumbnail::Ready(_, [width, height])) = self.thumbnails.get(name) {
             details.push(format!("{width} x {height}"));
         }
-        details.push(format!("from {source}"));
+        if let Some((first, others)) = sources.split_first() {
+            details.push(format!("loads from {first}"));
+            if !others.is_empty() {
+                details.push(format!("also in {}", others.join(", ")));
+            }
+        }
         if let Some(info) = self.info.get(name) {
             let mut traits = Vec::new();
             if info.translucent {

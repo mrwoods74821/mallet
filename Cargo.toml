@@ -12,7 +12,7 @@ mallet-kv = { path = "crates/mallet-kv" }
 mallet-vmf = { path = "crates/mallet-vmf" }
 mallet-content = { path = "crates/mallet-content" }
 glam = "0.29"
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu"] }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "persistence"] }
 rfd = "0.15"
 
 [profile.dev.package."*"]

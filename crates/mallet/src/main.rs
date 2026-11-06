@@ -41,9 +41,18 @@ fn main() -> eframe::Result {
         .ok()
         .and_then(|value| value.parse().ok())
         .or(Some(1));
+    // eframe keeps the window's size and place and every panel's position and size in
+    // %APPDATA%\<app id>\data. MALLET_PROFILE picks a separate store, so test copies do
+    // not move your windows around.
+    let app_id = match std::env::var("MALLET_PROFILE") {
+        Ok(profile) if !profile.trim().is_empty() => format!("Mallet-{}", profile.trim()),
+        _ => "Mallet".to_owned(),
+    };
     let options = eframe::NativeOptions {
+        persist_window: true,
         viewport: egui::ViewportBuilder::default()
             .with_title("Mallet")
+            .with_app_id(app_id.clone())
             .with_icon(std::sync::Arc::new(branding::window_icon()))
             .with_inner_size([1600.0, 1000.0])
             .with_drag_and_drop(true),
@@ -55,7 +64,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "Mallet",
+        &app_id,
         options,
         Box::new(move |cc| Ok(Box::new(app::MalletApp::new(cc, path)))),
     )

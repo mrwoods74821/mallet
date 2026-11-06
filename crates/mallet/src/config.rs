@@ -118,6 +118,9 @@ pub struct ViewOptions {
     pub look_sensitivity: f64,
     /// Grid size of new maps.
     pub default_grid: f64,
+    /// How far one mouse wheel notch scrolls the texture browser, as a share of a card's
+    /// height, from 0.25 to 2.
+    pub texture_scroll: f64,
 }
 
 impl Default for ViewOptions {
@@ -129,6 +132,7 @@ impl Default for ViewOptions {
             camera_speed: crate::view3d::DEFAULT_MOVE_SPEED,
             look_sensitivity: crate::view3d::DEFAULT_LOOK_SENSITIVITY,
             default_grid: 64.0,
+            texture_scroll: 1.0,
         }
     }
 }

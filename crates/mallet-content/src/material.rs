@@ -215,15 +215,15 @@ impl MaterialLoader {
         self.list_sourced().into_iter().map(|(name, _)| name).collect()
     }
 
-    /// Like [`MaterialLoader::list`], with the index of the source each material comes
-    /// from, as [`GameFs::sources`] lists them.
-    pub fn list_sourced(&self) -> Vec<(String, usize)> {
+    /// Like [`MaterialLoader::list`], with every source that has each material, as
+    /// [`GameFs::sources`] lists them; the first is the one it loads from.
+    pub fn list_sourced(&self) -> Vec<(String, Vec<usize>)> {
         self.filesystem
             .list_sourced("materials/", ".vmt")
             .into_iter()
-            .filter_map(|(path, source)| {
+            .filter_map(|(path, sources)| {
                 let name = path.strip_prefix("materials/")?.strip_suffix(".vmt")?;
-                Some((name.to_owned(), source))
+                Some((name.to_owned(), sources))
             })
             .collect()
     }

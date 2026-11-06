@@ -131,13 +131,20 @@ impl GameFs {
             .collect()
     }
 
-    /// Like [`GameFs::list`], with the source each file is read from: the first mount
-    /// that has it, as for [`GameFs::read`].
-    pub fn list_sourced(&self, folder: &str, extension: &str) -> Vec<(String, usize)> {
+    /// Like [`GameFs::list`], with every source that has each file. The first is the one
+    /// it is read from, as for [`GameFs::read`]; the rest hold copies, such as Half-Life
+    /// 2's own materials when Garry's Mod ships them too.
+    pub fn list_sourced(&self, folder: &str, extension: &str) -> Vec<(String, Vec<usize>)> {
         let folder = normalize(folder);
         let folder = folder.trim_end_matches('/');
         let extension = extension.to_ascii_lowercase();
-        let mut found = std::collections::BTreeMap::new();
+        let mut found: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
+        let mut note = |path: String, source: usize| {
+            let sources = found.entry(path).or_default();
+            if !sources.contains(&source) {
+                sources.push(source);
+            }
+        };
         for mount in &self.mounts {
             match &mount.place {
                 Place::Vpk(archive) => {
@@ -145,7 +152,7 @@ impl GameFs {
                         .paths()
                         .filter(|path| path.starts_with(folder) && path.ends_with(&extension))
                     {
-                        found.entry(path.to_owned()).or_insert(mount.source);
+                        note(path.to_owned(), mount.source);
                     }
                 }
                 Place::Folder(root) => {
@@ -162,7 +169,7 @@ impl GameFs {
                             } else if let Ok(relative) = path.strip_prefix(root) {
                                 let relative = normalize(&relative.to_string_lossy());
                                 if relative.ends_with(&extension) {
-                                    found.entry(relative).or_insert(mount.source);
+                                    note(relative, mount.source);
                                 }
                             }
                         }
@@ -398,5 +405,16 @@ mod tests {
             games.iter().map(|source| &source.name).collect::<Vec<_>>()
         );
         assert!(all.mounts().len() >= alone.mounts().len());
+        for name in ["hl2", "hl2_misc", "cstrike"] {
+            let Some(index) = all.sources().iter().position(|source| source.name == name) else {
+                continue;
+            };
+            let total = materials.iter().filter(|(_, sources)| sources.contains(&index)).count();
+            let loaded_from = materials
+                .iter()
+                .filter(|(_, sources)| sources.first() == Some(&index))
+                .count();
+            eprintln!("{name}: has {total} materials, {loaded_from} load from it");
+        }
     }
 }

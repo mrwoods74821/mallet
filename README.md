@@ -121,8 +121,13 @@ Edit > Mallet Options... (or the gear on the toolbar) holds every setting: the g
 folder and FGD files, the compile programs (VBSP, VVIS, VRAD, VBSPInfo, BSPZip,
 SourceCubemap and the game, each found automatically, with a menu of every copy found,
 including 64-bit and Hammer++ builds), how compiles run, the viewports (draw distance,
-field of view, camera speed, mouselook sensitivity, default grid), the key bindings and
-the MCP server address. Settings are saved in `%APPDATA%\Mallet\config.json`.
+field of view, camera speed, mouselook sensitivity, default grid, how far the mouse wheel
+scrolls the texture browser), the key bindings and the MCP server address. Settings are
+saved in `%APPDATA%\Mallet\config.json`.
+
+Where you leave the main window and every panel (Face Edit, the texture browser, Compile,
+Options and the rest), and their sizes, are remembered between runs in
+`%APPDATA%\Mallet\data`. Set `MALLET_PROFILE` to keep a separate layout, as test copies do.
 
 ## AI agents
 
