@@ -3,6 +3,7 @@
 //! [`Vmf`] keeps every block it does not understand verbatim, so loading and saving a
 //! map changes nothing except number formatting that parses back to the same value.
 
+pub mod build;
 pub mod edit;
 pub mod geometry;
 mod model;
