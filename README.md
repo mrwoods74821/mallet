@@ -148,7 +148,7 @@ as you change it:
   builds.
 - **Compiling**: how compiles run, the folder `.mallet` maps compile in and how much
   compiler output the compile window keeps.
-- **Viewports**: draw distance, field of view, camera speed and acceleration, arrow key
+- **Viewports**: draw distance, field of view, camera speed, crouch speed and acceleration, arrow key
   turning, how far the mouse wheel moves the camera, mouselook sensitivity and smoothing,
   how far the wheel zooms the 2D views, how close a click must be to select a brush, the
   grid of new maps, how dense the grid may get and how often grid lines are highlighted.

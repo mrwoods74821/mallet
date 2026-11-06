@@ -365,6 +365,8 @@ pub struct ViewOptions {
     pub camera_acceleration: f64,
     /// Units one mouse wheel notch moves the 3D camera.
     pub wheel_step: f64,
+    /// The share of the camera speed flown while holding Ctrl in mouselook.
+    pub crouch_speed: f64,
     /// Frames of mouse movement mouselook averages over; 1 turns smoothing off.
     pub look_smoothing: usize,
     /// How much one mouse wheel notch zooms a 2D view.
@@ -392,6 +394,7 @@ impl Default for ViewOptions {
             turn_speed: crate::view3d::DEFAULT_TURN_SPEED,
             camera_acceleration: crate::view3d::DEFAULT_ACCELERATION,
             wheel_step: crate::view3d::DEFAULT_WHEEL_STEP,
+            crouch_speed: crate::view3d::DEFAULT_CROUCH_SPEED,
             look_smoothing: crate::view3d::DEFAULT_LOOK_FRAMES,
             zoom_step: crate::view2d::DEFAULT_ZOOM_STEP,
             grid_min_pixels: 4.0,

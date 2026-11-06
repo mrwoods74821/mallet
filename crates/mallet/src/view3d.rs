@@ -25,9 +25,9 @@ const POINTS_PER_NOTCH: f64 = 50.0;
 /// Default for how quickly the camera reaches its target speed, per second; higher is
 /// snappier.
 pub const DEFAULT_ACCELERATION: f64 = 14.0;
-/// The share of the camera speed flown while crouching (Ctrl in mouselook), like
+/// The default share of the camera speed flown while crouching (Ctrl in mouselook), like
 /// Source's crouch speed.
-const CROUCH_SPEED_SCALE: f64 = 1.0 / 3.0;
+pub const DEFAULT_CROUCH_SPEED: f64 = 1.0 / 3.0;
 /// Below this speed, in units per second, a coasting camera stops.
 const STOP_SPEED: f64 = 1.0;
 /// The longest frame time used for movement, so a stalled frame cannot fling the camera.
@@ -65,6 +65,8 @@ pub struct Camera3D {
     pub acceleration: f64,
     /// Units one mouse wheel notch moves the camera.
     pub wheel_step: f64,
+    /// The share of [`Self::move_speed`] flown while crouching, from 0.05 to 1.
+    pub crouch_speed: f64,
     /// Frames of mouse movement mouselook averages over, from 1 to [`MAX_LOOK_FRAMES`].
     pub look_frames: usize,
     mouse_look: bool,
@@ -91,6 +93,7 @@ impl Camera3D {
             turn_speed: DEFAULT_TURN_SPEED,
             acceleration: DEFAULT_ACCELERATION,
             wheel_step: DEFAULT_WHEEL_STEP,
+            crouch_speed: DEFAULT_CROUCH_SPEED,
             look_frames: DEFAULT_LOOK_FRAMES,
             mouse_look: false,
             velocity: DVec3::ZERO,
@@ -254,7 +257,7 @@ impl Camera3D {
             wish += forward * turn(Action::MoveForward, Action::MoveBack);
             wish += right * turn(Action::StrafeRight, Action::StrafeLeft);
             let speed = if crouching {
-                self.move_speed * CROUCH_SPEED_SCALE
+                self.move_speed * self.crouch_speed.clamp(0.05, 1.0)
             } else {
                 self.move_speed
             };

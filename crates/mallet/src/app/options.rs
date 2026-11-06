@@ -584,6 +584,17 @@ fn viewports_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
                 )
                 .changed();
             ui.end_row();
+            ui.label("Crouch speed")
+                .on_hover_text("How fast the camera flies while you hold Ctrl in mouselook.");
+            let mut percent = (view.crouch_speed * 100.0).round();
+            let slider = egui::Slider::new(&mut percent, 5.0..=100.0)
+                .integer()
+                .suffix("% of camera speed");
+            if ui.add(slider).changed() {
+                view.crouch_speed = percent / 100.0;
+                *dirty = true;
+            }
+            ui.end_row();
             ui.label("Arrow key turning");
             *dirty |= ui
                 .add(

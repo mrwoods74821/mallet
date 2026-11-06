@@ -1139,6 +1139,7 @@ fn apply_view_options(editor: &mut Editor) {
     editor.camera.turn_speed = view.turn_speed;
     editor.camera.acceleration = view.camera_acceleration;
     editor.camera.wheel_step = view.wheel_step;
+    editor.camera.crouch_speed = view.crouch_speed;
     editor.camera.look_frames = view.look_smoothing;
     crate::style::set(crate::style::ViewStyle::from_options(&editor.config.colors, view));
 }

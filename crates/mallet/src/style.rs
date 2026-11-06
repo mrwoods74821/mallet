@@ -116,4 +116,3 @@ pub fn set(style: ViewStyle) {
         *current = style;
     }
 }
-
