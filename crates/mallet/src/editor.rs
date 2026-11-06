@@ -145,6 +145,36 @@ pub struct FrameTimings {
     pub recent_intervals_ms: Vec<f32>,
 }
 
+/// One map's state while its tab is in the background. The active tab's state lives in
+/// [`Editor`] itself, so everything else only ever deals with one map.
+pub struct MapState {
+    document: Option<Document>,
+    scene: Scene,
+    views: [View2D; 3],
+    camera: Camera3D,
+    selection: BTreeSet<Owner>,
+    overlay: Overlay,
+    last_block: Bounds,
+    refit_on_layout: bool,
+}
+
+/// What a tab shows in the tab strip.
+pub struct TabInfo {
+    pub title: String,
+    /// Full path, or `untitled`.
+    pub path: String,
+    /// Whether the map has unsaved changes.
+    pub dirty: bool,
+}
+
+fn default_views() -> [View2D; 3] {
+    [
+        View2D::new(Axis2D::Top),
+        View2D::new(Axis2D::Front),
+        View2D::new(Axis2D::Side),
+    ]
+}
+
 /// Everything about the open map and how it is being viewed.
 pub struct Editor {
     pub document: Option<Document>,
@@ -185,6 +215,10 @@ pub struct Editor {
     /// Physical pixels per layout point in the window.
     pixels_per_point: f32,
     refit_on_layout: bool,
+    /// One entry per open map tab: `None` for the active tab, whose state is held in the
+    /// fields above, and the parked state of every other tab.
+    tabs: Vec<Option<MapState>>,
+    active_tab: usize,
 }
 
 impl Default for Editor {
@@ -192,11 +226,7 @@ impl Default for Editor {
         Self {
             document: None,
             scene: Scene::default(),
-            views: [
-                View2D::new(Axis2D::Top),
-                View2D::new(Axis2D::Front),
-                View2D::new(Axis2D::Side),
-            ],
+            views: default_views(),
             layout: [ViewMode::Textured, ViewMode::Top, ViewMode::Front, ViewMode::Side],
             camera: Camera3D::new(),
             grid: DEFAULT_GRID,
@@ -215,6 +245,8 @@ impl Default for Editor {
             viewport_rects: quad_rects(Rect::from_min_size(Pos2::ZERO, DEFAULT_AREA), VIEWPORT_GAP),
             pixels_per_point: 1.0,
             refit_on_layout: false,
+            tabs: vec![None],
+            active_tab: 0,
         }
     }
 }
@@ -225,6 +257,135 @@ pub fn lock(editor: &Mutex<Editor>) -> MutexGuard<'_, Editor> {
 }
 
 impl Editor {
+    /// The open tabs, in order.
+    pub fn tabs(&self) -> Vec<TabInfo> {
+        let describe = |document: Option<&Document>| match document {
+            Some(document) => TabInfo {
+                title: document.file_name(),
+                path: document.display_path(),
+                dirty: document.dirty,
+            },
+            None => TabInfo {
+                title: "empty".to_owned(),
+                path: String::new(),
+                dirty: false,
+            },
+        };
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(index, parked)| match parked {
+                _ if index == self.active_tab => describe(self.document.as_ref()),
+                Some(map) => describe(map.document.as_ref()),
+                None => describe(None),
+            })
+            .collect()
+    }
+
+    /// Index of the tab being edited.
+    pub fn active_tab(&self) -> usize {
+        self.active_tab
+    }
+
+    /// Brings another tab to the front.
+    pub fn switch_tab(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.tabs.len() {
+            return Err(format!("there is no tab {index}; {} are open", self.tabs.len()));
+        }
+        if index == self.active_tab {
+            return Ok(());
+        }
+        let current = self.take_map();
+        self.tabs[self.active_tab] = Some(current);
+        let next = self.tabs[index].take().expect("background tabs hold their state");
+        self.put_map(next);
+        self.active_tab = index;
+        self.message = format!("Switched to {}", self.tabs()[index].title);
+        Ok(())
+    }
+
+    /// Opens a new tab with an empty map, after the current one.
+    pub fn new_tab(&mut self) {
+        let current = self.take_map();
+        self.tabs[self.active_tab] = Some(current);
+        self.active_tab += 1;
+        self.tabs.insert(self.active_tab, None);
+        self.new_map();
+    }
+
+    /// Closes a tab, discarding unsaved changes; ask before calling this for a dirty tab.
+    /// Closing the last tab leaves a new empty map.
+    pub fn close_tab(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.tabs.len() {
+            return Err(format!("there is no tab {index}; {} are open", self.tabs.len()));
+        }
+        if self.tabs.len() == 1 {
+            self.new_map();
+            return Ok(());
+        }
+        if index != self.active_tab {
+            self.tabs.remove(index);
+            if index < self.active_tab {
+                self.active_tab -= 1;
+            }
+            return Ok(());
+        }
+        self.tabs.remove(index);
+        self.active_tab = index.min(self.tabs.len() - 1);
+        let next = self.tabs[self.active_tab].take().expect("background tabs hold their state");
+        self.put_map(next);
+        Ok(())
+    }
+
+    /// Opens a map in a new tab, or in the current one when it is an untouched empty map.
+    /// A map that is already open is brought to the front instead of opened twice.
+    pub fn open_in_tab(&mut self, path: &Path) -> Result<(), String> {
+        let wanted = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        let already_open = self.tabs().iter().position(|tab| {
+            let open = Path::new(&tab.path);
+            std::fs::canonicalize(open).is_ok_and(|open| open == wanted)
+        });
+        if let Some(index) = already_open {
+            return self.switch_tab(index);
+        }
+        let reuse = self.document.as_ref().is_none_or(|document| document.path.is_none() && !document.dirty)
+            && self.scene.meshes.is_empty();
+        if !reuse {
+            self.new_tab();
+        }
+        let result = self.open(path);
+        if result.is_err() && !reuse {
+            let failure = self.message.clone();
+            let _ = self.close_tab(self.active_tab);
+            self.message = failure;
+        }
+        result
+    }
+
+    fn take_map(&mut self) -> MapState {
+        MapState {
+            document: self.document.take(),
+            scene: std::mem::take(&mut self.scene),
+            views: std::mem::replace(&mut self.views, default_views()),
+            camera: std::mem::replace(&mut self.camera, Camera3D::new()),
+            selection: std::mem::take(&mut self.selection),
+            overlay: std::mem::take(&mut self.overlay),
+            last_block: std::mem::replace(&mut self.last_block, DEFAULT_BLOCK),
+            refit_on_layout: std::mem::take(&mut self.refit_on_layout),
+        }
+    }
+
+    fn put_map(&mut self, map: MapState) {
+        self.document = map.document;
+        self.scene = map.scene;
+        self.views = map.views;
+        self.camera = map.camera;
+        self.selection = map.selection;
+        self.overlay = map.overlay;
+        self.last_block = map.last_block;
+        self.refit_on_layout = map.refit_on_layout;
+    }
+
     /// Opens a map and frames it in every viewport.
     pub fn open(&mut self, path: &Path) -> Result<(), String> {
         match Document::load(path) {
@@ -246,11 +407,7 @@ impl Editor {
     /// Replaces the open map with a new, empty, unsaved one, viewed from the origin.
     pub fn new_map(&mut self) {
         self.set_document(Document::untitled());
-        self.views = [
-            View2D::new(Axis2D::Top),
-            View2D::new(Axis2D::Front),
-            View2D::new(Axis2D::Side),
-        ];
+        self.views = default_views();
         self.camera = Camera3D::new();
         self.refit_on_layout = false;
         self.message = "New map".to_owned();
@@ -271,6 +428,9 @@ impl Editor {
             document.path = Some(path);
         }
         let result = document.save();
+        if result.is_ok() {
+            document.dirty = false;
+        }
         self.message = match &result {
             Ok(()) => format!("Saved {}", document.display_path()),
             Err(error) => format!("Could not save {}: {error}", document.display_path()),
@@ -293,6 +453,7 @@ impl Editor {
             .history
             .apply(&mut document.vmf, edit)
             .map_err(|error| error.to_string())?;
+        document.dirty = true;
         self.rebuild_scene();
         Ok(())
     }
@@ -308,6 +469,7 @@ impl Editor {
         match result {
             Ok(changed) => {
                 if changed {
+                    document.dirty = true;
                     self.rebuild_scene();
                 }
                 Ok(changed)

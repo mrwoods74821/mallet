@@ -61,6 +61,8 @@ pub struct Document {
     pub vmf: Vmf,
     /// Undo and redo stacks for this map.
     pub history: History,
+    /// Whether the map has changed since it was opened or last saved.
+    pub dirty: bool,
     encoding: TextEncoding,
 }
 
@@ -79,6 +81,7 @@ impl Document {
             path: Some(path.to_owned()),
             vmf: Vmf::parse(&text)?,
             history: History::default(),
+            dirty: false,
             encoding,
         })
     }
@@ -89,6 +92,7 @@ impl Document {
             path: None,
             vmf: Vmf::new_map(),
             history: History::default(),
+            dirty: false,
             encoding: TextEncoding::Utf8,
         }
     }

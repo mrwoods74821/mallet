@@ -43,16 +43,32 @@ pub fn definitions() -> Value {
         ),
         tool(
             "new_map",
-            "Start a new, empty, unsaved map, replacing the current one. Unsaved changes are lost. \
-             Save it with save_map and a path.",
+            "Open a new tab with an empty, unsaved map and switch to it. Save it with save_map and a path.",
             json!({}),
             &[],
         ),
         tool(
             "open_map",
-            "Open a .vmf file in the editor, replacing the current map. Unsaved changes to the current map are lost.",
+            "Open a .vmf file in a new tab and switch to it. An untouched empty map in the current tab is \
+             replaced instead.",
             json!({ "path": { "type": "string", "description": "Absolute path to the .vmf file." } }),
             &["path"],
+        ),
+        tool("list_tabs", "List the open map tabs, which one is active, and which have unsaved changes.", json!({}), &[]),
+        tool(
+            "switch_tab",
+            "Make another map tab the one every other tool works on.",
+            json!({ "index": { "type": "integer", "minimum": 0 } }),
+            &["index"],
+        ),
+        tool(
+            "close_tab",
+            "Close a map tab. A tab with unsaved changes is only closed with discard set to true.",
+            json!({
+                "index": { "type": "integer", "minimum": 0, "description": "Default: the active tab." },
+                "discard": { "type": "boolean", "description": "Close even with unsaved changes." }
+            }),
+            &[],
         ),
         tool(
             "save_map",
@@ -267,12 +283,28 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
             Ok(ToolResult::text(format!("Mounted {} with {mounts} search paths.", path.display())))
         }
         "new_map" => {
-            editor.new_map();
+            editor.new_tab();
             Ok(ToolResult::json(&status_json(editor)))
         }
         "open_map" => {
-            editor.open(&PathBuf::from(string_arg(args, "path")?))?;
+            editor.open_in_tab(&PathBuf::from(string_arg(args, "path")?))?;
             Ok(ToolResult::json(&status_json(editor)))
+        }
+        "list_tabs" => Ok(ToolResult::json(&tabs_json(editor))),
+        "switch_tab" => {
+            let index = args.get("index").and_then(Value::as_u64).ok_or("\"index\" must be a whole number")?;
+            editor.switch_tab(index as usize)?;
+            Ok(ToolResult::json(&tabs_json(editor)))
+        }
+        "close_tab" => {
+            let index = args.get("index").and_then(Value::as_u64).map_or(editor.active_tab(), |index| index as usize);
+            let discard = args.get("discard").and_then(Value::as_bool).unwrap_or(false);
+            let dirty = editor.tabs().get(index).ok_or_else(|| format!("there is no tab {index}"))?.dirty;
+            if dirty && !discard {
+                return Err(format!("tab {index} has unsaved changes; save it first or pass discard: true"));
+            }
+            editor.close_tab(index)?;
+            Ok(ToolResult::json(&tabs_json(editor)))
         }
         "save_map" => {
             let path = optional_string(args, "path")?.map(PathBuf::from);
@@ -453,6 +485,8 @@ fn status_json(editor: &Editor) -> Value {
         "textured_3d": editor.gpu.is_some(),
         "gpu": editor.gpu_info,
         "viewports": layout_json(editor),
+        "tab": editor.active_tab(),
+        "tab_count": editor.tabs().len(),
         "timings_ms": {
             "update": editor.timings.update_ms,
             "camera": editor.timings.camera_ms,
@@ -529,6 +563,15 @@ fn input_action(editor: &Editor, action: &Value) -> Result<Vec<InputFrame>, Stri
         editor.viewport_point(viewport, DVec2::new(x, y))
     };
     Ok(input::drag(point(&path[0])?, point(&path[1])?, button, modifiers))
+}
+
+fn tabs_json(editor: &Editor) -> Value {
+    let tabs: Vec<Value> = editor
+        .tabs()
+        .into_iter()
+        .map(|tab| json!({ "title": tab.title, "path": tab.path, "unsaved": tab.dirty }))
+        .collect();
+    json!({ "active": editor.active_tab(), "tabs": tabs })
 }
 
 fn layout_json(editor: &Editor) -> Value {
