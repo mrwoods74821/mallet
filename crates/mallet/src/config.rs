@@ -24,6 +24,8 @@ pub struct Config {
     pub game_dir: Option<PathBuf>,
     /// FGD files chosen instead of the game's default one; empty to use the default.
     pub fgds: Vec<PathBuf>,
+    /// Games listed in Garry's Mod's `cfg/mount.cfg` that Mallet leaves unmounted.
+    pub unmounted_games: Vec<String>,
     /// Programs chosen for each compile tool; a missing one is found automatically.
     pub tools: ToolPaths,
     pub compile: CompileOptions,

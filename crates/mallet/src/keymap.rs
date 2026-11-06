@@ -23,6 +23,7 @@ pub enum Action {
     SelectionTool,
     BlockTool,
     EntityTool,
+    TextureTool,
     Properties,
     /// Open the compile window (Hammer's Run Map).
     Compile,
@@ -144,6 +145,7 @@ impl KeyMap {
                 (Action::SelectionTool, Chord::shift(Key::S)),
                 (Action::BlockTool, Chord::shift(Key::B)),
                 (Action::EntityTool, Chord::shift(Key::E)),
+                (Action::TextureTool, Chord::shift(Key::A)),
                 (Action::Properties, Chord::alt(Key::Enter)),
                 (Action::Compile, Chord::key(Key::F9)),
                 (Action::CompileAgain, Chord::shift(Key::F9)),

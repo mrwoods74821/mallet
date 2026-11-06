@@ -14,9 +14,11 @@ use eframe::egui::Pos2;
 use crate::compile::{self, Outcome, Preset, Severity};
 use crate::config::{self, Config, ToolKind};
 use crate::editor::{Editor, SelectMode, ShotTarget, Tool, ViewMode, MAX_GRID, MIN_GRID};
+use crate::faces::{FaceChange, FaceInfo, FaceValues};
 use crate::input::{self, InputFrame};
 use crate::mcp::ToolResult;
 use crate::scene::Owner;
+use mallet_vmf::texture::Justify;
 
 /// How many entities `list_entities` returns when no limit is given.
 const DEFAULT_LIST_LIMIT: u64 = 200;
@@ -308,6 +310,81 @@ pub fn definitions() -> Value {
                 "open": { "type": "boolean" },
                 "section": { "type": "string", "enum": ["game", "tools", "compiling", "viewports", "keyboard", "agents"] }
             }),
+            &[],
+        ),
+        tool(
+            "list_materials",
+            "List the game's materials, such as brick/brickwall001a, for the texture tool. Model, particle and \
+             interface materials are left out unless all_folders is set.",
+            json!({
+                "filter": { "type": "string", "description": "Words that must all appear in the name." },
+                "used_only": { "type": "boolean", "description": "Only materials the map's brushes use, with counts." },
+                "all_folders": { "type": "boolean" },
+                "limit": { "type": "integer", "minimum": 1, "description": "Default 200." }
+            }),
+            &[],
+        ),
+        tool(
+            "get_faces",
+            "Brush faces with their side id, material, normal, centre, texture axes, scale, shift, rotation and \
+             lightmap scale. Pass solids or sides, or nothing for the faces the texture tool has selected.",
+            json!({
+                "solids": { "type": "array", "items": { "type": "integer" } },
+                "sides": { "type": "array", "items": { "type": "integer" } }
+            }),
+            &[],
+        ),
+        tool(
+            "select_faces",
+            "Select brush faces for the texture tool, by side id or every face of some brushes. Switches to the \
+             texture tool (Shift+A).",
+            json!({
+                "sides": { "type": "array", "items": { "type": "integer" } },
+                "solids": { "type": "array", "items": { "type": "integer" } },
+                "mode": { "type": "string", "enum": ["replace", "add", "remove", "toggle"] }
+            }),
+            &[],
+        ),
+        tool(
+            "pick_face",
+            "The brush face under a point of the camera viewport, in pixels from its top-left corner, as a \
+             screenshot of the camera shows it.",
+            json!({ "point": vec2 }),
+            &["point"],
+        ),
+        tool(
+            "set_faces",
+            "Change brush faces like Face Edit: material, scale, shift, rotation, lightmap scale, alignment to \
+             world or face, and justify (left, right, top, bottom, center, fit). Applies to the given sides or the \
+             selected faces. Undoable.",
+            json!({
+                "sides": { "type": "array", "items": { "type": "integer" } },
+                "material": { "type": "string" },
+                "scale": vec2,
+                "shift": vec2,
+                "rotation": { "type": "number" },
+                "lightmap_scale": { "type": "integer", "minimum": 1 },
+                "align": { "type": "string", "enum": ["world", "face"] },
+                "justify": { "type": "string", "enum": ["left", "right", "top", "bottom", "center", "fit", "fit_width", "fit_height"] },
+                "treat_as_one": { "type": "boolean", "description": "Justify the faces together." }
+            }),
+            &[],
+        ),
+        tool(
+            "replace_material",
+            "Replace one material with another on every brush face in the map, or only on the selected faces. \
+             Undoable.",
+            json!({
+                "find": { "type": "string" },
+                "replace": { "type": "string" },
+                "selected_only": { "type": "boolean" }
+            }),
+            &["find", "replace"],
+        ),
+        tool(
+            "show_texture_browser",
+            "Open or close the texture browser, optionally searching for something.",
+            json!({ "open": { "type": "boolean" }, "filter": { "type": "string" } }),
             &[],
         ),
         tool(
@@ -706,6 +783,164 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
                 "Mallet Options is closed."
             }))
         }
+        "list_materials" => {
+            let limit = optional_number(args, "limit")?.unwrap_or(200.0).max(1.0) as usize;
+            let terms: Vec<String> = optional_string(args, "filter")?
+                .unwrap_or("")
+                .split_whitespace()
+                .map(str::to_ascii_lowercase)
+                .collect();
+            let matches = |name: &str| {
+                let name = name.to_ascii_lowercase();
+                terms.iter().all(|term| name.contains(term.as_str()))
+            };
+            if args.get("used_only").and_then(Value::as_bool).unwrap_or(false) {
+                let used: Vec<Value> = editor
+                    .used_materials()
+                    .into_iter()
+                    .filter(|(name, _)| matches(name))
+                    .take(limit)
+                    .map(|(name, faces)| json!({ "material": name, "faces": faces }))
+                    .collect();
+                return Ok(ToolResult::json(&json!({ "materials": used })));
+            }
+            let all_folders = args.get("all_folders").and_then(Value::as_bool).unwrap_or(false);
+            let list = editor.material_list()?;
+            let found: Vec<&String> = list
+                .iter()
+                .filter(|name| all_folders || !NON_BRUSH_FOLDERS.iter().any(|folder| name.starts_with(folder)))
+                .filter(|name| matches(name))
+                .collect();
+            Ok(ToolResult::json(&json!({
+                "total": found.len(),
+                "materials": found.iter().take(limit).collect::<Vec<_>>(),
+            })))
+        }
+        "get_faces" => {
+            let solids = id_list(args, "solids")?;
+            let sides = id_list(args, "sides")?;
+            let faces = if !solids.is_empty() {
+                editor.brush_faces(&solids)
+            } else if !sides.is_empty() {
+                editor.faces(&sides.into_iter().collect())
+            } else {
+                editor.faces(&editor.face_selection.clone())
+            };
+            let faces: Vec<Value> = faces.iter().map(face_json).collect();
+            Ok(ToolResult::json(&json!({ "faces": faces })))
+        }
+        "select_faces" => {
+            let mode = match optional_string(args, "mode")?.unwrap_or("replace") {
+                "replace" => SelectMode::Replace,
+                "add" => SelectMode::Add,
+                "remove" => SelectMode::Remove,
+                "toggle" => SelectMode::Toggle,
+                other => return Err(format!("unknown mode \"{other}\"")),
+            };
+            let solids = id_list(args, "solids")?;
+            let mut sides = id_list(args, "sides")?;
+            sides.extend(editor.brush_faces(&solids).iter().map(|face| face.side.id));
+            if editor.tool != Tool::Texture {
+                editor.set_tool(Tool::Texture);
+            }
+            editor.select_faces(sides, mode);
+            Ok(ToolResult::json(&json!({ "selected": editor.face_selection })))
+        }
+        "pick_face" => {
+            let [x, y] = optional_numbers::<2>(args, "point")?.ok_or("\"point\" is required")?;
+            let slot = editor.slot_for(ShotTarget::Camera)?;
+            let rect = editor.viewport_rects[slot];
+            let at = editor.viewport_point(ShotTarget::Camera, DVec2::new(x, y))?;
+            let (origin, direction) = editor.camera.ray(rect, at);
+            let Some(hit) = editor.scene.pick_face(origin, direction) else {
+                return Ok(ToolResult::json(&json!({ "hit": null })));
+            };
+            let face = editor.faces(&[hit.side].into_iter().collect()).pop();
+            Ok(ToolResult::json(&json!({
+                "hit": {
+                    "side": hit.side,
+                    "solid": hit.solid,
+                    "point": [hit.point.x, hit.point.y, hit.point.z],
+                    "material": face.map(|face| face.side.material),
+                }
+            })))
+        }
+        "set_faces" => {
+            let mut sides: std::collections::BTreeSet<u32> = id_list(args, "sides")?.into_iter().collect();
+            if sides.is_empty() {
+                sides = editor.face_selection.clone();
+            }
+            if sides.is_empty() {
+                return Err("pass sides, or select faces first".to_owned());
+            }
+            let align = match optional_string(args, "align")? {
+                None => None,
+                Some("world") => Some(false),
+                Some("face") => Some(true),
+                Some(other) => return Err(format!("unknown alignment \"{other}\"")),
+            };
+            let justify = match optional_string(args, "justify")? {
+                None => None,
+                Some("left") => Some(Justify::Left),
+                Some("right") => Some(Justify::Right),
+                Some("top") => Some(Justify::Top),
+                Some("bottom") => Some(Justify::Bottom),
+                Some("center") => Some(Justify::Center),
+                Some("fit") => Some(Justify::Fit),
+                Some("fit_width") => Some(Justify::FitWidth),
+                Some("fit_height") => Some(Justify::FitHeight),
+                Some(other) => return Err(format!("unknown justify \"{other}\"")),
+            };
+            let scale = optional_numbers::<2>(args, "scale")?;
+            let shift = optional_numbers::<2>(args, "shift")?;
+            let change = FaceChange {
+                material: optional_string(args, "material")?.map(str::to_owned),
+                align,
+                values: FaceValues {
+                    scale: scale.map_or([None, None], |[x, y]| [Some(x), Some(y)]),
+                    shift: shift.map_or([None, None], |[x, y]| [Some(x), Some(y)]),
+                    rotation: optional_number(args, "rotation")?,
+                    lightmap_scale: optional_number(args, "lightmap_scale")?.map(|value| value.max(1.0) as u32),
+                    ..FaceValues::default()
+                },
+                justify,
+                as_one: args.get("treat_as_one").and_then(Value::as_bool).unwrap_or(false),
+            };
+            if change.material.is_none()
+                && change.align.is_none()
+                && change.justify.is_none()
+                && change.values == FaceValues::default()
+            {
+                return Err(
+                    "nothing to change: pass material, scale, shift, rotation, lightmap_scale, align or justify"
+                        .to_owned(),
+                );
+            }
+            editor.change_faces(&sides, &change)?;
+            let faces: Vec<Value> = editor.faces(&sides).iter().map(face_json).collect();
+            Ok(ToolResult::json(&json!({ "faces": faces })))
+        }
+        "replace_material" => {
+            let selected = editor.face_selection.clone();
+            let within = args
+                .get("selected_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                .then_some(&selected);
+            let count = editor.replace_material(string_arg(args, "find")?, string_arg(args, "replace")?, within)?;
+            Ok(ToolResult::text(format!(
+                "Replaced the material on {count} faces. Undo with the undo tool."
+            )))
+        }
+        "show_texture_browser" => {
+            editor.texture_browser_open = args.get("open").and_then(Value::as_bool).unwrap_or(true);
+            editor.texture_browser_filter = optional_string(args, "filter")?.map(str::to_owned);
+            Ok(ToolResult::text(if editor.texture_browser_open {
+                "The texture browser is open."
+            } else {
+                "The texture browser is closed."
+            }))
+        }
         "show_about" => {
             editor.about_open = args.get("open").and_then(Value::as_bool).unwrap_or(true);
             Ok(ToolResult::text(if editor.about_open {
@@ -950,6 +1185,7 @@ fn status_json(editor: &Editor) -> Value {
             Tool::Select => "selection",
             Tool::Block => "block",
             Tool::Entity => "entity",
+            Tool::Texture => "texture",
         },
         "entity_class": editor.entity_class,
         "fgd": editor.game_data.as_deref().map(|data| json!({
@@ -1220,6 +1456,42 @@ pub fn compile_status_json(editor: &Editor, lines: usize) -> Value {
         "leaked": job.leaked,
         "leak_line_shown": editor.pointfile.is_some(),
         "output": tail,
+    })
+}
+
+/// Folders whose materials are not meant for brushes.
+const NON_BRUSH_FOLDERS: [&str; 9] = [
+    "models/",
+    "particle/",
+    "particles/",
+    "vgui/",
+    "hud/",
+    "console/",
+    "sprites/",
+    "editor/",
+    "effects/",
+];
+
+fn face_json(face: &FaceInfo) -> Value {
+    let axis = |axis: &mallet_vmf::TexAxis| {
+        json!({
+            "axis": [axis.axis.x, axis.axis.y, axis.axis.z],
+            "shift": axis.offset,
+            "scale": axis.scale,
+        })
+    };
+    let normal = face.normal();
+    let center = face.center();
+    json!({
+        "side": face.side.id,
+        "solid": face.solid,
+        "material": face.side.material,
+        "normal": [normal.x, normal.y, normal.z],
+        "center": [center.x, center.y, center.z],
+        "u": axis(&face.side.uaxis),
+        "v": axis(&face.side.vaxis),
+        "rotation": face.side.rotation.unwrap_or(0.0),
+        "lightmap_scale": face.side.lightmap_scale,
     })
 }
 

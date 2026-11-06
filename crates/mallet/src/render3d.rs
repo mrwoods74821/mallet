@@ -93,6 +93,7 @@ struct GpuTexture {
 }
 
 /// A translucent face, kept on the CPU so it can be sorted back to front every frame.
+#[derive(Clone)]
 struct TranslucentFace {
     center: Vec3,
     key: String,
@@ -107,6 +108,17 @@ struct TranslucentFace {
 struct StaticFaces {
     generation: u64,
     opaque: FaceMesh,
+    translucent: Vec<TranslucentFace>,
+    /// Each chunk's triangles, kept so a retexture can rebuild just its chunks.
+    cells: HashMap<[i32; 3], CellFaces>,
+}
+
+/// The triangles of one chunk before upload, by texture, and its blended faces.
+#[derive(Clone)]
+struct CellFaces {
+    min: Vec3,
+    max: Vec3,
+    by_texture: HashMap<String, Vec<FaceVertex>>,
     translucent: Vec<TranslucentFace>,
 }
 
@@ -547,17 +559,13 @@ impl Renderer3D {
                 .as_ref()
                 .is_none_or(|faces| faces.generation != scene.geometry_generation)
             {
-                let (opaque, translucent) = self.face_mesh(scene.meshes.iter(), None, 0.0, true);
-                self.faces = Some(StaticFaces {
-                    generation: scene.geometry_generation,
-                    opaque,
-                    translucent,
-                });
+                self.update_static_faces(scene);
             }
         } else {
             self.ensure_edges(scene);
         }
         let selected: Vec<&WireMesh> = scene.meshes.iter().filter(|mesh| mesh.selected).collect();
+        let selected_faces = selected_face_meshes(scene);
         let (tinted, tinted_translucent) = if style == CameraStyle::Textured {
             let (opaque, translucent) = self.face_mesh(
                 selected.iter().copied(),
@@ -569,6 +577,10 @@ impl Renderer3D {
         } else {
             (None, Vec::new())
         };
+        // Faces picked with the texture tool get a lighter tint, so the texture being
+        // lined up stays easy to see.
+        let face_tinted = (style == CameraStyle::Textured && !selected_faces.is_empty() && !overlay.hide_face_mask)
+            .then(|| self.face_mesh(selected_faces.iter(), None, FACE_TINT, false).0);
         let selected_owners: HashSet<Owner> = selected.iter().filter_map(|mesh| mesh.owner).collect();
         let mut outline = Vec::new();
         // Lines that belong to nothing, such as a leak line, show in the textured view too.
@@ -577,6 +589,9 @@ impl Renderer3D {
         }
         for mesh in &selected {
             push_edges(&mut outline, &mesh.edges, overlay.transform.as_ref(), SELECTED_COLOR);
+        }
+        for mesh in &selected_faces {
+            push_edges(&mut outline, &mesh.edges, None, FACE_OUTLINE_COLOR);
         }
         if let Some(block) = &overlay.block {
             push_edges(&mut outline, &box_edges(block), None, TOOL_COLOR);
@@ -636,7 +651,7 @@ impl Renderer3D {
                     if let Some((buffer, ranges)) = &instances {
                         self.draw_models(&mut pass, buffer, ranges, false, &mut stats);
                     }
-                    if let Some(tinted) = &tinted {
+                    for tinted in [&tinted, &face_tinted].into_iter().flatten() {
                         pass.set_pipeline(&self.overdraw_pipeline);
                         pass.set_vertex_buffer(0, tinted.buffer.slice(..));
                         for (key, range) in tinted.chunks.iter().flat_map(|chunk| &chunk.batches) {
@@ -1089,6 +1104,61 @@ impl Renderer3D {
     /// Builds a vertex buffer for the faces of `meshes`. With `chunked`, brushes are
     /// grouped by which world cube their centre is in, so whole chunks can be culled.
     /// Translucent faces are always returned separately, for sorting.
+    /// Brings the cached map faces up to the scene's geometry: just the chunks of
+    /// retextured brushes when that is all that changed, otherwise everything.
+    fn update_static_faces(&mut self, scene: &Scene) {
+        if let Some(mut faces) = self.faces.take() {
+            // Follow the retexture steps from what was last drawn to now.
+            let mut generation = faces.generation;
+            let mut changed = Vec::new();
+            for step in &scene.retextures {
+                if step.from == generation {
+                    changed.extend_from_slice(&step.meshes);
+                    generation = step.to;
+                }
+            }
+            if generation == scene.geometry_generation && !changed.is_empty() {
+                let dirty: HashSet<[i32; 3]> = changed
+                    .iter()
+                    .filter_map(|at| scene.meshes.get(*at))
+                    .map(|mesh| chunk_cell(&mesh.bounds))
+                    .collect();
+                let rebuilt = self.cell_faces(
+                    scene
+                        .meshes
+                        .iter()
+                        .filter(|mesh| dirty.contains(&chunk_cell(&mesh.bounds))),
+                    None,
+                    0.0,
+                    true,
+                );
+                faces.cells.retain(|cell, _| !dirty.contains(cell));
+                faces.cells.extend(rebuilt);
+                faces.opaque = self.upload_cells(&faces.cells);
+                faces.translucent = faces
+                    .cells
+                    .values()
+                    .flat_map(|cell| cell.translucent.iter().cloned())
+                    .collect();
+                faces.generation = scene.geometry_generation;
+                self.faces = Some(faces);
+                return;
+            }
+        }
+        let cells = self.cell_faces(scene.meshes.iter(), None, 0.0, true);
+        let opaque = self.upload_cells(&cells);
+        let translucent = cells
+            .values()
+            .flat_map(|cell| cell.translucent.iter().cloned())
+            .collect();
+        self.faces = Some(StaticFaces {
+            generation: scene.geometry_generation,
+            opaque,
+            translucent,
+            cells,
+        });
+    }
+
     fn face_mesh<'a>(
         &self,
         meshes: impl Iterator<Item = &'a WireMesh>,
@@ -1096,25 +1166,34 @@ impl Renderer3D {
         highlight: f32,
         chunked: bool,
     ) -> (FaceMesh, Vec<TranslucentFace>) {
-        let mut translucent = Vec::new();
-        type ChunkFaces = (Vec3, Vec3, HashMap<String, Vec<FaceVertex>>);
-        let mut chunks: HashMap<[i32; 3], ChunkFaces> = HashMap::new();
+        let cells = self.cell_faces(meshes, remap, highlight, chunked);
+        let translucent = cells
+            .values()
+            .flat_map(|cell| cell.translucent.iter().cloned())
+            .collect();
+        (self.upload_cells(&cells), translucent)
+    }
+
+    /// Triangulates meshes into chunks by where their centres fall, or into one chunk.
+    fn cell_faces<'a>(
+        &self,
+        meshes: impl Iterator<Item = &'a WireMesh>,
+        remap: Option<&Remap>,
+        highlight: f32,
+        chunked: bool,
+    ) -> HashMap<[i32; 3], CellFaces> {
+        let mut chunks: HashMap<[i32; 3], CellFaces> = HashMap::new();
         for mesh in meshes {
             let bounds = mesh.mapped_bounds(remap);
-            let cell = if chunked {
-                (bounds.center() / CHUNK_SIZE).floor().as_ivec3().to_array()
-            } else {
-                [0; 3]
-            };
-            let chunk = chunks.entry(cell).or_insert_with(|| {
-                (
-                    Vec3::splat(f32::INFINITY),
-                    Vec3::splat(f32::NEG_INFINITY),
-                    HashMap::new(),
-                )
+            let cell = if chunked { chunk_cell(&bounds) } else { [0; 3] };
+            let chunk = chunks.entry(cell).or_insert_with(|| CellFaces {
+                min: Vec3::splat(f32::INFINITY),
+                max: Vec3::splat(f32::NEG_INFINITY),
+                by_texture: HashMap::new(),
+                translucent: Vec::new(),
             });
-            chunk.0 = chunk.0.min(bounds.min.as_vec3());
-            chunk.1 = chunk.1.max(bounds.max.as_vec3());
+            chunk.min = chunk.min.min(bounds.min.as_vec3());
+            chunk.max = chunk.max.max(bounds.max.as_vec3());
             let tint = if mesh.faces.iter().any(|face| face.material.is_none()) {
                 let [r, g, b, _] = egui::Rgba::from(mesh.color).to_array();
                 [r, g, b]
@@ -1131,33 +1210,44 @@ impl Renderer3D {
                     let mut vertices = Vec::new();
                     triangulate(face, texture, tint, highlight, remap, &mut vertices);
                     let center = face.vertices.iter().sum::<DVec3>() / face.vertices.len().max(1) as f64;
-                    translucent.push(TranslucentFace {
+                    chunk.translucent.push(TranslucentFace {
                         center: center.as_vec3(),
                         owner: mesh.owner,
                         key,
                         vertices,
                     });
                 } else {
-                    triangulate(face, texture, tint, highlight, remap, chunk.2.entry(key).or_default());
+                    triangulate(
+                        face,
+                        texture,
+                        tint,
+                        highlight,
+                        remap,
+                        chunk.by_texture.entry(key).or_default(),
+                    );
                 }
             }
         }
+        chunks
+    }
 
+    /// Puts every chunk's triangles into one vertex buffer, batched by texture.
+    fn upload_cells(&self, cells: &HashMap<[i32; 3], CellFaces>) -> FaceMesh {
         let mut all = Vec::new();
-        let mut built = Vec::with_capacity(chunks.len());
-        for (_, (min, max, by_texture)) in chunks {
-            let mut keys: Vec<String> = by_texture.keys().cloned().collect();
+        let mut built = Vec::with_capacity(cells.len());
+        for cell in cells.values() {
+            let mut keys: Vec<&String> = cell.by_texture.keys().collect();
             keys.sort();
             let mut batches = Vec::with_capacity(keys.len());
             let first = all.len();
             for key in keys {
                 let start = all.len() as u32;
-                all.extend_from_slice(&by_texture[&key]);
-                batches.push((key, start..all.len() as u32));
+                all.extend_from_slice(&cell.by_texture[key]);
+                batches.push((key.clone(), start..all.len() as u32));
             }
             built.push(Chunk {
-                min,
-                max,
+                min: cell.min,
+                max: cell.max,
                 batches,
                 triangles: (all.len() - first) / 3,
             });
@@ -1171,7 +1261,7 @@ impl Renderer3D {
             },
             usage: wgpu::BufferUsages::VERTEX,
         });
-        (FaceMesh { buffer, chunks: built }, translucent)
+        FaceMesh { buffer, chunks: built }
     }
 
     fn line_mesh(&self, vertices: &[LineVertex]) -> Option<LineMesh> {
@@ -1561,6 +1651,42 @@ fn view_projection(camera: &Camera3D, aspect: f32) -> Mat4 {
     let projection = Mat4::perspective_rh(vertical, aspect, NEAR, far);
     let view = Mat4::look_to_rh(camera.position.as_vec3(), camera.forward().as_vec3(), Vec3::Z);
     projection * view
+}
+
+/// The chunk a mesh's faces go into, by where its centre falls.
+fn chunk_cell(bounds: &mallet_vmf::geometry::Bounds) -> [i32; 3] {
+    (bounds.center() / CHUNK_SIZE).floor().as_ivec3().to_array()
+}
+
+/// How strongly faces the texture tool has selected are tinted red.
+const FACE_TINT: f32 = 0.18;
+/// The outline of faces the texture tool has selected.
+const FACE_OUTLINE_COLOR: Color32 = Color32::from_rgb(255, 210, 60);
+
+/// The faces the texture tool has selected, as meshes holding just those faces and their
+/// edges, so the selection tint and outline can draw them.
+fn selected_face_meshes(scene: &Scene) -> Vec<WireMesh> {
+    scene
+        .meshes
+        .iter()
+        .filter(|mesh| !mesh.selected && mesh.faces.iter().any(|face| face.selected))
+        .map(|mesh| {
+            let faces: Vec<SceneFace> = mesh.faces.iter().filter(|face| face.selected).cloned().collect();
+            let edges = faces
+                .iter()
+                .flat_map(|face| {
+                    let count = face.vertices.len();
+                    (0..count).map(move |index| [face.vertices[index], face.vertices[(index + 1) % count]])
+                })
+                .collect();
+            WireMesh {
+                faces,
+                edges,
+                selected: true,
+                ..mesh.clone()
+            }
+        })
+        .collect()
 }
 
 fn material_key(material: &str) -> String {

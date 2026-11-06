@@ -46,6 +46,9 @@ pub enum Tool {
     Block,
     /// Hammer's Entity tool (Shift+E).
     Entity,
+    /// Hammer's Texture Application tool (Shift+A): pick faces and change their material
+    /// and alignment.
+    Texture,
 }
 
 /// Point entity classes offered by the entity tool's class list. Any other class name
@@ -202,6 +205,7 @@ pub struct MapState {
     last_block: Bounds,
     refit_on_layout: bool,
     pointfile: Option<Vec<DVec3>>,
+    face_selection: BTreeSet<u32>,
 }
 
 /// What a tab shows in the tab strip.
@@ -284,6 +288,19 @@ pub struct Editor {
     pub about_open: bool,
     /// The leak line VBSP traced, shown in the views.
     pub pointfile: Option<Vec<DVec3>>,
+    /// Brush faces the texture tool has selected, by side id.
+    pub face_selection: BTreeSet<u32>,
+    /// What a texture tool click does.
+    pub texture_mode: crate::faces::TextureMode,
+    /// The material and alignment last picked up from a face.
+    pub lifted: Option<mallet_vmf::Side>,
+    /// Materials applied lately, newest first, for the texture browser.
+    pub recent_materials: Vec<String>,
+    /// Every material of the game, listed once per game for MCP tools.
+    material_list: Option<(PathBuf, Arc<Vec<String>>)>,
+    /// Whether the texture browser is showing, and a filter an MCP tool asked for.
+    pub texture_browser_open: bool,
+    pub texture_browser_filter: Option<String>,
     /// The GPU renderer for the textured camera view, created once the window has a GPU.
     pub gpu: Option<Renderer3D>,
     /// The last block created; new blocks reuse its depth.
@@ -333,6 +350,13 @@ impl Default for Editor {
             options_section: None,
             about_open: false,
             pointfile: None,
+            face_selection: BTreeSet::new(),
+            recent_materials: Vec::new(),
+            texture_mode: crate::faces::TextureMode::default(),
+            lifted: None,
+            material_list: None,
+            texture_browser_open: false,
+            texture_browser_filter: None,
             window_shot: WindowShot::Idle,
             gpu: None,
             last_block: DEFAULT_BLOCK,
@@ -472,6 +496,7 @@ impl Editor {
             last_block: std::mem::replace(&mut self.last_block, DEFAULT_BLOCK),
             refit_on_layout: std::mem::take(&mut self.refit_on_layout),
             pointfile: self.pointfile.take(),
+            face_selection: std::mem::take(&mut self.face_selection),
         }
     }
 
@@ -485,6 +510,8 @@ impl Editor {
         self.last_block = map.last_block;
         self.refit_on_layout = map.refit_on_layout;
         self.pointfile = map.pointfile;
+        self.face_selection = map.face_selection;
+        self.scene.mark_faces(&self.face_selection);
     }
 
     /// Opens a map and frames it in every viewport.
@@ -609,6 +636,29 @@ impl Editor {
         let scene = &self.scene;
         self.selection.retain(|owner| scene.contains(*owner));
         self.scene.mark_selected(&self.selection);
+        let sides: BTreeSet<u32> = self
+            .scene
+            .meshes
+            .iter()
+            .flat_map(|mesh| &mesh.faces)
+            .filter_map(|face| face.side)
+            .collect();
+        self.face_selection.retain(|side| sides.contains(side));
+        self.scene.mark_faces(&self.face_selection);
+    }
+
+    /// Every material of the game, listed on first use.
+    pub fn material_list(&mut self) -> Result<Arc<Vec<String>>, String> {
+        let materials = self.materials.as_ref().ok_or("choose a game folder first")?;
+        let game = materials.filesystem().game_dir().to_owned();
+        if let Some((listed, list)) = &self.material_list {
+            if *listed == game {
+                return Ok(Arc::clone(list));
+            }
+        }
+        let list = Arc::new(materials.loader().list());
+        self.material_list = Some((game, Arc::clone(&list)));
+        Ok(list)
     }
 
     /// Changes the selection. Owners that are not in the map are ignored.
@@ -703,7 +753,7 @@ impl Editor {
     pub fn handle_box(&self) -> Option<Bounds> {
         match self.tool {
             Tool::Block => self.overlay.block,
-            Tool::Entity => None,
+            Tool::Entity | Tool::Texture => None,
             Tool::Select => {
                 let bounds = self.scene.selection_bounds();
                 (!bounds.is_empty()).then(|| self.overlay.transform.map_or(bounds, |remap| remap.to))
@@ -929,7 +979,11 @@ impl Editor {
     /// Mounts a game folder, the one holding `gameinfo.txt`, so materials show their
     /// textures. Returns how many search paths were mounted.
     pub fn set_game_dir(&mut self, game_dir: &Path) -> Result<usize, String> {
-        let filesystem = GameFs::from_gameinfo(game_dir).map_err(|error| error.to_string())?;
+        let skipped = self.config.unmounted_games.clone();
+        let filesystem = GameFs::with_mounts(game_dir, &|name| {
+            !skipped.iter().any(|skip| skip.eq_ignore_ascii_case(name))
+        })
+        .map_err(|error| error.to_string())?;
         let mounts = filesystem.mounts().len();
         self.materials = Some(Materials::new(filesystem));
         self.models.clear();

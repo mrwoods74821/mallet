@@ -116,6 +116,8 @@ pub struct Overlay {
     pub handles: Option<Bounds>,
     /// The entity tool's position for a new entity, waiting for Enter.
     pub entity: Option<DVec3>,
+    /// Faces selected with the texture tool are drawn without their red tint.
+    pub hide_face_mask: bool,
 }
 
 /// Half-size of the marker the entity tool draws where a new entity will go.
@@ -159,6 +161,7 @@ impl WireMesh {
 }
 
 /// One polygon of a brush or point entity box, for the textured 3D view.
+#[derive(Clone)]
 pub struct SceneFace {
     /// The face's material, or `None` for point entity boxes drawn in a flat colour.
     pub material: Option<String>,
@@ -168,6 +171,21 @@ pub struct SceneFace {
     pub normal: DVec3,
     pub uaxis: TexAxis,
     pub vaxis: TexAxis,
+    /// The brush side this face shows, by id, so the texture tool can pick and edit it.
+    pub side: Option<u32>,
+    /// The brush the side belongs to.
+    pub solid: Option<u32>,
+    /// Whether the texture tool has this face selected.
+    pub selected: bool,
+}
+
+/// A face hit by a ray, for the texture tool.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaceHit {
+    pub side: u32,
+    pub solid: u32,
+    /// Where the ray met the face.
+    pub point: DVec3,
 }
 
 /// Loaded prop models by [`model_key`]; `None` when a model could not be loaded.
@@ -188,6 +206,7 @@ pub struct ModelInstance {
 }
 
 /// The geometry of one brush or point entity.
+#[derive(Clone)]
 pub struct WireMesh {
     pub color: Color32,
     pub edges: Vec<[DVec3; 2]>,
@@ -215,7 +234,22 @@ pub struct Scene {
     pub bounds: Bounds,
     pub solid_count: usize,
     pub entity_count: usize,
+    /// Recent changes that only touched materials and alignment, oldest first, so a
+    /// renderer that has drawn generation `from` of one can follow the chain to the
+    /// current generation and update just those meshes.
+    pub retextures: Vec<Retexture>,
 }
+
+/// One step of [`Scene::retextures`]: these meshes changed from `from` to `to`.
+#[derive(Debug, Clone)]
+pub struct Retexture {
+    pub from: u64,
+    pub to: u64,
+    pub meshes: Vec<usize>,
+}
+
+/// How many retexture steps a scene remembers; a renderer further behind rebuilds all.
+const MAX_RETEXTURES: usize = 64;
 
 impl Scene {
     /// Builds wireframes for every visible brush and point entity in the map.
@@ -372,6 +406,70 @@ impl Scene {
             .map(|(owner, _)| owner)
     }
 
+    /// The brush face a ray hits first, for the texture tool. Point entities and props
+    /// block the ray but are not faces.
+    pub fn pick_face(&self, origin: DVec3, direction: DVec3) -> Option<FaceHit> {
+        let (mesh, distance, plane) = self
+            .meshes
+            .iter()
+            .filter(|mesh| mesh.owner.is_some())
+            .filter_map(|mesh| {
+                let (distance, plane) = ray_convex_face(origin, direction, &mesh.planes)?;
+                Some((mesh, distance, plane))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        let face = mesh.faces.get(plane?)?;
+        Some(FaceHit {
+            side: face.side?,
+            solid: face.solid?,
+            point: origin + direction * distance,
+        })
+    }
+
+    /// Rebuilds the meshes of brushes whose materials or texture alignment changed, keeping
+    /// everything else, and notes them in [`Scene::retextures`]. Returns `false` when a
+    /// brush has no mesh, so the caller should rebuild the whole scene.
+    pub fn retexture(&mut self, solids: &[Solid]) -> bool {
+        let index: HashMap<u32, usize> = self
+            .meshes
+            .iter()
+            .enumerate()
+            .filter_map(|(at, mesh)| Some((mesh.faces.first()?.solid?, at)))
+            .collect();
+        let mut changed = Vec::with_capacity(solids.len());
+        for solid in solids {
+            let Some(&at) = solid.id().and_then(|id| index.get(&id)) else {
+                return false;
+            };
+            let old = &self.meshes[at];
+            let Some(mut mesh) = brush_mesh(solid, old.color, old.owner) else {
+                return false;
+            };
+            mesh.selected = old.selected;
+            self.meshes[at] = mesh;
+            changed.push(at);
+        }
+        let from = self.geometry_generation;
+        self.geometry_generation = next_generation();
+        self.retextures.push(Retexture {
+            from,
+            to: self.geometry_generation,
+            meshes: changed,
+        });
+        if self.retextures.len() > MAX_RETEXTURES {
+            self.retextures.remove(0);
+        }
+        true
+    }
+
+    /// Marks the faces whose side ids are in `sides` as selected, for drawing.
+    pub fn mark_faces(&mut self, sides: &BTreeSet<u32>) {
+        for face in self.meshes.iter_mut().flat_map(|mesh| mesh.faces.iter_mut()) {
+            face.selected = face.side.is_some_and(|side| sides.contains(&side));
+        }
+        self.selection_generation = next_generation();
+    }
+
     /// Where a ray first hits a brush face, ignoring point entities and props. Used to
     /// place new entities on the surface under the cursor.
     pub fn surface_hit(&self, origin: DVec3, direction: DVec3) -> Option<DVec3> {
@@ -420,12 +518,18 @@ fn segment_distance(point: DVec2, a: DVec2, b: DVec2) -> f64 {
 /// A ray starting inside the volume misses it, so clicking from inside a brush picks
 /// what is beyond it, as faces seen from inside are not drawn either.
 fn ray_convex(origin: DVec3, direction: DVec3, planes: &[Plane]) -> Option<f64> {
+    ray_convex_face(origin, direction, planes).map(|(distance, _)| distance)
+}
+
+/// Like [`ray_convex`], also giving the index of the plane the ray enters through.
+fn ray_convex_face(origin: DVec3, direction: DVec3, planes: &[Plane]) -> Option<(f64, Option<usize>)> {
     if planes.is_empty() || planes.iter().all(|plane| plane.distance(origin) <= 0.0) {
         return None;
     }
     let mut enter: f64 = 0.0;
+    let mut entered = None;
     let mut exit = f64::INFINITY;
-    for plane in planes {
+    for (index, plane) in planes.iter().enumerate() {
         let facing = plane.normal.dot(direction);
         let distance = plane.distance(origin);
         if facing.abs() < 1e-12 {
@@ -436,7 +540,10 @@ fn ray_convex(origin: DVec3, direction: DVec3, planes: &[Plane]) -> Option<f64> 
         }
         let t = -distance / facing;
         if facing < 0.0 {
-            enter = enter.max(t);
+            if t > enter || entered.is_none() {
+                enter = enter.max(t);
+                entered = Some(index);
+            }
         } else {
             exit = exit.min(t);
         }
@@ -444,7 +551,7 @@ fn ray_convex(origin: DVec3, direction: DVec3, planes: &[Plane]) -> Option<f64> 
             return None;
         }
     }
-    Some(enter)
+    Some((enter, entered))
 }
 
 fn to_color(color: Option<[u8; 3]>) -> Color32 {
@@ -475,25 +582,31 @@ fn brush_mesh(solid: &Solid, color: Color32, owner: Option<Owner>) -> Option<Wir
         }
     }
     let sides: Vec<&Side> = solid.sides().collect();
-    let scene_faces = faces
+    // Faces and planes stay in the same order, so the plane a ray enters through names
+    // the face it hit.
+    let (scene_faces, planes): (Vec<SceneFace>, Vec<Plane>) = faces
         .iter()
         .filter_map(|face| {
             let side = sides.get(face.side)?;
-            Some(SceneFace {
+            let scene_face = SceneFace {
                 material: Some(side.material.clone()),
                 vertices: face.vertices.clone(),
                 normal: face.plane.normal,
                 uaxis: side.uaxis,
                 vaxis: side.vaxis,
-            })
+                side: Some(side.id),
+                solid: solid.id(),
+                selected: false,
+            };
+            Some((scene_face, face.plane))
         })
-        .collect();
+        .unzip();
     Some(WireMesh {
         color,
         edges,
         faces: scene_faces,
         bounds: faces_bounds(&faces),
-        planes: faces.iter().map(|face| face.plane).collect(),
+        planes,
         owner,
         selected: false,
         model: None,
@@ -550,6 +663,9 @@ fn box_faces(bounds: &Bounds) -> Vec<SceneFace> {
                 normal,
                 uaxis: flat_axis,
                 vaxis: flat_axis,
+                side: None,
+                solid: None,
+                selected: false,
             }
         })
         .collect()

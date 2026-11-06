@@ -9,10 +9,11 @@
 Mallet opens and saves VMF files without losing anything and shows them in Hammer's
 four-viewport layout, with textured brushes and prop models in 3D. It has Hammer's
 Selection, Block and Entity tools, Object Properties driven by the game's FGD, map tabs,
-and a CompilePal-style compile window with presets, SourceCubemap and leak lines. A
+a CompilePal-style compile window with presets, SourceCubemap and leak lines, and
+Hammer's texture tool with a texture browser that loads every mounted game's materials. A
 built-in MCP server lets AI agents inspect and edit maps, compile them and take
-screenshots. It is a work in progress: texturing, clipping, vertex editing and
-displacements are next.
+screenshots. It is a work in progress: clipping, vertex editing and displacements are
+next.
 
 ## Running
 
@@ -49,7 +50,7 @@ These follow Hammer's defaults.
 | Ctrl+N / Ctrl+O / Ctrl+S | New map tab / open in a tab / save (a new map asks where to save) |
 | Ctrl+W / Ctrl+Tab / Ctrl+Shift+Tab | Close tab (asks about unsaved changes) / next tab / previous tab |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
-| Shift+S / Shift+B / Shift+E | Selection tool / Block tool / Entity tool |
+| Shift+S / Shift+B / Shift+E / Shift+A | Selection tool / Block tool / Entity tool / Texture application |
 | Alt+Enter or double-click | Object Properties for the selection: keyvalues, outputs, inputs and flags from the game's FGD |
 | F9 / Shift+F9 | Open the compile window / compile again with the preset used last |
 | Click | In 2D, click a brush's centre × or its outline to select it; in 3D, click it (or aim the crosshair at it in mouselook). Entities are selected whole; Ctrl+click toggles |
@@ -73,6 +74,27 @@ frame rate, CPU time per frame, how many chunks and props culling left to draw, 
 reused their last image, and how many textures are still loading. View > 3D draw distance
 sets how far the 3D view draws, like Hammer's back clipping plane. For the best
 speed on large maps, run the release build (`cargo build --release -p mallet`).
+
+## Texturing
+
+Shift+A opens the Face Edit Sheet, laid out like Hammer++'s. In the 3D view, click a face
+to select it and pick up its texture (Lift+Select, as in Hammer; the Mode menu has Lift,
+Select, Apply and Align to View too), Ctrl+click to add faces and Shift+click for the whole
+brush. Right-click puts the current texture on a face; Alt+right-click also puts the picked
+up alignment on it. Scale, shift, luxel scale, rotation and the UV vectors apply as you drag,
+type, scroll or click their arrows, and a drag is one undo step. The ½ and ×2 buttons halve
+or double the scale of one axis while keeping the texture pinned at the face's corner, and
+the dice buttons shift each face randomly, for stairs. Justify (Fit, L, R, T, B, C, and
+Fit width and Fit height, which keep the texture's proportions, with Treat as one), World and Face alignment, Apply Nodraw, smoothing groups, Hide mask and
+Replace Textures work as in Hammer.
+
+The texture browser lists every material the game mounts, including the games in Garry's
+Mod's `cfg/mount.cfg` and every addon. The sidebar narrows it to particular games, addons
+or folders, each with a count; the bar below has Hammer's filter, keywords, "only used
+textures", Mark, Replace, Open Source and the Opaque, Translucent, Selfillum, EnvMask and
+error filters. The "per row" slider sets how many textures fit across, and they resize with
+the window. Thumbnails load in the background while you scroll. Mounted games can be
+turned off one by one in Edit > Mallet Options > Game.
 
 ## Compiling
 

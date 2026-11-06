@@ -88,7 +88,11 @@ or minimized, because Windows sends no repaints to a minimized window.
 
 `GameFs` mounts the `game` search paths of a game's `gameinfo.txt` in priority order:
 loose folders, `folder/*` wildcards such as GMod's addons, and VPK archives (only their
-directory trees are read up front). `Materials` turns a material name into the texture
+directory trees are read up front). After them come the games Garry's Mod lists in
+`cfg/mount.cfg`, each folder with every `*_dir.vpk` in it, unless Mallet Options turns
+them off. Every mount belongs to a `Source` (a game VPK or folder, a mounted game, an
+addon or downloads), and listings say which source each file is read from, so the texture
+browser can filter by them. `Materials` turns a material name into the texture
 Hammer shows: `%tooltexture` first, then `$basetexture`, following `patch` materials. VTF
 images are decoded at the largest mip level no bigger than 512 pixels, and loading runs on
 every CPU core. Materials that cannot be found render as Hammer's pink and black checkers.
@@ -124,6 +128,29 @@ named-target checks and pickers for the class's outputs and the target's inputs;
 listing the outputs elsewhere that name this entity; and Flags. Help for the hovered key
 shows at the bottom. Text fields commit when they lose focus, and every change is an
 undoable edit, so there is no Apply button.
+
+## Texturing
+
+`mallet_vmf::texture` holds the Face Edit math, tested on its own: Hammer's world axes
+(Quake's base axes, floors first), face axes that follow slopes, rotation about the face
+normal, and justify and fit, all on `u = point · axis / scale + offset`.
+
+The texture tool keeps a set of selected side ids per tab; scene faces carry their side and
+brush ids, so a ray picks one face through the plane it enters. Every face change replaces
+the brushes involved with `Edit::ReplaceSolids`, which undoes exactly. A drag passes a group
+to `History::apply_grouped`, which keeps only the first step's inverse, so the whole drag
+undoes at once.
+
+Texture changes do not change shape, so they skip the full scene rebuild: `Scene::retexture`
+rebuilds only the meshes of the brushes involved and records the step in
+`Scene::retextures`. The renderer keeps every chunk's triangles on the CPU; when it can
+follow the recorded steps from what it last drew to the current generation, it
+re-triangulates only the chunks those meshes are in. A face edit on City 17 (9,289 brushes)
+takes about 10 ms instead of 250.
+
+The texture browser lists materials with their sources on a thread, describes every VMT in
+the background for the kind filters (`MaterialInfo`), and loads thumbnails on four worker
+threads, newest request first, so what is on screen loads before what scrolled past.
 
 ## Compiling
 
@@ -242,6 +269,11 @@ Tools:
 | `compile_status`, `cancel_compile` | Steps, progress, problems, leak and output of the compile |
 | `show_compile`, `show_options`, `show_about` | Open the compile window or Mallet Options on a tab, or Help > About |
 | `load_pointfile`, `clear_pointfile` | Show or hide a leak line |
+| `list_materials` | The game's materials, filtered, or the ones the map uses with counts |
+| `get_faces`, `select_faces`, `pick_face` | Brush faces: details, texture tool selection, and the face under a camera pixel |
+| `set_faces` | Material, scale, shift, rotation, lightmap scale, alignment and justify, as one undo step |
+| `replace_material` | Replace a material in the map or the selected faces |
+| `show_texture_browser` | Open the texture browser with a search |
 | `send_input` | Key presses, clicks and drags fed into the window as if a user made them |
 
 `send_input` queues synthetic egui events that `MalletApp::raw_input_hook` feeds into the
@@ -257,10 +289,9 @@ make any map change through `Editor::apply_edit` so it stays undoable.
 
 ## Roadmap
 
-1. Rotate handles and texture application, as `Edit`s with matching MCP tools; the
-   Model and VisGroup tabs of Object Properties.
-2. A texture browser, model skins and bodygroups, and a model browser for prop
-   entities.
+1. Rotate handles as `Edit`s with matching MCP tools; the Model and VisGroup tabs of
+   Object Properties.
+2. Model skins and bodygroups, and a model browser for prop entities.
 3. Clip, vertex and displacement tools.
 4. Lighting: a real-time preview first, then a bake through VRAD with lightmaps read back.
 5. Entity I/O editor, instances, VisGroups and Check Problems.

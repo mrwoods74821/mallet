@@ -12,6 +12,7 @@ mod compile;
 mod config;
 mod document;
 mod editor;
+mod faces;
 mod input;
 mod keymap;
 mod mcp;

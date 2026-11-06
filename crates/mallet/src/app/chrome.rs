@@ -36,7 +36,11 @@ const PALETTE: [PaletteEntry; 9] = [
     ),
     (icon::LIGHTBULB, "Entity tool", Some((Tool::Entity, Action::EntityTool))),
     (icon::CUBE, "Block tool", Some((Tool::Block, Action::BlockTool))),
-    (icon::PAINT_BRUSH, "Texture application", None),
+    (
+        icon::PAINT_BRUSH,
+        "Texture application",
+        Some((Tool::Texture, Action::TextureTool)),
+    ),
     (icon::STAMP, "Apply decals", None),
     (icon::STACK, "Overlays", None),
     (icon::SCISSORS, "Clipping tool", None),
@@ -327,11 +331,14 @@ impl MalletApp {
                         if let Some((_, [width, height])) = &preview {
                             ui.label(format!("{width}x{height}"));
                         }
-                        ui.add_enabled(
-                            false,
-                            egui::Button::new(format!("{} Browse...", icon::MAGNIFYING_GLASS)),
-                        )
-                        .on_disabled_hover_text("Texture browser (coming soon)");
+                        if ui
+                            .button(format!("{} Browse...", icon::MAGNIFYING_GLASS))
+                            .on_hover_text("Texture browser")
+                            .clicked()
+                        {
+                            editor.texture_browser_open = true;
+                            self.texture_browser.pick = super::texture_browser::Pick::Current;
+                        }
                     });
                 });
                 ui.separator();
@@ -516,12 +523,26 @@ impl MalletApp {
 }
 
 /// The preview texture of the current material, loaded once per material name.
-fn texture_preview(
+pub(super) fn texture_preview(
     ctx: &egui::Context,
     previews: &mut TexturePreviews,
     editor: &mut Editor,
 ) -> Option<(egui::TextureHandle, [u32; 2])> {
-    let name = editor.material.trim().to_owned();
+    let name = editor.material.clone();
+    material_preview(ctx, previews, editor, &name)
+}
+
+/// The preview of any material, loaded once per name. `None` when it has no texture.
+pub(super) fn material_preview(
+    ctx: &egui::Context,
+    previews: &mut TexturePreviews,
+    editor: &mut Editor,
+    name: &str,
+) -> Option<(egui::TextureHandle, [u32; 2])> {
+    let name = name.trim().to_owned();
+    if name.is_empty() {
+        return None;
+    }
     if let Some(cached) = previews.get(&name) {
         return cached.clone();
     }

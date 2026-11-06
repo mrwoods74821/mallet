@@ -19,6 +19,10 @@ pub enum Justify {
     Center,
     /// Stretch the texture once across the face.
     Fit,
+    /// Fit the texture once across the face's width, keeping its proportions.
+    FitWidth,
+    /// Fit the texture once down the face's height, keeping its proportions.
+    FitHeight,
 }
 
 /// The axes Hammer and the compilers pick for a face aligned to the world: the major axis
@@ -129,9 +133,22 @@ impl Side {
         let [width, height] = size.map(|side| side.max(1.0));
         let (u_min, u_max) = extent(self.uaxis.axis, points);
         let (v_min, v_max) = extent(self.vaxis.axis, points);
-        if how == Justify::Fit {
-            self.uaxis.scale = ((u_max - u_min) / width).max(1e-4);
-            self.vaxis.scale = ((v_max - v_min) / height).max(1e-4);
+        match how {
+            Justify::Fit => {
+                self.uaxis.scale = ((u_max - u_min) / width).max(1e-4);
+                self.vaxis.scale = ((v_max - v_min) / height).max(1e-4);
+            }
+            // One axis fits; the other gets the same world units per texel, so the
+            // texture is not stretched.
+            Justify::FitWidth => {
+                self.uaxis.scale = ((u_max - u_min) / width).max(1e-4);
+                self.vaxis.scale = self.uaxis.scale;
+            }
+            Justify::FitHeight => {
+                self.vaxis.scale = ((v_max - v_min) / height).max(1e-4);
+                self.uaxis.scale = self.vaxis.scale;
+            }
+            _ => {}
         }
         let (u, v) = (&mut self.uaxis, &mut self.vaxis);
         // The texel a world position lands on is `position / scale + offset`.
@@ -147,7 +164,7 @@ impl Side {
                 u.offset = middle(u, u_min, u_max, width);
                 v.offset = middle(v, v_min, v_max, height);
             }
-            Justify::Fit => {
+            Justify::Fit | Justify::FitWidth | Justify::FitHeight => {
                 u.offset = start(u, u_min);
                 v.offset = start(v, v_min);
             }
@@ -243,6 +260,14 @@ side { "id" "6" "plane" "(128 0 0) (0 0 0) (0 0 32)" "material" "A" "uaxis" "[1 
             corner[0].abs() < 1e-6 && corner[1].rem_euclid(256.0) < 1e-6,
             "{corner:?}"
         );
+
+        let mut side = side_facing(DVec3::Z);
+        side.justify(Justify::FitWidth, &points, [256.0, 256.0]);
+        assert!((side.uaxis.scale - 0.5).abs() < 1e-9, "128 units across 256 texels");
+        assert_eq!(side.vaxis.scale, side.uaxis.scale, "the height keeps the proportions");
+        side.justify(Justify::FitHeight, &points, [256.0, 256.0]);
+        assert!((side.vaxis.scale - 0.25).abs() < 1e-9, "64 units down 256 texels");
+        assert_eq!(side.uaxis.scale, side.vaxis.scale);
 
         let mut side = side_facing(DVec3::Z);
         side.justify(Justify::Right, &points, [128.0, 128.0]);

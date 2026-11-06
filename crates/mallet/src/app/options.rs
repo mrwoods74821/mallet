@@ -76,6 +76,8 @@ enum Command {
     ChooseGame(PathBuf),
     DetectGame,
     ChooseFgds(Vec<PathBuf>),
+    /// Mount the game folder again, after the mounted games changed.
+    Remount,
 }
 
 impl MalletApp {
@@ -147,6 +149,20 @@ impl MalletApp {
                     None => Err("No known Source game was found in the Steam libraries".to_owned()),
                 },
                 Command::ChooseFgds(paths) => editor.choose_fgds(paths).map(|_| ()),
+                Command::Remount => match editor.game_dir().map(PathBuf::from) {
+                    Some(folder) => {
+                        let fgds = editor.config.fgds.clone();
+                        editor.save_config();
+                        editor.set_game_dir(&folder).map(|_| ()).and_then(|()| {
+                            if fgds.is_empty() {
+                                Ok(())
+                            } else {
+                                editor.set_fgds(&fgds).map(|_| ())
+                            }
+                        })
+                    }
+                    None => Ok(()),
+                },
             };
             if let Err(error) = result {
                 editor.message = error;
@@ -217,6 +233,57 @@ fn game_section(ui: &mut egui::Ui, editor: &mut Editor, commands: &mut Vec<Comma
             .small()
             .color(MUTED),
         );
+    }
+
+    ui.add_space(12.0);
+    let games = editor.game_dir().map(mallet_content::mounted_games).unwrap_or_default();
+    if !games.is_empty() {
+        ui.add_space(12.0);
+        ui.label(RichText::new("Mounted games").strong());
+        ui.label(
+            RichText::new("Other games Garry's Mod mounts through cfg/mount.cfg, so their textures and models load.")
+                .small()
+                .color(MUTED),
+        );
+        let mut changed = false;
+        egui::Grid::new("mounted_games")
+            .num_columns(2)
+            .spacing([12.0, 2.0])
+            .show(ui, |ui| {
+                for (name, folder) in &games {
+                    let mut on = !editor
+                        .config
+                        .unmounted_games
+                        .iter()
+                        .any(|skip| skip.eq_ignore_ascii_case(name));
+                    let exists = folder.is_dir();
+                    let label = if exists {
+                        RichText::new(name)
+                    } else {
+                        RichText::new(name).color(MUTED)
+                    };
+                    if ui.add_enabled(exists, egui::Checkbox::new(&mut on, label)).changed() {
+                        editor
+                            .config
+                            .unmounted_games
+                            .retain(|skip| !skip.eq_ignore_ascii_case(name));
+                        if !on {
+                            editor.config.unmounted_games.push(name.clone());
+                        }
+                        changed = true;
+                    }
+                    let note = if exists {
+                        folder.display().to_string()
+                    } else {
+                        format!("{} (not installed)", folder.display())
+                    };
+                    ui.label(RichText::new(note).small().monospace().color(MUTED));
+                    ui.end_row();
+                }
+            });
+        if changed {
+            commands.push(Command::Remount);
+        }
     }
 
     ui.add_space(12.0);

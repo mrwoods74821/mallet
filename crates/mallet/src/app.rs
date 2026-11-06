@@ -6,6 +6,8 @@ mod compile_window;
 pub(crate) use compile_window::count;
 mod options;
 mod properties;
+mod texture_browser;
+mod texture_tool;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -38,7 +40,7 @@ const PICK_TOLERANCE_PIXELS: f64 = 4.0;
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 22] = [
+const KEY_ACTIONS: [Action; 23] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -52,6 +54,7 @@ const KEY_ACTIONS: [Action; 22] = [
     Action::SelectionTool,
     Action::BlockTool,
     Action::EntityTool,
+    Action::TextureTool,
     Action::Properties,
     Action::Compile,
     Action::CompileAgain,
@@ -135,6 +138,9 @@ pub struct MalletApp {
     options: options::OptionsState,
     /// Mallet's icon, for the menu bar and the About window; loaded on the first frame.
     logo: Option<egui::TextureHandle>,
+    /// Face Edit and texture browser state for the texture tool.
+    face_edit: texture_tool::FaceEditState,
+    texture_browser: texture_browser::TextureBrowserState,
     /// The Object Properties window's tab, drafts and other state.
     properties: properties::PropertiesState,
 }
@@ -159,6 +165,8 @@ impl MalletApp {
             net_graph: NetGraph::default(),
             compile: compile_window::CompileWindowState::default(),
             logo: None,
+            face_edit: texture_tool::FaceEditState::default(),
+            texture_browser: texture_browser::TextureBrowserState::default(),
             options: options::OptionsState::default(),
             properties: properties::PropertiesState::default(),
         };
@@ -332,6 +340,13 @@ impl MalletApp {
                     menu_item(ui, &self.keymap, "Selection Tool", Action::SelectionTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Block Tool", Action::BlockTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Entity Tool", Action::EntityTool, &mut chosen);
+                    menu_item(
+                        ui,
+                        &self.keymap,
+                        "Texture Application",
+                        Action::TextureTool,
+                        &mut chosen,
+                    );
                     menu_item(ui, &self.keymap, "Create Block", Action::CreateBlock, &mut chosen);
                 });
                 ui.menu_button("Help", |ui| {
@@ -558,7 +573,23 @@ impl MalletApp {
                     }
                     None => editor.message = "Click on a brush face to place the entity".to_owned(),
                 },
+                Tool::Texture => {
+                    let hit = editor.scene.pick_face(origin, direction);
+                    editor.texture_click(hit, pointer.modifiers);
+                }
                 Tool::Block => {}
+            }
+        }
+        if editor.tool == Tool::Texture {
+            let applied = if looking {
+                ui.input(|input| input.pointer.secondary_pressed())
+            } else {
+                response.clicked_by(PointerButton::Secondary)
+            };
+            if let (true, Some(aim)) = (applied, aim) {
+                let (origin, direction) = editor.camera.ray(rect, aim);
+                let hit = editor.scene.pick_face(origin, direction);
+                editor.texture_apply_click(hit, pointer.modifiers.alt);
             }
         }
         let active = response.hovered() || moving;
@@ -729,7 +760,7 @@ impl MalletApp {
                 start,
                 bounds,
             },
-            (Tool::Entity, ..) => Drag::Marquee { view: index, start },
+            (Tool::Entity | Tool::Texture, ..) => Drag::Marquee { view: index, start },
             (Tool::Block, ..) => Drag::NewBlock {
                 view: index,
                 start: snap(start, editor.grid),
@@ -772,6 +803,19 @@ impl MalletApp {
         pointer: &PointerState,
     ) {
         let grid = editor.grid;
+        if editor.tool == Tool::Texture {
+            // In 2D the texture tool picks whole brushes, as faces overlap in these views.
+            if response.clicked_by(PointerButton::Primary) {
+                if let Some(position) = pointer.position {
+                    let tolerance = PICK_TOLERANCE_PIXELS / view.scale;
+                    let hit = editor
+                        .scene
+                        .pick_2d(view.axis, view.to_world(rect, position), tolerance);
+                    editor.texture_click_2d(hit, pointer.modifiers);
+                }
+            }
+            return;
+        }
         if editor.tool == Tool::Entity {
             // Hammer's entity tool: pressing or dragging in a 2D view moves the marker
             // for the new entity; Enter creates it.
@@ -920,6 +964,8 @@ impl eframe::App for MalletApp {
         self.close_dialog(ctx, &mut editor);
         self.properties_window(ctx, &mut editor);
         self.compile_window(ctx, &mut editor);
+        self.face_edit_window(ctx, &mut editor);
+        self.texture_browser_window(ctx, &mut editor);
         self.options_window(ctx, &mut editor);
         self.about_window(ctx, &mut editor);
         self.finish_compile(ctx, &mut editor);
@@ -1243,23 +1289,16 @@ fn run(action: Action, editor: &mut Editor) {
         }
         Action::GridSmaller => editor.change_grid(0.5),
         Action::GridLarger => editor.change_grid(2.0),
-        Action::SelectionTool => {
-            editor.tool = Tool::Select;
-            editor.overlay.block = None;
-            editor.overlay.entity = None;
-        }
-        Action::BlockTool => {
-            editor.tool = Tool::Block;
-            editor.overlay.entity = None;
-        }
-        Action::EntityTool => {
-            editor.tool = Tool::Entity;
-            editor.overlay.block = None;
-        }
+        Action::SelectionTool => editor.set_tool(Tool::Select),
+        Action::BlockTool => editor.set_tool(Tool::Block),
+        Action::EntityTool => editor.set_tool(Tool::Entity),
+        Action::TextureTool => editor.set_tool(Tool::Texture),
         Action::SelectAll => editor.select_all(),
         Action::ClearSelection => {
             let pending = editor.overlay.block.take().is_some() | editor.overlay.entity.take().is_some();
-            if !pending {
+            if editor.tool == Tool::Texture {
+                editor.clear_face_selection();
+            } else if !pending {
                 editor.clear_selection();
             }
         }
@@ -1270,7 +1309,7 @@ fn run(action: Action, editor: &mut Editor) {
             let result = match editor.tool {
                 Tool::Block => editor.commit_block().map(|_| ()),
                 Tool::Entity => editor.commit_entity().map(|_| ()),
-                Tool::Select => Ok(()),
+                Tool::Select | Tool::Texture => Ok(()),
             };
             if let Err(error) = result {
                 editor.message = error;
