@@ -42,6 +42,38 @@ pub struct Config {
     pub texture_browser: TextureBrowserOptions,
     pub interface: InterfaceOptions,
     pub agents: AgentOptions,
+    pub transform: TransformOptions,
+}
+
+/// How selections are moved, rotated and scaled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TransformOptions {
+    /// Textures move and turn with brushes (Hammer's texture lock, Shift+L).
+    pub texture_lock: bool,
+    /// Textures also stretch when brushes are scaled (Hammer's texture scale lock).
+    pub texture_scale_lock: bool,
+    /// Degrees a rotation snaps to while Shift is held; 0 turns snapping off.
+    pub rotation_snap: f64,
+    /// Whether the 3D view shows the transform gizmo on the selection.
+    pub gizmo: bool,
+    /// What dragging the gizmo does.
+    pub gizmo_mode: crate::transform::GizmoMode,
+    /// Arrow keys over a 2D view nudge the selection by one grid step (Ctrl: one unit).
+    pub arrow_nudge: bool,
+}
+
+impl Default for TransformOptions {
+    fn default() -> Self {
+        Self {
+            texture_lock: true,
+            texture_scale_lock: false,
+            rotation_snap: 15.0,
+            gizmo: true,
+            gizmo_mode: crate::transform::GizmoMode::Move,
+            arrow_nudge: true,
+        }
+    }
 }
 
 /// How maps are saved.

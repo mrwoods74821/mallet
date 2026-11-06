@@ -60,39 +60,63 @@ pub enum Owner {
 /// Half the side length, in pixels, of a selection handle.
 pub const HANDLE_HALF_SIZE: f32 = 3.5;
 
-/// A per-axis stretch and shift that maps the box `from` onto the box `to`; a plain move
-/// when both have the same size.
+/// An affine transform previewed on the selection while it is dragged: a move, a resize
+/// from the handles, or a rotation, skew or gizmo drag.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Remap {
-    pub from: Bounds,
-    pub to: Bounds,
+    pub matrix: DMat4,
 }
 
 impl Remap {
-    /// Moves `bounds` by `offset` without resizing.
-    pub fn translate(bounds: Bounds, offset: DVec3) -> Self {
+    /// Moves by `offset`.
+    pub fn translate(offset: DVec3) -> Self {
         Self {
-            from: bounds,
-            to: Bounds {
-                min: bounds.min + offset,
-                max: bounds.max + offset,
-            },
+            matrix: DMat4::from_translation(offset),
+        }
+    }
+
+    /// Stretches and shifts each axis so the box `from` lands on the box `to`. Along an
+    /// axis where `from` is flat, points are only shifted.
+    pub fn boxes(from: &Bounds, to: &Bounds) -> Self {
+        let (from_size, to_size) = (from.size(), to.size());
+        let scale = DVec3::select(
+            from_size.cmpgt(DVec3::ZERO),
+            to_size / from_size.max(DVec3::splat(f64::MIN_POSITIVE)),
+            DVec3::ONE,
+        );
+        Self {
+            matrix: DMat4::from_translation(to.min - from.min * scale) * DMat4::from_scale(scale),
         }
     }
 
     pub fn apply(&self, point: DVec3) -> DVec3 {
-        self.from.remap(&self.to, point)
+        self.matrix.transform_point3(point)
     }
 
     /// The same mapping as a matrix, to apply on top of a model's transform.
     pub fn matrix(&self) -> DMat4 {
-        let (from, to) = (self.from.size(), self.to.size());
-        let scale = DVec3::select(
-            from.cmpgt(DVec3::ZERO),
-            to / from.max(DVec3::splat(f64::MIN_POSITIVE)),
-            DVec3::ONE,
-        );
-        DMat4::from_translation(self.to.min - self.from.min * scale) * DMat4::from_scale(scale)
+        self.matrix
+    }
+
+    /// The box around a transformed box's eight corners.
+    pub fn map_bounds(&self, bounds: &Bounds) -> Bounds {
+        let mut mapped = Bounds::EMPTY;
+        for corner in 0..8 {
+            let pick = |bit: usize, axis: usize| {
+                if corner & bit == 0 {
+                    bounds.min[axis]
+                } else {
+                    bounds.max[axis]
+                }
+            };
+            mapped.add_point(self.apply(DVec3::new(pick(1, 0), pick(2, 1), pick(4, 2))));
+        }
+        mapped
+    }
+
+    /// How far the transform moves the origin, which is the whole of a plain move.
+    pub fn offset(&self) -> DVec3 {
+        self.matrix.w_axis.truncate()
     }
 }
 
@@ -111,6 +135,10 @@ pub struct Overlay {
     pub entity: Option<DVec3>,
     /// Faces selected with the texture tool are drawn without their red tint.
     pub hide_face_mask: bool,
+    /// What the selection's handles do in the 2D views.
+    pub handle_mode: crate::transform::HandleMode,
+    /// Where rotations turn around, when placed away from the selection's centre.
+    pub pivot: Option<DVec3>,
 }
 
 /// Half-size of the marker the entity tool draws where a new entity will go.
@@ -144,10 +172,7 @@ impl WireMesh {
     /// The mesh bounds after an optional remap.
     pub fn mapped_bounds(&self, remap: Option<&Remap>) -> Bounds {
         match remap {
-            Some(remap) => Bounds {
-                min: remap.apply(self.bounds.min),
-                max: remap.apply(self.bounds.max),
-            },
+            Some(remap) => remap.map_bounds(&self.bounds),
             None => self.bounds,
         }
     }

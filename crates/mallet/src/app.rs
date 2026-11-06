@@ -8,6 +8,7 @@ mod options;
 mod properties;
 mod texture_browser;
 mod texture_tool;
+mod transform_window;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -29,15 +30,18 @@ use crate::keymap::{Action, KeyMap};
 use crate::netgraph::{NetGraph, NetGraphExtra};
 use crate::render3d::{CameraStyle, Renderer3D};
 use crate::scene::Remap;
+use crate::transform::{self, HandleMode};
 use crate::view2d::{Axis2D, Handle, View2D};
 use crate::view3d::Camera3D;
 use crate::{mcp, tools};
 
+/// How close, in pixels, a press has to be to the pivot to drag it.
+const PIVOT_REACH_PIXELS: f32 = 7.0;
 /// How long `send_input` waits for the window to handle its input.
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 23] = [
+const KEY_ACTIONS: [Action; 29] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -61,6 +65,12 @@ const KEY_ACTIONS: [Action; 23] = [
     Action::CreateBlock,
     Action::CenterViews2D,
     Action::CenterView3D,
+    Action::Transform,
+    Action::SnapToGrid,
+    Action::SnapToGridIndividually,
+    Action::FlipHorizontal,
+    Action::FlipVertical,
+    Action::ToggleTextureLock,
 ];
 
 /// A left-button drag in progress in one 2D view. `start` is the 2D world point where the
@@ -76,6 +86,17 @@ enum Drag {
         bounds: Bounds,
         handle: Handle,
     },
+    /// Rotating the selection from a corner handle around `pivot`.
+    Rotate { view: usize, start: DVec2, pivot: DVec3 },
+    /// Skewing the selection from an edge handle.
+    Skew {
+        view: usize,
+        start: DVec2,
+        bounds: Bounds,
+        handle: Handle,
+    },
+    /// Moving the pivot rotations turn around.
+    Pivot { view: usize },
     /// Drawing a selection rectangle.
     Marquee { view: usize, start: DVec2 },
     /// Drawing a new block, from a grid-snapped corner.
@@ -96,6 +117,9 @@ impl Drag {
         match self {
             Self::Move { view, .. }
             | Self::Resize { view, .. }
+            | Self::Rotate { view, .. }
+            | Self::Skew { view, .. }
+            | Self::Pivot { view }
             | Self::Marquee { view, .. }
             | Self::NewBlock { view, .. }
             | Self::MoveBlock { view, .. }
@@ -143,6 +167,8 @@ pub struct MalletApp {
     /// The interface scale last applied from Mallet Options, so the window's own zoom
     /// keys keep working until the setting changes.
     applied_scale: Option<f32>,
+    /// The Transform dialog's mode and numbers.
+    transform: transform_window::TransformState,
 }
 
 impl MalletApp {
@@ -173,6 +199,7 @@ impl MalletApp {
             options: options::OptionsState::default(),
             properties: properties::PropertiesState::default(),
             applied_scale: None,
+            transform: transform_window::TransformState::default(),
         };
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
@@ -343,6 +370,11 @@ impl MalletApp {
                     if ui.checkbox(&mut show_net_graph, "Net Graph").clicked() {
                         ui.close_menu();
                     }
+                    let mut gizmo = editor.config.transform.gizmo;
+                    if ui.checkbox(&mut gizmo, "3D Transform Gizmo").clicked() {
+                        chosen = Some(Action::ToggleGizmo);
+                        ui.close_menu();
+                    }
                     ui.horizontal(|ui| {
                         ui.label("3D draw distance");
                         ui.add(
@@ -376,6 +408,49 @@ impl MalletApp {
                         &mut chosen,
                     );
                     menu_item(ui, &self.keymap, "Create Block", Action::CreateBlock, &mut chosen);
+                    ui.separator();
+                    menu_item(ui, &self.keymap, "Transform...", Action::Transform, &mut chosen);
+                    menu_item(
+                        ui,
+                        &self.keymap,
+                        "Snap Selected to Grid",
+                        Action::SnapToGrid,
+                        &mut chosen,
+                    );
+                    menu_item(
+                        ui,
+                        &self.keymap,
+                        "Snap Selected to Grid Individually",
+                        Action::SnapToGridIndividually,
+                        &mut chosen,
+                    );
+                    ui.menu_button("Flip Objects", |ui| {
+                        menu_item(ui, &self.keymap, "Horizontally", Action::FlipHorizontal, &mut chosen);
+                        menu_item(ui, &self.keymap, "Vertically", Action::FlipVertical, &mut chosen);
+                    });
+                    ui.menu_button("Align Objects", |ui| {
+                        menu_item(ui, &self.keymap, "To Left", Action::AlignLeft, &mut chosen);
+                        menu_item(ui, &self.keymap, "To Right", Action::AlignRight, &mut chosen);
+                        menu_item(ui, &self.keymap, "To Top", Action::AlignTop, &mut chosen);
+                        menu_item(ui, &self.keymap, "To Bottom", Action::AlignBottom, &mut chosen);
+                    });
+                    ui.separator();
+                    let mut texture_lock = editor.config.transform.texture_lock;
+                    if ui
+                        .checkbox(
+                            &mut texture_lock,
+                            format!("Texture Lock\t{}", self.keymap.label(Action::ToggleTextureLock)),
+                        )
+                        .clicked()
+                    {
+                        chosen = Some(Action::ToggleTextureLock);
+                        ui.close_menu();
+                    }
+                    let mut scale_lock = editor.config.transform.texture_scale_lock;
+                    if ui.checkbox(&mut scale_lock, "Texture Scale Lock").clicked() {
+                        chosen = Some(Action::ToggleTextureScaleLock);
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About Mallet").clicked() {
@@ -700,6 +775,10 @@ impl MalletApp {
             editor.views[view_index].handle_input(ui, response, rect, zoom_step);
         }
         let view = editor.views[view_index].clone();
+        if response.hovered() && !editor.camera.mouse_look() {
+            editor.active_view = view_index;
+            nudge(ui, &view, editor);
+        }
         if !space_held && !editor.camera.mouse_look() {
             self.use_tool_2d(slot, &view, rect, response, editor, pointer);
             if let Some(icon) = self.cursor_icon(slot, &view, rect, response, editor) {
@@ -780,9 +859,25 @@ impl MalletApp {
     fn begin_drag(index: usize, view: &View2D, rect: Rect, origin: Pos2, editor: &Editor) -> Drag {
         let start = view.to_world(rect, origin);
         let target = editor.handle_box();
-        let handle = target.and_then(|bounds| view.hit_handle(rect, &bounds, origin));
+        let mode = editor.display_overlay().handle_mode;
+        let handle = target.and_then(|bounds| view.hit_handle(rect, &bounds, origin, mode));
         let inside = target.is_some_and(|bounds| box_contains(view.axis, &bounds, start));
+        let on_pivot = mode == HandleMode::Rotate
+            && target.is_some()
+            && view.to_screen(rect, view.axis.project(editor.pivot())).distance(origin) <= PIVOT_REACH_PIXELS;
         match (editor.tool, target, handle, inside) {
+            (Tool::Select, Some(_), _, _) if on_pivot => Drag::Pivot { view: index },
+            (Tool::Select, Some(_), Some(_), _) if mode == HandleMode::Rotate => Drag::Rotate {
+                view: index,
+                start,
+                pivot: editor.pivot(),
+            },
+            (Tool::Select, Some(bounds), Some(handle), _) if mode == HandleMode::Skew => Drag::Skew {
+                view: index,
+                start,
+                bounds,
+                handle,
+            },
             (Tool::Select, Some(bounds), Some(handle), _) => Drag::Resize {
                 view: index,
                 start,
@@ -826,14 +921,31 @@ impl MalletApp {
     ) -> Option<egui::CursorIcon> {
         match self.drag.filter(|drag| drag.view() == index) {
             Some(Drag::Resize { handle, .. } | Drag::ResizeBlock { handle, .. }) => return Some(handle.cursor()),
-            Some(Drag::Move { .. } | Drag::MoveBlock { .. }) => return Some(egui::CursorIcon::Move),
+            Some(Drag::Skew { handle, .. }) => return Some(handle.skew_cursor()),
+            Some(Drag::Rotate { .. }) => return Some(egui::CursorIcon::Grabbing),
+            Some(Drag::Move { .. } | Drag::MoveBlock { .. } | Drag::Pivot { .. }) => {
+                return Some(egui::CursorIcon::Move)
+            }
             Some(_) => return None,
             None => {}
         }
         let pointer = response.hover_pos()?;
         let bounds = editor.handle_box()?;
-        if let Some(handle) = view.hit_handle(rect, &bounds, pointer) {
-            return Some(handle.cursor());
+        let mode = editor.display_overlay().handle_mode;
+        if mode == HandleMode::Rotate
+            && view
+                .to_screen(rect, view.axis.project(editor.pivot()))
+                .distance(pointer)
+                <= PIVOT_REACH_PIXELS
+        {
+            return Some(egui::CursorIcon::Move);
+        }
+        if let Some(handle) = view.hit_handle(rect, &bounds, pointer, mode) {
+            return Some(match mode {
+                HandleMode::Scale => handle.cursor(),
+                HandleMode::Rotate => egui::CursorIcon::Grab,
+                HandleMode::Skew => handle.skew_cursor(),
+            });
         }
         box_contains(view.axis, &bounds, view.to_world(rect, pointer)).then_some(egui::CursorIcon::Move)
     }
@@ -886,7 +998,13 @@ impl MalletApp {
                     let hit = editor
                         .scene
                         .pick_2d(view.axis, view.to_world(rect, position), tolerance);
-                    pick(editor, hit, pointer.modifiers);
+                    match hit {
+                        Some(owner) if editor.selection.contains(&owner) && !pointer.modifiers.ctrl => {
+                            editor.overlay.handle_mode = editor.overlay.handle_mode.next();
+                            editor.message = format!("{} handles", editor.overlay.handle_mode.label());
+                        }
+                        _ => pick(editor, hit, pointer.modifiers),
+                    }
                 }
                 if response.double_clicked_by(PointerButton::Primary) && !editor.selection.is_empty() {
                     editor.properties_open = true;
@@ -900,13 +1018,42 @@ impl MalletApp {
             match drag {
                 Drag::Move { start, bounds, .. } => {
                     let offset = snapped_offset(view.axis, &bounds, world - start, grid);
-                    editor.overlay.transform = Some(Remap::translate(bounds, offset));
+                    editor.overlay.transform = Some(Remap::translate(offset));
                 }
                 Drag::Resize {
                     start, bounds, handle, ..
                 } => {
                     let to = handle.resize(view.axis, &bounds, world - start, grid);
-                    editor.overlay.transform = Some(Remap { from: bounds, to });
+                    editor.overlay.transform = Some(Remap::boxes(&bounds, &to));
+                }
+                Drag::Rotate { start, pivot, .. } => {
+                    let center = view.axis.project(pivot);
+                    let (from, to) = (start - center, world - center);
+                    let mut degrees = from.perp_dot(to).atan2(from.dot(to)).to_degrees();
+                    if pointer.modifiers.shift {
+                        degrees = transform::snap_angle(degrees, editor.config.transform.rotation_snap);
+                    }
+                    let [horizontal, vertical, _] = view.axis.axes();
+                    let turn = transform::plane_rotation(horizontal, vertical, degrees.to_radians());
+                    editor.overlay.transform = Some(Remap {
+                        matrix: mallet_vmf::transform::around(pivot, turn),
+                    });
+                    editor.message = format!("Rotating {degrees:.1}\u{b0}; hold Shift to snap");
+                }
+                Drag::Skew {
+                    start, bounds, handle, ..
+                } => {
+                    editor.overlay.transform = handle
+                        .skew(view.axis, &bounds, world - start, grid)
+                        .map(|matrix| Remap { matrix });
+                }
+                Drag::Pivot { .. } => {
+                    let mut pivot = editor.pivot();
+                    let snapped = view.axis.lift(snap(world, grid));
+                    let [horizontal, vertical, _] = view.axis.axes();
+                    pivot[horizontal] = snapped[horizontal];
+                    pivot[vertical] = snapped[vertical];
+                    editor.set_pivot(Some(pivot));
                 }
                 Drag::Marquee { start, .. } => editor.overlay.marquee = Some((view.axis, start, world)),
                 Drag::NewBlock { start, .. } => {
@@ -914,7 +1061,7 @@ impl MalletApp {
                 }
                 Drag::MoveBlock { start, bounds, .. } => {
                     let offset = snapped_offset(view.axis, &bounds, world - start, grid);
-                    editor.overlay.block = Some(Remap::translate(bounds, offset).to);
+                    editor.overlay.block = Some(Remap::translate(offset).map_bounds(&bounds));
                 }
                 Drag::ResizeBlock {
                     start, bounds, handle, ..
@@ -941,17 +1088,34 @@ fn finish_drag(drag: Drag, editor: &mut Editor, modifiers: Modifiers) -> Result<
             let Some(remap) = editor.overlay.transform.take() else {
                 return Ok(());
             };
-            let offset = remap.to.min - remap.from.min;
+            let offset = remap.offset();
             match (offset == DVec3::ZERO, modifiers.shift) {
                 (true, _) => Ok(()),
                 (false, true) => editor.clone_selection(offset),
                 (false, false) => editor.move_selection(offset),
             }
         }
-        Drag::Resize { .. } => match editor.overlay.transform.take() {
-            Some(remap) if remap.to != remap.from => editor.resize_selection(remap.to),
+        Drag::Resize { bounds, .. } => match editor.overlay.transform.take() {
+            Some(remap) if remap.map_bounds(&bounds) != bounds => editor.resize_selection(remap.map_bounds(&bounds)),
             _ => Ok(()),
         },
+        Drag::Rotate { pivot, .. } => match editor.overlay.transform.take() {
+            Some(remap) if remap.matrix != glam::DMat4::IDENTITY => {
+                editor.transform_selection(remap.matrix, true, pivot)?;
+                editor.message = "Rotated selection".to_owned();
+                Ok(())
+            }
+            _ => Ok(()),
+        },
+        Drag::Skew { bounds, .. } => match editor.overlay.transform.take() {
+            Some(remap) if remap.matrix != glam::DMat4::IDENTITY => {
+                editor.transform_selection(remap.matrix, false, bounds.min)?;
+                editor.message = "Skewed selection".to_owned();
+                Ok(())
+            }
+            _ => Ok(()),
+        },
+        Drag::Pivot { .. } => Ok(()),
         Drag::Marquee { .. } => {
             if let Some((axis, a, b)) = editor.overlay.marquee.take() {
                 let owners = editor.scene.owners_inside(axis, a, b);
@@ -1014,6 +1178,7 @@ impl eframe::App for MalletApp {
         self.texture_browser_window(ctx, &mut editor);
         self.options_window(ctx, &mut editor);
         self.about_window(ctx, &mut editor);
+        self.transform_window(ctx, &mut editor);
         self.finish_compile(ctx, &mut editor);
         apply_view_options(&mut editor);
         self.apply_interface_options(ctx, &editor);
@@ -1481,7 +1646,79 @@ fn run(action: Action, editor: &mut Editor) {
         Action::CenterView3D => editor.fit_3d(),
         Action::Properties => editor.properties_open = true,
         Action::Options => editor.options_open = true,
+        Action::Transform => editor.transform_open = true,
+        Action::SnapToGrid | Action::SnapToGridIndividually => report(
+            editor.snap_selection_to_grid(action == Action::SnapToGridIndividually),
+            editor,
+        ),
+        Action::FlipHorizontal | Action::FlipVertical => {
+            report(editor.flip_in_view(action == Action::FlipVertical), editor)
+        }
+        Action::AlignLeft => report(editor.align_in_view(false, false), editor),
+        Action::AlignRight => report(editor.align_in_view(false, true), editor),
+        Action::AlignTop => report(editor.align_in_view(true, true), editor),
+        Action::AlignBottom => report(editor.align_in_view(true, false), editor),
+        Action::ToggleTextureLock => {
+            editor.config.transform.texture_lock = !editor.config.transform.texture_lock;
+            editor.message = format!("Texture lock {}", on_off(editor.config.transform.texture_lock));
+            editor.save_config();
+        }
+        Action::ToggleTextureScaleLock => {
+            editor.config.transform.texture_scale_lock = !editor.config.transform.texture_scale_lock;
+            editor.message = format!("Texture scale lock {}", on_off(editor.config.transform.texture_scale_lock));
+            editor.save_config();
+        }
+        Action::ToggleGizmo => {
+            editor.config.transform.gizmo = !editor.config.transform.gizmo;
+            editor.message = format!("3D gizmo {}", on_off(editor.config.transform.gizmo));
+            editor.save_config();
+        }
         _ => {}
+    }
+}
+
+/// Moves the selection with the arrow keys in a hovered 2D view, along the view's axes:
+/// one grid step, or one unit with Ctrl, as Hammer's nudge does.
+fn nudge(ui: &egui::Ui, view: &View2D, editor: &mut Editor) {
+    if !editor.config.transform.arrow_nudge
+        || editor.tool != Tool::Select
+        || editor.selection.is_empty()
+        || ui.ctx().wants_keyboard_input()
+    {
+        return;
+    }
+    let (step, offset) = ui.input(|input| {
+        let step = if input.modifiers.ctrl { 1.0 } else { editor.grid };
+        let mut offset = DVec2::ZERO;
+        for (key, direction) in [
+            (egui::Key::ArrowLeft, DVec2::NEG_X),
+            (egui::Key::ArrowRight, DVec2::X),
+            (egui::Key::ArrowUp, DVec2::Y),
+            (egui::Key::ArrowDown, DVec2::NEG_Y),
+        ] {
+            if input.key_pressed(key) && !input.modifiers.alt && !input.modifiers.shift {
+                offset += direction;
+            }
+        }
+        (step, offset)
+    });
+    if offset != DVec2::ZERO {
+        report(editor.move_selection(view.axis.lift(offset * step)), editor);
+    }
+}
+
+/// Shows why a command failed in the status bar.
+fn report(result: Result<(), String>, editor: &mut Editor) {
+    if let Err(error) = result {
+        editor.message = error;
+    }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on {
+        "on"
+    } else {
+        "off"
     }
 }
 

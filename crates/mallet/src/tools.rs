@@ -165,10 +165,59 @@ pub fn definitions() -> Value {
         tool(
             "resize_selection",
             "Stretch the selection so its bounding box becomes min..max, like dragging Hammer's selection \
-             handles. Brushes scale along each axis; entity origins move proportionally; textures keep their \
-             world alignment. Undoable.",
+             handles. Brushes scale along each axis; entity origins move proportionally; textures follow the \
+             texture lock settings (by default they keep their scale, pinned at the box's minimum corner). \
+             Undoable.",
             json!({ "min": vec3, "max": vec3 }),
             &["min", "max"],
+        ),
+        tool(
+            "transform_selection",
+            "Scale, then rotate, then move the selection as one undoable step, like Hammer's Transform dialog \
+             (Ctrl+M). rotate is degrees about X, then Y, then Z; scale is a factor per axis (negative mirrors); \
+             both work around pivot: \"center\" of the selection (default), \"pivot\" placed with set_pivot, \
+             \"origin\", or a point. Rotations and mirrors turn entity angles too. texture_lock and \
+             texture_scale_lock default to the toolbar's settings.",
+            json!({
+                "rotate": vec3,
+                "scale": vec3,
+                "move": vec3,
+                "pivot": { "description": "\"center\", \"pivot\", \"origin\" or [x, y, z]." },
+                "texture_lock": { "type": "boolean" },
+                "texture_scale_lock": { "type": "boolean" }
+            }),
+            &[],
+        ),
+        tool(
+            "flip_selection",
+            "Mirror the selection along a world axis through its centre, like Hammer's Flip Objects. Entity \
+             angles are mirrored too. Undoable.",
+            json!({ "axis": { "type": "string", "enum": ["x", "y", "z"] } }),
+            &["axis"],
+        ),
+        tool(
+            "snap_selection_to_grid",
+            "Move the selection so its bounds' minimum corner lands on the grid (Ctrl+B), or each selected \
+             object on its own with individually (Ctrl+Shift+B). Undoable.",
+            json!({ "individually": { "type": "boolean" } }),
+            &[],
+        ),
+        tool(
+            "align_selection",
+            "Line every selected object up with the minimum or maximum side of the selection's bounds along a \
+             world axis, like Hammer's Align Objects. Undoable.",
+            json!({
+                "axis": { "type": "string", "enum": ["x", "y", "z"] },
+                "side": { "type": "string", "enum": ["min", "max"] }
+            }),
+            &["axis", "side"],
+        ),
+        tool(
+            "set_pivot",
+            "Place the pivot that rotations, the rotation handles and the 3D gizmo turn around, or pass no point \
+             to put it back at the selection's centre. Changing the selection resets it.",
+            json!({ "point": vec3 }),
+            &[],
         ),
         tool(
             "delete_selection",
@@ -1050,6 +1099,33 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
             editor.resize_selection(to)?;
             Ok(ToolResult::json(&selection_json(editor)))
         }
+        "transform_selection" => {
+            transform_selection(editor, args)?;
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
+        "flip_selection" => {
+            editor.flip_selection(axis_arg(args, "axis")?)?;
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
+        "snap_selection_to_grid" => {
+            let individually = args.get("individually").and_then(Value::as_bool).unwrap_or(false);
+            editor.snap_selection_to_grid(individually)?;
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
+        "align_selection" => {
+            let max = match string_arg(args, "side")? {
+                "min" => false,
+                "max" => true,
+                other => return Err(format!("\"side\" must be min or max, not \"{other}\"")),
+            };
+            editor.align_selection(axis_arg(args, "axis")?, max)?;
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
+        "set_pivot" => {
+            let point = optional_numbers::<3>(args, "point")?.map(DVec3::from_array);
+            editor.set_pivot(point);
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
         "delete_selection" => {
             let count = editor.delete_selection()?;
             Ok(ToolResult::text(format!(
@@ -1308,6 +1384,50 @@ fn layout_json(editor: &Editor) -> Value {
     json!(editor.layout.iter().map(|mode| mode.label()).collect::<Vec<_>>())
 }
 
+/// Builds and applies the matrix the `transform_selection` tool describes.
+fn transform_selection(editor: &mut Editor, args: &Value) -> Result<(), String> {
+    use crate::transform::{rotation_xyz, Pivot};
+    let pivot = match args.get("pivot") {
+        None | Some(Value::Null) => Pivot::Center,
+        Some(Value::String(name)) => match name.as_str() {
+            "center" | "centre" => Pivot::Center,
+            "pivot" => Pivot::Placed,
+            "origin" => Pivot::Origin,
+            other => return Err(format!("unknown pivot \"{other}\"")),
+        },
+        Some(_) => Pivot::Point(required_vec3(args, "pivot")?),
+    };
+    let rotate = optional_numbers::<3>(args, "rotate")?.map_or(DVec3::ZERO, DVec3::from_array);
+    let scale = optional_numbers::<3>(args, "scale")?.map_or(DVec3::ONE, DVec3::from_array);
+    let offset = optional_numbers::<3>(args, "move")?.map_or(DVec3::ZERO, DVec3::from_array);
+    let center = editor.pivot_point(pivot);
+    let linear = rotation_xyz(rotate) * glam::DMat3::from_diagonal(scale);
+    let matrix = glam::DMat4::from_translation(offset) * mallet_vmf::transform::around(center, linear);
+    let turn = rotate != DVec3::ZERO || scale.x * scale.y * scale.z < 0.0;
+    let saved = editor.config.transform.clone();
+    if let Some(lock) = args.get("texture_lock").and_then(Value::as_bool) {
+        editor.config.transform.texture_lock = lock;
+    }
+    if let Some(lock) = args.get("texture_scale_lock").and_then(Value::as_bool) {
+        editor.config.transform.texture_scale_lock = lock;
+    }
+    let result = editor.transform_selection(matrix, turn, center);
+    editor.config.transform = saved;
+    result?;
+    editor.message = "Transformed selection".to_owned();
+    Ok(())
+}
+
+/// A world axis named `x`, `y` or `z`, as an index.
+fn axis_arg(args: &Value, key: &str) -> Result<usize, String> {
+    match string_arg(args, key)?.to_ascii_lowercase().as_str() {
+        "x" => Ok(0),
+        "y" => Ok(1),
+        "z" => Ok(2),
+        other => Err(format!("\"{key}\" must be x, y or z, not \"{other}\"")),
+    }
+}
+
 fn selection_json(editor: &Editor) -> Value {
     let mut solids = Vec::new();
     let mut entities = Vec::new();
@@ -1325,6 +1445,9 @@ fn selection_json(editor: &Editor) -> Value {
             "min": bounds.min.to_array(),
             "max": bounds.max.to_array(),
         })),
+        "pivot": (!bounds.is_empty()).then(|| editor.pivot().to_array()),
+        "pivot_placed": editor.overlay.pivot.is_some(),
+        "handles": editor.overlay.handle_mode.label().to_ascii_lowercase(),
     })
 }
 

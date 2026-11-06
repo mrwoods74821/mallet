@@ -10,6 +10,7 @@ use egui_phosphor::regular as icon;
 use super::{run, save_as_dialog, MalletApp};
 use crate::editor::{Editor, Tool, ENTITY_CLASSES};
 use crate::keymap::Action;
+use crate::transform::{GizmoMode, HandleMode};
 
 const TOOLBAR_ICON_SIZE: f32 = 17.0;
 const PALETTE_ICON_SIZE: f32 = 21.0;
@@ -112,6 +113,36 @@ impl MalletApp {
                     .clicked()
                 {
                     chosen = Some(Action::GridLarger);
+                }
+                ui.separator();
+                let edit = &editor.config.transform;
+                let toggles = [
+                    (
+                        if edit.texture_lock { icon::LOCK_SIMPLE } else { icon::LOCK_SIMPLE_OPEN },
+                        "Texture lock: textures move and turn with brushes",
+                        Action::ToggleTextureLock,
+                        edit.texture_lock,
+                    ),
+                    (
+                        icon::ARROWS_OUT,
+                        "Texture scale lock: textures also stretch when brushes are scaled",
+                        Action::ToggleTextureScaleLock,
+                        edit.texture_scale_lock,
+                    ),
+                    (
+                        icon::ARROWS_OUT_CARDINAL,
+                        "3D transform gizmo on the selection; click its centre to switch between move, rotate and scale",
+                        Action::ToggleGizmo,
+                        edit.gizmo,
+                    ),
+                ];
+                for (glyph, name, action, on) in toggles {
+                    if self
+                        .icon_button(ui, glyph, name, Some(action), on, TOOLBAR_ICON_SIZE)
+                        .clicked()
+                    {
+                        chosen = Some(action);
+                    }
                 }
                 ui.separator();
                 if self
@@ -387,6 +418,9 @@ impl MalletApp {
                 }
                 ui.separator();
 
+                transform_section(ui, editor);
+                ui.separator();
+
                 egui::CollapsingHeader::new(RichText::new("VisGroups").strong())
                     .default_open(true)
                     .show(ui, |ui| {
@@ -561,6 +595,89 @@ pub(super) fn material_preview(
 
 /// A coordinate with at most two decimals and no trailing zeros, so float noise such as
 /// 29.000000953674316 reads as 29.
+/// The side panel's transform controls: the 2D handle mode, the gizmo's mode, the pivot
+/// and quick flips.
+fn transform_section(ui: &mut egui::Ui, editor: &mut Editor) {
+    ui.label(RichText::new("Transform").strong());
+    let usable = !editor.selection.is_empty() && editor.tool == Tool::Select;
+    ui.horizontal(|ui| {
+        ui.label("Handles")
+            .on_hover_text("What the 2D handles do; click a selected object to switch");
+        for mode in [HandleMode::Scale, HandleMode::Rotate, HandleMode::Skew] {
+            let button = egui::Button::new(mode.label()).selected(editor.overlay.handle_mode == mode);
+            if ui.add_enabled(usable, button).clicked() {
+                editor.overlay.handle_mode = mode;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut editor.config.transform.gizmo, "Gizmo")
+            .on_hover_text("Show the transform gizmo on the selection in the 3D view");
+        for mode in GizmoMode::ALL {
+            let selected = editor.config.transform.gizmo_mode == mode;
+            if ui.add(egui::Button::new(mode.label()).selected(selected)).clicked() {
+                editor.config.transform.gizmo_mode = mode;
+                editor.config.transform.gizmo = true;
+                editor.save_config();
+            }
+        }
+    });
+    if usable {
+        let pivot = editor.pivot();
+        ui.horizontal(|ui| {
+            let placed = if editor.overlay.pivot.is_some() {
+                "Pivot"
+            } else {
+                "Pivot (centre)"
+            };
+            ui.label(format!(
+                "{placed} {} {} {}",
+                short(pivot.x),
+                short(pivot.y),
+                short(pivot.z)
+            ))
+            .on_hover_text("Rotations turn around the pivot. Drag it in a 2D view with the rotate handles.");
+            if editor.overlay.pivot.is_some() && ui.small_button("Reset").clicked() {
+                editor.set_pivot(None);
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                usable,
+                egui::Button::new(format!("{} Transform...", icon::ARROWS_OUT_CARDINAL)),
+            )
+            .on_hover_text("Rotate, scale or move by exact amounts (Ctrl+M)")
+            .clicked()
+        {
+            editor.transform_open = true;
+        }
+        for (glyph, hint, vertical) in [
+            (
+                icon::FLIP_HORIZONTAL,
+                "Flip horizontally in the last 2D view (Ctrl+L)",
+                false,
+            ),
+            (
+                icon::FLIP_VERTICAL,
+                "Flip vertically in the last 2D view (Ctrl+I)",
+                true,
+            ),
+        ] {
+            if ui
+                .add_enabled(usable, egui::Button::new(glyph))
+                .on_hover_text(hint)
+                .clicked()
+            {
+                if let Err(error) = editor.flip_in_view(vertical) {
+                    editor.message = error;
+                }
+            }
+        }
+    });
+}
+
 fn short(value: f64) -> String {
     let text = format!("{value:.2}");
     let text = text.trim_end_matches('0').trim_end_matches('.');

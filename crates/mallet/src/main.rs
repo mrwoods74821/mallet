@@ -6,6 +6,7 @@
 //! AI agents can drive the editor through its MCP server; see `mcp`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![recursion_limit = "256"]
 
 mod app;
 mod branding;
@@ -26,6 +27,7 @@ mod scene;
 mod shell;
 mod style;
 mod tools;
+mod transform;
 mod view2d;
 mod view3d;
 

@@ -286,6 +286,11 @@ pub struct Editor {
     pub options_section: Option<String>,
     /// Whether Help > About Mallet is showing.
     pub about_open: bool,
+    /// Whether the Transform dialog is showing.
+    pub transform_open: bool,
+    /// The 2D view (0 top, 1 front, 2 side) the mouse was over last, which Flip and Align
+    /// work in.
+    pub active_view: usize,
     /// The leak line VBSP traced, shown in the views.
     pub pointfile: Option<Vec<DVec3>>,
     /// Brush faces the texture tool has selected, by side id.
@@ -349,6 +354,8 @@ impl Default for Editor {
             options_open: false,
             options_section: None,
             about_open: false,
+            transform_open: false,
+            active_view: 0,
             pointfile: None,
             face_selection: BTreeSet::new(),
             recent_materials: Vec::new(),
@@ -689,6 +696,7 @@ impl Editor {
     /// Changes the selection. Owners that are not in the map are ignored.
     pub fn select(&mut self, owners: impl IntoIterator<Item = Owner>, mode: SelectMode) {
         let owners: Vec<Owner> = owners.into_iter().filter(|owner| self.scene.contains(*owner)).collect();
+        let before = self.selection.clone();
         match mode {
             SelectMode::Replace => self.selection = owners.into_iter().collect(),
             SelectMode::Add => self.selection.extend(owners),
@@ -704,6 +712,10 @@ impl Editor {
                     }
                 }
             }
+        }
+        if self.selection != before {
+            self.overlay.handle_mode = crate::transform::HandleMode::Scale;
+            self.overlay.pivot = None;
         }
         self.scene.mark_selected(&self.selection);
     }
@@ -732,21 +744,35 @@ impl Editor {
     /// Moves the selection, with texture lock. Entity origins move with it.
     pub fn move_selection(&mut self, offset: DVec3) -> Result<(), String> {
         let (solids, origins) = self.selection_parts()?;
-        let mut edits = vec![Edit::Translate { solids, offset }];
+        let mut edits = vec![if self.config.transform.texture_lock {
+            Edit::Translate { solids, offset }
+        } else {
+            Edit::Transform {
+                solids,
+                matrix: glam::DMat4::from_translation(offset),
+                lock: mallet_vmf::transform::TextureLock::Off,
+            }
+        }];
         edits.extend(origin_edits(origins, |origin| origin + offset));
         self.apply_edit(&Edit::Batch(edits))?;
+        if let Some(pivot) = self.overlay.pivot {
+            self.overlay.pivot = Some(pivot + offset);
+        }
         self.message = format!("Moved selection by {}", format_vec3(offset));
         Ok(())
     }
 
     /// Stretches the selection so its bounds become `to`, like dragging a selection handle.
-    /// Entity origins are moved proportionally.
+    /// Entity origins are moved proportionally; textures follow the texture lock settings,
+    /// pinned at the box's minimum corner when they keep their scale.
     pub fn resize_selection(&mut self, to: Bounds) -> Result<(), String> {
         let from = self.scene.selection_bounds();
-        let (solids, origins) = self.selection_parts()?;
-        let mut edits = vec![Edit::Rescale { solids, from, to }];
-        edits.extend(origin_edits(origins, |origin| from.remap(&to, origin)));
-        self.apply_edit(&Edit::Batch(edits))?;
+        let flattened = (0..3).any(|axis| from.size()[axis] > 0.0 && to.size()[axis] <= 0.0);
+        if flattened || from.is_empty() || to.is_empty() {
+            return Err(mallet_vmf::edit::EditError::InvalidResize.to_string());
+        }
+        let matrix = crate::scene::Remap::boxes(&from, &to).matrix;
+        self.transform_selection(matrix, false, from.min)?;
         let size = to.size();
         self.message = format!("Resized selection to {}w {}l {}h", size.x, size.y, size.z);
         Ok(())
@@ -781,15 +807,21 @@ impl Editor {
             Tool::Entity | Tool::Texture => None,
             Tool::Select => {
                 let bounds = self.scene.selection_bounds();
-                (!bounds.is_empty()).then(|| self.overlay.transform.map_or(bounds, |remap| remap.to))
+                (!bounds.is_empty()).then(|| self.overlay.transform.map_or(bounds, |remap| remap.map_bounds(&bounds)))
             }
         }
     }
 
     /// The overlay to draw, including the resize handles.
     pub fn display_overlay(&self) -> Overlay {
+        let handle_mode = if self.tool == Tool::Select {
+            self.overlay.handle_mode
+        } else {
+            crate::transform::HandleMode::Scale
+        };
         Overlay {
             handles: self.handle_box(),
+            handle_mode,
             ..self.overlay
         }
     }
@@ -1281,7 +1313,7 @@ fn origin_edits(origins: EntityOrigins, map: impl Fn(DVec3) -> DVec3) -> impl It
     })
 }
 
-fn find_entity(vmf: &Vmf, id: u32) -> Result<&Entity, String> {
+pub(crate) fn find_entity(vmf: &Vmf, id: u32) -> Result<&Entity, String> {
     vmf.all_entities()
         .find(|entity| entity.id() == Some(id))
         .ok_or_else(|| format!("no entity has id {id}"))

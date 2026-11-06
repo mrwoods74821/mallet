@@ -37,6 +37,25 @@ pub enum Action {
     CreateBlock,
     CenterViews2D,
     CenterView3D,
+    /// Open the Transform dialog.
+    Transform,
+    /// Move the selection so its corner lands on the grid.
+    SnapToGrid,
+    /// Snap each selected object to the grid on its own.
+    SnapToGridIndividually,
+    /// Mirror the selection left to right in the 2D view used last.
+    FlipHorizontal,
+    /// Mirror the selection top to bottom in the 2D view used last.
+    FlipVertical,
+    /// Line the selected objects up with an edge of the selection in the 2D view used last.
+    AlignLeft,
+    AlignRight,
+    AlignTop,
+    AlignBottom,
+    ToggleTextureLock,
+    ToggleTextureScaleLock,
+    /// Show or hide the 3D transform gizmo.
+    ToggleGizmo,
     ToggleMouseLook,
     MoveForward,
     MoveBack,
@@ -167,6 +186,12 @@ impl KeyMap {
                 (Action::CreateBlock, Chord::key(Key::Enter)),
                 (Action::CenterViews2D, Chord::ctrl(Key::E)),
                 (Action::CenterView3D, Chord::ctrl_shift(Key::E)),
+                (Action::Transform, Chord::ctrl(Key::M)),
+                (Action::SnapToGrid, Chord::ctrl(Key::B)),
+                (Action::SnapToGridIndividually, Chord::ctrl_shift(Key::B)),
+                (Action::FlipHorizontal, Chord::ctrl(Key::L)),
+                (Action::FlipVertical, Chord::ctrl(Key::I)),
+                (Action::ToggleTextureLock, Chord::shift(Key::L)),
                 (Action::ToggleMouseLook, Chord::key(Key::Z)),
                 (Action::MoveForward, Chord::key(Key::W)),
                 (Action::MoveBack, Chord::key(Key::S)),

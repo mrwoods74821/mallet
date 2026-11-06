@@ -12,6 +12,16 @@ pub trait Canvas {
     fn lines(&mut self, segments: &[[Pos2; 2]], color: Color32);
     /// Draws a viewport label with its top-left corner at `pos`.
     fn label(&mut self, pos: Pos2, text: &str, color: Color32);
+    /// Draws a one-pixel circle outline.
+    fn circle(&mut self, center: Pos2, radius: f32, color: Color32) {
+        let steps = 24;
+        let point = |step: usize| {
+            let angle = step as f32 / steps as f32 * std::f32::consts::TAU;
+            center + eframe::egui::vec2(angle.cos(), angle.sin()) * radius
+        };
+        let segments: Vec<[Pos2; 2]> = (0..steps).map(|step| [point(step), point(step + 1)]).collect();
+        self.lines(&segments, color);
+    }
 }
 
 /// Draws into an egui painter, which clips to the viewport it was created for.
@@ -32,6 +42,10 @@ impl Canvas for PainterCanvas<'_> {
     fn label(&mut self, pos: Pos2, text: &str, color: Color32) {
         self.0
             .text(pos, Align2::LEFT_TOP, text, FontId::proportional(13.0), color);
+    }
+
+    fn circle(&mut self, center: Pos2, radius: f32, color: Color32) {
+        self.0.circle_stroke(center, radius, Stroke::new(1.5_f32, color));
     }
 }
 

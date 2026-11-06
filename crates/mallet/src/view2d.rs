@@ -1,13 +1,17 @@
 //! Orthographic 2D viewports (top, front and side), drawn the way Hammer draws them.
 
 use eframe::egui::{self, Color32, PointerButton, Pos2, Rect, Response};
-use glam::{DVec2, DVec3};
+use glam::{DMat4, DVec2, DVec3};
 use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::Canvas;
 use crate::scene::{box_edges, entity_marker_edges, Overlay, Remap, Scene, HANDLE_HALF_SIZE};
 use crate::style;
+use crate::transform::HandleMode;
 
+/// Radius, in pixels, of the pivot marker shown with the rotation handles.
+const PIVOT_RADIUS: f32 = 4.0;
+const PIVOT_COLOR: Color32 = Color32::from_rgb(255, 210, 60);
 const MIN_SCALE: f64 = 1.0 / 256.0;
 const MAX_SCALE: f64 = 32.0;
 const MAX_GRID_LINES: f64 = 4000.0;
@@ -112,6 +116,49 @@ impl Handle {
             }
         }
         resized
+    }
+
+    /// Whether the handle shows in a handle mode: every handle to scale, the corners to
+    /// rotate and the edges to skew, as in Hammer.
+    pub fn shown(self, mode: HandleMode) -> bool {
+        let corner = self.x != 0 && self.y != 0;
+        match mode {
+            HandleMode::Scale => true,
+            HandleMode::Rotate => corner,
+            HandleMode::Skew => !corner,
+        }
+    }
+
+    /// The skew of a box from dragging this edge handle by `delta`: the dragged edge
+    /// slides along itself by the grid-snapped distance while the opposite edge stays.
+    /// `None` for corners, flat boxes and drags that skew nothing.
+    pub fn skew(self, axis: Axis2D, bounds: &Bounds, delta: DVec2, grid: f64) -> Option<DMat4> {
+        let [horizontal, vertical, _] = axis.axes();
+        let snap = |value: f64| (value / grid).round() * grid;
+        let (along, by, side, moved) = match (self.x, self.y) {
+            (0, side) if side != 0 => (horizontal, vertical, side, snap(delta.x)),
+            (side, 0) if side != 0 => (vertical, horizontal, side, snap(delta.y)),
+            _ => return None,
+        };
+        let length = bounds.size()[by];
+        if length <= 0.0 || moved == 0.0 {
+            return None;
+        }
+        let (fixed, amount) = if side > 0 {
+            (bounds.min[by], moved / length)
+        } else {
+            (bounds.max[by], -moved / length)
+        };
+        Some(crate::transform::shear(along, by, amount, fixed))
+    }
+
+    /// The mouse cursor for skewing from this edge handle: along the edge.
+    pub fn skew_cursor(self) -> egui::CursorIcon {
+        if self.x == 0 {
+            egui::CursorIcon::ResizeHorizontal
+        } else {
+            egui::CursorIcon::ResizeVertical
+        }
     }
 
     /// The mouse cursor that shows which way this handle resizes.
@@ -277,10 +324,35 @@ impl View2D {
     pub fn draw_overlay(&self, canvas: &mut dyn Canvas, rect: Rect, overlay: &Overlay, active: bool) {
         let style = style::current();
         if let Some(handles) = &overlay.handles {
-            for (_, at) in self.handle_positions(rect, handles) {
-                canvas.fill(
-                    Rect::from_center_size(at, egui::Vec2::splat(HANDLE_HALF_SIZE * 2.0)),
-                    style.handles,
+            let mode = overlay.handle_mode;
+            for (handle, at) in self.handle_positions(rect, handles) {
+                if !handle.shown(mode) {
+                    continue;
+                }
+                match mode {
+                    HandleMode::Rotate => canvas.circle(at, HANDLE_HALF_SIZE + 0.5, style.handles),
+                    HandleMode::Scale | HandleMode::Skew => canvas.fill(
+                        Rect::from_center_size(at, egui::Vec2::splat(HANDLE_HALF_SIZE * 2.0)),
+                        style.handles,
+                    ),
+                }
+            }
+            if mode == HandleMode::Rotate {
+                let pivot = overlay.pivot.unwrap_or_else(|| handles.center());
+                let at = self.to_screen(rect, self.axis.project(pivot));
+                canvas.circle(at, PIVOT_RADIUS, PIVOT_COLOR);
+                canvas.lines(
+                    &[
+                        [
+                            at - egui::vec2(PIVOT_RADIUS + 3.0, 0.0),
+                            at + egui::vec2(PIVOT_RADIUS + 3.0, 0.0),
+                        ],
+                        [
+                            at - egui::vec2(0.0, PIVOT_RADIUS + 3.0),
+                            at + egui::vec2(0.0, PIVOT_RADIUS + 3.0),
+                        ],
+                    ],
+                    PIVOT_COLOR,
                 );
             }
         }
@@ -308,11 +380,12 @@ impl View2D {
         Handle::ALL.map(|handle| (handle, self.to_screen(rect, handle.world_position(self.axis, bounds))))
     }
 
-    /// The handle of a box under a screen position, if any.
-    pub fn hit_handle(&self, rect: Rect, bounds: &Bounds, pointer: Pos2) -> Option<Handle> {
+    /// The handle of a box under a screen position, among those a handle mode shows.
+    pub fn hit_handle(&self, rect: Rect, bounds: &Bounds, pointer: Pos2, mode: HandleMode) -> Option<Handle> {
         let reach = HANDLE_HALF_SIZE + 2.0;
         self.handle_positions(rect, bounds)
             .into_iter()
+            .filter(|(handle, _)| handle.shown(mode))
             .find(|(_, at)| (at.x - pointer.x).abs() <= reach && (at.y - pointer.y).abs() <= reach)
             .map(|(handle, _)| handle)
     }
