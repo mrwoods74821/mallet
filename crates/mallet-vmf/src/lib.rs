@@ -6,6 +6,7 @@
 pub mod build;
 pub mod edit;
 pub mod geometry;
+pub mod light;
 mod model;
 pub mod texture;
 pub mod transform;

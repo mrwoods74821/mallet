@@ -195,10 +195,19 @@ impl Editor {
     }
 
     /// The keyvalues a new entity of a class starts with: every FGD default that is not
-    /// empty, with `spawnflags` made of the flags that are on by default.
+    /// empty, with `spawnflags` made of the flags that are on by default. Without an FGD
+    /// for the class, lighting classes get the defaults of Source's own FGDs from the
+    /// lighting catalogue, so a new light lights; other classes get zero angles.
     pub fn class_defaults(&self, classname: &str) -> Vec<(String, String)> {
         let Some(class) = self.entity_class(classname) else {
-            return vec![("angles".to_owned(), "0 0 0".to_owned())];
+            return match mallet_vmf::light::lighting_class(classname) {
+                Some(lighting) if !lighting.defaults.is_empty() => lighting
+                    .defaults
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                    .collect(),
+                _ => vec![("angles".to_owned(), "0 0 0".to_owned())],
+            };
         };
         class
             .properties

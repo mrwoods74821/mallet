@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use egui_phosphor::regular as icon;
+use mallet_vmf::light::{LightingGroup, CATALOGUE};
 
 use super::{run, save_as_dialog, MalletApp};
 use crate::editor::{Editor, Tool, ENTITY_CLASSES};
@@ -381,13 +382,16 @@ impl MalletApp {
                         .hint_text("classname"),
                 )
                 .on_hover_text("Class the entity tool creates");
-                ui.menu_button(format!("{} Common classes", icon::LIST), |ui| {
-                    for class in ENTITY_CLASSES {
-                        if ui.selectable_label(editor.entity_class == *class, *class).clicked() {
-                            editor.entity_class = (*class).to_owned();
-                            ui.close_menu();
+                ui.horizontal(|ui| {
+                    ui.menu_button(format!("{} Common classes", icon::LIST), |ui| {
+                        for class in ENTITY_CLASSES {
+                            if ui.selectable_label(editor.entity_class == *class, *class).clicked() {
+                                editor.entity_class = (*class).to_owned();
+                                ui.close_menu();
+                            }
                         }
-                    }
+                    });
+                    lighting_menu(ui, editor);
                 });
                 ui.label(
                     RichText::new("Entity tool: click a surface in 3D, or place in 2D and press Enter")
@@ -593,8 +597,35 @@ pub(super) fn material_preview(
     preview
 }
 
-/// A coordinate with at most two decimals and no trailing zeros, so float noise such as
-/// 29.000000953674316 reads as 29.
+/// The entity tool's Lighting menu: every lighting class of the catalogue, grouped as
+/// baked lights, dynamic lights, glows and sky, atmosphere and helpers, each with what it
+/// does in the game and in the lighting preview.
+fn lighting_menu(ui: &mut egui::Ui, editor: &mut Editor) {
+    ui.menu_button(format!("{} Lighting", icon::LIGHTBULB), |ui| {
+        ui.set_min_width(190.0);
+        for (index, group) in LightingGroup::ALL.into_iter().enumerate() {
+            if index > 0 {
+                ui.separator();
+            }
+            ui.label(RichText::new(group.label()).small().color(Color32::GRAY));
+            for class in CATALOGUE.iter().filter(|class| class.group == group) {
+                let chosen = editor.entity_class.eq_ignore_ascii_case(class.classname);
+                let hint = format!("{}\n\nLighting preview: {}", class.description, class.preview);
+                if ui
+                    .selectable_label(chosen, class.classname)
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    editor.entity_class = class.classname.to_owned();
+                    ui.close_menu();
+                }
+            }
+        }
+    })
+    .response
+    .on_hover_text("Every Source lighting entity: lights, glows, sky, fog, tone mapping and helpers");
+}
+
 /// The side panel's transform controls: the 2D handle mode, the gizmo's mode, the pivot
 /// and quick flips.
 fn transform_section(ui: &mut egui::Ui, editor: &mut Editor) {
@@ -678,6 +709,8 @@ fn transform_section(ui: &mut egui::Ui, editor: &mut Editor) {
     });
 }
 
+/// A coordinate with at most two decimals and no trailing zeros, so float noise such as
+/// 29.000000953674316 reads as 29.
 fn short(value: f64) -> String {
     let text = format!("{value:.2}");
     let text = text.trim_end_matches('0').trim_end_matches('.');
