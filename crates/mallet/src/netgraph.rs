@@ -17,7 +17,7 @@ const GRAPH_HEIGHT: f32 = 40.0;
 const GRAPH_RANGE_MS: f32 = 33.3;
 /// Frame time of 60 frames per second, drawn as a reference line.
 const TARGET_MS: f32 = 1000.0 / 60.0;
-/// Colour of the drop shadow behind the overlay's text and bars.
+/// Colour of the drop shadow behind the overlay's text.
 const SHADOW: Color32 = Color32::from_black_alpha(200);
 /// Frames further apart than this were idle waits for input, not slow frames.
 const IDLE_GAP_SECONDS: f32 = 0.25;
@@ -83,7 +83,6 @@ impl NetGraph {
             let height = (ms / GRAPH_RANGE_MS).min(1.0) * graph.height();
             let x = graph.min.x + (offset + index) as f32 * bar_width;
             let bar = Rect::from_min_max(Pos2::new(x, graph.max.y - height), Pos2::new(x + bar_width.max(1.0), graph.max.y));
-            painter.rect_filled(bar.translate(Vec2::splat(1.0)), 0.0, SHADOW);
             painter.rect_filled(bar, 0.0, bar_color(*ms));
         }
         let target_y = graph.max.y - (TARGET_MS / GRAPH_RANGE_MS) * graph.height();
