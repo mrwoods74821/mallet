@@ -20,7 +20,7 @@ pub struct NetGraphExtra {
 
 /// How many recent frames the graph shows.
 const HISTORY: usize = 120;
-const PANEL_SIZE: Vec2 = Vec2::new(236.0, 110.0);
+const PANEL_SIZE: Vec2 = Vec2::new(236.0, 124.0);
 const MARGIN: f32 = 6.0;
 const GRAPH_HEIGHT: f32 = 40.0;
 /// Frame time the graph's full height stands for, in milliseconds.
@@ -95,11 +95,10 @@ impl NetGraph {
             format!("fps {fps:>4}   cpu {last_cpu:5.1} ms"),
             format!("avg {average_cpu:5.1} ms   max fps {max_fps:5.0}"),
             format!(
-                "chunks {}/{}   tris {}",
-                stats.chunks_drawn,
-                stats.chunks,
-                thousands(stats.triangles_drawn)
+                "chunks {}/{}   props {}/{}",
+                stats.chunks_drawn, stats.chunks, stats.models_drawn, stats.models
             ),
+            format!("tris {}", thousands(stats.triangles_drawn)),
             if extra.loading > 0 {
                 format!("reused {}/4   loading {} textures", extra.reused, extra.loading)
             } else {

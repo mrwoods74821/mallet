@@ -4,7 +4,7 @@
 //! calls therefore never wait for a frame, and keep working while the window is covered
 //! or minimized.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -15,13 +15,15 @@ use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
 use mallet_vmf::{format_vec3, Entity, IdAllocator, Solid, Vmf};
 
-use mallet_content::{GameFs, Materials};
+use std::sync::Arc;
+
+use mallet_content::{parallel_map, GameFs, Materials};
 
 use crate::canvas::PixmapCanvas;
 use crate::document::Document;
 use crate::input::InputFrame;
 use crate::render3d::{CameraStyle, Renderer3D};
-use crate::scene::{Overlay, Owner, Scene};
+use crate::scene::{model_key, ModelCache, Overlay, Owner, Scene};
 use crate::view2d::{Axis2D, View2D};
 use crate::view3d::Camera3D;
 
@@ -205,6 +207,10 @@ pub struct Editor {
     pub gpu_info: String,
     /// Textures from the configured game, when one is set.
     pub materials: Option<Materials>,
+    /// Prop models loaded so far, shared by every tab.
+    pub models: ModelCache,
+    /// Why each model in [`Self::models`] that is `None` could not be loaded.
+    pub model_errors: HashMap<String, String>,
     /// The GPU renderer for the textured camera view, created once the window has a GPU.
     pub gpu: Option<Renderer3D>,
     /// The last block created; new blocks reuse its depth.
@@ -239,6 +245,8 @@ impl Default for Editor {
             timings: FrameTimings::default(),
             gpu_info: String::new(),
             materials: None,
+            models: ModelCache::new(),
+            model_errors: HashMap::new(),
             gpu: None,
             last_block: DEFAULT_BLOCK,
             viewport_rects: quad_rects(Rect::from_min_size(Pos2::ZERO, DEFAULT_AREA), VIEWPORT_GAP),
@@ -418,7 +426,8 @@ impl Editor {
     }
 
     fn set_document(&mut self, document: Document) {
-        self.scene = Scene::build(&document.vmf);
+        self.ensure_models(&document.vmf);
+        self.scene = Scene::build(&document.vmf, &self.models);
         self.document = Some(document);
         self.selection.clear();
         self.overlay = Overlay::default();
@@ -488,10 +497,13 @@ impl Editor {
     /// Rebuilds the wireframes after the map changed, dropping selected items that no
     /// longer exist.
     pub fn rebuild_scene(&mut self) {
-        self.scene = self
-            .document
-            .as_ref()
-            .map_or_else(Scene::default, |document| Scene::build(&document.vmf));
+        if let Some(document) = self.document.take() {
+            self.ensure_models(&document.vmf);
+            self.scene = Scene::build(&document.vmf, &self.models);
+            self.document = Some(document);
+        } else {
+            self.scene = Scene::default();
+        }
         let scene = &self.scene;
         self.selection.retain(|owner| scene.contains(*owner));
         self.scene.mark_selected(&self.selection);
@@ -758,11 +770,46 @@ impl Editor {
         let filesystem = GameFs::from_gameinfo(game_dir).map_err(|error| error.to_string())?;
         let mounts = filesystem.mounts().len();
         self.materials = Some(Materials::new(filesystem));
+        self.models.clear();
+        self.model_errors.clear();
         if let Some(gpu) = &mut self.gpu {
             gpu.clear_textures();
         }
+        self.rebuild_scene();
         self.message = format!("Using game content from {} ({mounts} search paths)", game_dir.display());
         Ok(mounts)
+    }
+
+    /// Loads, in parallel, every prop model the map uses that is not loaded yet.
+    fn ensure_models(&mut self, vmf: &Vmf) {
+        let Some(materials) = &self.materials else {
+            return;
+        };
+        let mut missing: Vec<String> = vmf
+            .entities()
+            .filter_map(|entity| entity.get("model"))
+            .filter(|path| path.to_ascii_lowercase().ends_with(".mdl"))
+            .map(model_key)
+            .filter(|key| !self.models.contains_key(key))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        if missing.is_empty() {
+            return;
+        }
+        let loader = materials.loader();
+        let loaded = parallel_map(&missing, |key| loader.model(key));
+        for (key, result) in missing.into_iter().zip(loaded) {
+            match result {
+                Ok(model) => {
+                    self.models.insert(key, Some(Arc::new(model)));
+                }
+                Err(error) => {
+                    self.model_errors.insert(key.clone(), error);
+                    self.models.insert(key, None);
+                }
+            }
+        }
     }
 
     /// The mounted game folder, if any.
@@ -885,6 +932,7 @@ impl Editor {
             &self.camera,
             size,
             self.materials.as_mut(),
+            &self.models,
         );
         if gpu.textures_loading() > 0 {
             gpu.finish_loading();
@@ -896,6 +944,7 @@ impl Editor {
                 &self.camera,
                 size,
                 self.materials.as_mut(),
+                &self.models,
             );
         }
         let (width, height, rgba) = gpu.read_pixels(slot)?;

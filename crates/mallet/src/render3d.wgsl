@@ -7,6 +7,9 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(1) @binding(0) var face_texture: texture_2d<f32>;
 @group(1) @binding(1) var face_sampler: sampler;
+// x: alpha-test reference (0 for none); y: blend opacity (0 for opaque). Used by models,
+// whose vertices are shared by many materials.
+@group(1) @binding(2) var<uniform> material_alpha: vec4<f32>;
 
 struct FaceIn {
     @location(0) position: vec3<f32>,
@@ -45,6 +48,34 @@ fn fs_face(input: FaceOut) -> @location(0) vec4<f32> {
     let rgb = mix(base.rgb, vec3<f32>(1.0, 0.0, 0.0), input.highlight);
     let opacity = select(1.0, base.a * input.alpha.y, input.alpha.y > 0.0);
     return vec4<f32>(rgb, opacity);
+}
+
+struct ModelIn {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) column0: vec4<f32>,
+    @location(4) column1: vec4<f32>,
+    @location(5) column2: vec4<f32>,
+    @location(6) column3: vec4<f32>,
+    @location(7) tint: vec4<f32>,
+};
+
+// Prop models: one shared mesh per model, placed by a per-instance matrix and shaded by
+// direction like brushes.
+@vertex
+fn vs_model(input: ModelIn) -> FaceOut {
+    let model = mat4x4<f32>(input.column0, input.column1, input.column2, input.column3);
+    let world = model * vec4<f32>(input.position, 1.0);
+    let normal = normalize((model * vec4<f32>(input.normal, 0.0)).xyz);
+    let shade = clamp(0.6 + 0.4 * dot(normal, normalize(vec3<f32>(0.3, 0.5, 1.0))), 0.35, 1.0);
+    var out: FaceOut;
+    out.clip = uniforms.view_proj * world;
+    out.uv = input.uv;
+    out.color = vec4<f32>(input.tint.rgb * shade, 1.0);
+    out.highlight = input.tint.a;
+    out.alpha = material_alpha.xy;
+    return out;
 }
 
 struct LineIn {

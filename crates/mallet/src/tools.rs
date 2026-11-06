@@ -520,7 +520,14 @@ fn status_json(editor: &Editor) -> Value {
             "chunks": gpu.stats.chunks,
             "chunks_drawn": gpu.stats.chunks_drawn,
             "triangles_drawn": gpu.stats.triangles_drawn,
+            "props": gpu.stats.models,
+            "props_drawn": gpu.stats.models_drawn,
         })),
+        "models": {
+            "loaded": editor.models.values().filter(|model| model.is_some()).count(),
+            "failed": editor.model_errors.len(),
+            "failures": model_failures(editor),
+        },
         "tool": match editor.tool {
             Tool::Select => "selection",
             Tool::Block => "block",
@@ -803,4 +810,15 @@ fn id_arg(args: &Value) -> Result<u32, String> {
         .and_then(Value::as_u64)
         .and_then(|id| u32::try_from(id).ok())
         .ok_or_else(|| "\"id\" must be a whole number".to_owned())
+}
+
+/// Up to ten models that failed to load, with the reason, sorted by path.
+fn model_failures(editor: &Editor) -> Value {
+    let mut failures: Vec<(&String, &String)> = editor.model_errors.iter().collect();
+    failures.sort();
+    failures
+        .into_iter()
+        .take(10)
+        .map(|(path, error)| json!({ "model": path, "error": error }))
+        .collect()
 }

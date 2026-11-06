@@ -1,13 +1,15 @@
 //! Wireframe geometry prepared once per map change and shared by all four viewports,
 //! plus hit testing for selection.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use eframe::egui::Color32;
-use glam::{DVec2, DVec3};
+use glam::{DMat3, DMat4, DVec2, DVec3};
+use mallet_content::Model;
 use mallet_vmf::geometry::{faces_bounds, solid_faces, Bounds, Plane};
-use mallet_vmf::{Side, Solid, TexAxis, Vmf};
+use mallet_vmf::{parse_vec3, Entity, Side, Solid, TexAxis, Vmf};
 
 use crate::view2d::Axis2D;
 
@@ -65,6 +67,17 @@ impl Remap {
     pub fn apply(&self, point: DVec3) -> DVec3 {
         self.from.remap(&self.to, point)
     }
+
+    /// The same mapping as a matrix, to apply on top of a model's transform.
+    pub fn matrix(&self) -> DMat4 {
+        let (from, to) = (self.from.size(), self.to.size());
+        let scale = DVec3::select(
+            from.cmpgt(DVec3::ZERO),
+            to / from.max(DVec3::splat(f64::MIN_POSITIVE)),
+            DVec3::ONE,
+        );
+        DMat4::from_translation(self.to.min - self.from.min * scale) * DMat4::from_scale(scale)
+    }
 }
 
 /// Temporary shapes drawn on top of the map while a tool is in use.
@@ -114,6 +127,23 @@ pub struct SceneFace {
     pub vaxis: TexAxis,
 }
 
+/// Loaded prop models by [`model_key`]; `None` when a model could not be loaded.
+pub type ModelCache = HashMap<String, Option<Arc<Model>>>;
+
+/// The cache key for a model path: lower case with forward slashes.
+pub fn model_key(path: &str) -> String {
+    path.trim().replace('\\', "/").to_ascii_lowercase()
+}
+
+/// A prop entity's model placed in the world.
+#[derive(Clone, Debug)]
+pub struct ModelInstance {
+    /// Key into the [`ModelCache`].
+    pub key: String,
+    /// Model space to world: origin, then angles, then `modelscale`.
+    pub transform: DMat4,
+}
+
 /// The geometry of one brush or point entity.
 pub struct WireMesh {
     pub color: Color32,
@@ -126,6 +156,8 @@ pub struct WireMesh {
     /// `None` when the brush or entity has no id and cannot be selected.
     pub owner: Option<Owner>,
     pub selected: bool,
+    /// The prop model drawn for this entity in the 3D view, instead of `faces`.
+    pub model: Option<ModelInstance>,
 }
 
 /// Everything the viewports draw.
@@ -146,8 +178,9 @@ impl Scene {
     /// Builds wireframes for every visible brush and point entity in the map.
     ///
     /// World brushes use their own editor colour; brushes of brush entities use the
-    /// entity's colour, matching Hammer's 2D views.
-    pub fn build(vmf: &Vmf) -> Self {
+    /// entity's colour, matching Hammer's 2D views. Entities with a loaded `model` get the
+    /// model, outlined by its rotated bounding box; others get a small box.
+    pub fn build(vmf: &Vmf, models: &ModelCache) -> Self {
         let mut scene = Self {
             geometry_generation: next_generation(),
             selection_generation: next_generation(),
@@ -177,7 +210,38 @@ impl Scene {
             if has_solids || is_world {
                 continue;
             }
-            if let Some(origin) = entity.origin() {
+            let loaded = entity
+                .get("model")
+                .filter(|path| path.to_ascii_lowercase().ends_with(".mdl"))
+                .map(model_key)
+                .and_then(|key| Some((models.get(&key)?.clone()?, key)));
+            if let (Some(origin), Some((model, key))) = (entity.origin(), loaded) {
+                let transform = entity_transform(origin, entity);
+                let local = Bounds {
+                    min: DVec3::from_array(model.min.map(f64::from)),
+                    max: DVec3::from_array(model.max.map(f64::from)),
+                };
+                let edges: Vec<[DVec3; 2]> = box_edges(&local)
+                    .into_iter()
+                    .map(|[a, b]| [transform.transform_point3(a), transform.transform_point3(b)])
+                    .collect();
+                let mut bounds = Bounds::EMPTY;
+                for point in edges.iter().flatten() {
+                    bounds.add_point(*point);
+                }
+                let mesh = WireMesh {
+                    color: to_color(entity_color),
+                    edges,
+                    faces: Vec::new(),
+                    planes: box_planes(&bounds),
+                    bounds,
+                    owner: entity_owner,
+                    selected: false,
+                    model: Some(ModelInstance { key, transform }),
+                };
+                scene.bounds.add_bounds(&mesh.bounds);
+                scene.meshes.push(mesh);
+            } else if let Some(origin) = entity.origin() {
                 let half = DVec3::splat(POINT_ENTITY_HALF_SIZE);
                 let bounds = Bounds {
                     min: origin - half,
@@ -191,6 +255,7 @@ impl Scene {
                     planes: box_planes(&bounds),
                     owner: entity_owner,
                     selected: false,
+                    model: None,
                 };
                 scene.bounds.add_bounds(&mesh.bounds);
                 scene.meshes.push(mesh);
@@ -374,6 +439,7 @@ fn brush_mesh(solid: &Solid, color: Color32, owner: Option<Owner>) -> Option<Wir
         planes: faces.iter().map(|face| face.plane).collect(),
         owner,
         selected: false,
+        model: None,
     })
 }
 
@@ -430,6 +496,22 @@ fn box_faces(bounds: &Bounds) -> Vec<SceneFace> {
             }
         })
         .collect()
+}
+
+/// Model space to world for a prop: `origin`, then `angles` (pitch, yaw, roll in degrees,
+/// applied roll first, then pitch, then yaw, like the engine), then `modelscale`.
+fn entity_transform(origin: DVec3, entity: &Entity) -> DMat4 {
+    let [pitch, yaw, roll] = entity
+        .get("angles")
+        .and_then(parse_vec3)
+        .map_or([0.0; 3], |angles| angles.to_array().map(f64::to_radians));
+    let scale = entity
+        .get("modelscale")
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|scale| *scale > 0.0)
+        .unwrap_or(1.0);
+    let rotation = DMat3::from_rotation_z(yaw) * DMat3::from_rotation_y(pitch) * DMat3::from_rotation_x(roll);
+    DMat4::from_translation(origin) * DMat4::from_mat3(rotation) * DMat4::from_scale(DVec3::splat(scale))
 }
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);

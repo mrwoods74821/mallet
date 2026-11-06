@@ -10,7 +10,7 @@ maps through a built-in MCP server.
 | --- | --- |
 | `mallet-kv` | Reads and writes Valve KeyValues text. Keeps every key, block and duplicate in order and writes Hammer's exact layout (tabs, CRLF). |
 | `mallet-vmf` | Typed VMF model on top of `mallet-kv`, brush geometry, and the edit/undo layer. No UI dependencies. |
-| `mallet-content` | Game content: `gameinfo.txt` search paths, VPK archives, VMT materials and VTF textures. |
+| `mallet-content` | Game content: `gameinfo.txt` search paths, VPK archives, VMT materials, VTF textures and MDL models. |
 | `mallet` | The editor application: window, viewports, key bindings and the MCP server. |
 
 ## Lossless loading and saving
@@ -83,6 +83,13 @@ Hammer shows: `%tooltexture` first, then `$basetexture`, following `patch` mater
 images are decoded at the largest mip level no bigger than 512 pixels, and loading runs on
 every CPU core. Materials that cannot be found render as Hammer's pink and black checkers.
 
+`load_model` reads a studio model's `.mdl`, `.dx90.vtx` and `.vvd` through `vmdl` and keeps
+the first level of detail with skin 0. Each mesh's material is resolved against the
+model's `$cdmaterials` folders in order, as the engine does. The parser panics on some
+features it lacks (animations in separate blocks), so a panic counts as a failed load.
+The editor loads every model a map uses in parallel when the map opens and keeps them in
+a cache shared by all tabs, with the error for each model that failed.
+
 ## Drawing
 
 Each of the four viewport slots shows a `ViewMode`: 3D Textured, 3D Wireframe, or the 2D
@@ -109,6 +116,13 @@ changes, never for selection changes or camera moves:
 - Materials carry their alpha mode from the VMT: `$alphatest` faces are cut out in the
   shader at `$alphatestreference`, and `$translucent` faces (or `$alpha` below 1) are kept
   out of the chunks, sorted back to front each frame and blended without writing depth.
+- Props are instanced: each model is uploaded once, and every frame the props whose
+  bounds pass frustum culling are written into one instance buffer of model matrices,
+  grouped by model. Opaque meshes draw after the brushes, blended ones after the sorted
+  translucent faces. Selected props are tinted through the instance colour, and a move or
+  resize drag multiplies its transform into their matrices. In the scene a prop is an
+  entity whose box is its model's rotated bounds, so picking, selection and the 2D views
+  treat it like any other entity.
 - The 2D views share one buffer of every brush edge in world space; each view only sets an
   orthographic matrix, so panning and zooming cost almost nothing.
 - Each slot remembers a fingerprint of what its image was drawn from (camera or view,
@@ -178,8 +192,8 @@ make any map change through `Editor::apply_edit` so it stays undoable.
 
 1. Rotate handles, texture application, and entity creation,
    all as `Edit`s with matching MCP tools.
-2. MDL models for prop entities, a texture browser, and streaming texture loads so the
-   first frame of a large map does not wait for every texture.
+2. A texture browser, model skins and bodygroups, and a model browser for prop
+   entities.
 3. Clip, vertex and displacement tools.
 4. Lighting: a real-time preview first, then a bake through VRAD with lightmaps read back.
 5. Entity I/O editor, instances, VisGroups and Check Problems.

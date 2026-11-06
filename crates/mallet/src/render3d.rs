@@ -18,7 +18,7 @@ use glam::{DVec3, Mat4, Vec3, Vec4};
 use mallet_content::{parallel_map, AlphaMode, MaterialLoader, Materials};
 
 use crate::scene::{
-    box_edges, Overlay, Owner, Remap, Scene, SceneFace, WireMesh, HANDLE_COLOR, SELECTED_COLOR, TOOL_COLOR,
+    box_edges, ModelCache, Overlay, Owner, Remap, Scene, SceneFace, WireMesh, HANDLE_COLOR, SELECTED_COLOR, TOOL_COLOR,
 };
 use crate::view2d::View2D;
 use crate::view3d::Camera3D;
@@ -46,6 +46,33 @@ struct FaceVertex {
     highlight: f32,
     /// Alpha-test reference (0 for none) and blend opacity (0 for opaque).
     alpha: [f32; 2],
+}
+
+/// One vertex of a prop model on the GPU, in model space.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ModelGpuVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+}
+
+/// Per-instance data for drawing a prop: its model-to-world matrix, and a colour whose
+/// alpha is the selection tint.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ModelInstanceData {
+    transform: [f32; 16],
+    tint: [f32; 4],
+}
+
+/// A prop model uploaded once and drawn for every instance.
+struct GpuModel {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    /// Index ranges sharing one material, by material key.
+    meshes: Vec<(String, Range<u32>)>,
+    triangles: usize,
 }
 
 #[repr(C)]
@@ -141,6 +168,8 @@ pub struct RenderStats {
     pub chunks: usize,
     pub chunks_drawn: usize,
     pub triangles_drawn: usize,
+    pub models: usize,
+    pub models_drawn: usize,
 }
 
 /// A texture decoded and mip-mapped on a worker thread, ready to upload: the mip levels,
@@ -157,6 +186,10 @@ pub struct Renderer3D {
     face_pipeline: wgpu::RenderPipeline,
     overdraw_pipeline: wgpu::RenderPipeline,
     translucent_pipeline: wgpu::RenderPipeline,
+    model_pipeline: wgpu::RenderPipeline,
+    translucent_model_pipeline: wgpu::RenderPipeline,
+    /// Uploaded prop models by model key; `None` when the model could not be loaded.
+    gpu_models: HashMap<String, Option<GpuModel>>,
     line_pipeline: wgpu::RenderPipeline,
     flat_line_pipeline: wgpu::RenderPipeline,
     uniform_layout: wgpu::BindGroupLayout,
@@ -226,6 +259,16 @@ impl Renderer3D {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -261,30 +304,65 @@ impl Renderer3D {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &line_attributes,
         };
+        let model_attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
+        let instance_attributes = wgpu::vertex_attr_array![
+            3 => Float32x4, 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4
+        ];
+        let model_buffers = [
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<ModelGpuVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &model_attributes,
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<ModelInstanceData>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &instance_attributes,
+            },
+        ];
         let faces = |depth| {
             let topology = wgpu::PrimitiveTopology::TriangleList;
+            let buffers = [face_buffer.clone()];
             pipeline(
                 device,
                 &face_layout,
                 &shader,
                 ("vs_face", "fs_face"),
-                face_buffer.clone(),
+                &buffers,
                 topology,
                 depth,
+                true,
             )
         };
         let lines = |depth| {
             let topology = wgpu::PrimitiveTopology::LineList;
+            let buffers = [line_buffer.clone()];
             pipeline(
                 device,
                 &line_layout,
                 &shader,
                 ("vs_line", "fs_line"),
-                line_buffer.clone(),
+                &buffers,
                 topology,
                 depth,
+                false,
             )
         };
+        let models = |depth| {
+            let topology = wgpu::PrimitiveTopology::TriangleList;
+            pipeline(
+                device,
+                &face_layout,
+                &shader,
+                ("vs_model", "fs_face"),
+                &model_buffers,
+                topology,
+                depth,
+                false,
+            )
+        };
+        let model_pipeline = models(Depth::Test);
+        let translucent_model_pipeline = models(Depth::Translucent);
         let face_pipeline = faces(Depth::Test);
         let overdraw_pipeline = faces(Depth::Overdraw);
         let translucent_pipeline = faces(Depth::Translucent);
@@ -321,6 +399,9 @@ impl Renderer3D {
             face_pipeline,
             overdraw_pipeline,
             translucent_pipeline,
+            model_pipeline,
+            translucent_model_pipeline,
+            gpu_models: HashMap::new(),
             line_pipeline,
             flat_line_pipeline,
             uniform_layout,
@@ -345,6 +426,7 @@ impl Renderer3D {
     /// Forgets every uploaded texture, for example after the game folder changed.
     pub fn clear_textures(&mut self) {
         self.textures.retain(|key, _| key == WHITE_KEY);
+        self.gpu_models.clear();
         self.loading.clear();
         self.incoming.clear();
         self.faces = None;
@@ -422,6 +504,7 @@ impl Renderer3D {
         camera: &Camera3D,
         size: [u32; 2],
         materials: Option<&mut Materials>,
+        models: &ModelCache,
     ) -> (&wgpu::TextureView, bool) {
         let size = [size[0].max(1), size[1].max(1)];
         let recreated = ensure_target(&self.device, &self.uniform_layout, &mut self.targets[slot], size, true);
@@ -454,7 +537,8 @@ impl Renderer3D {
         self.signatures[slot] = Some(signature);
         if style == CameraStyle::Textured {
             if self.textures_checked != scene.geometry_generation {
-                self.load_textures(scene, materials);
+                self.upload_models(scene, models);
+                self.load_textures(scene, materials, models);
                 self.textures_checked = scene.geometry_generation;
             }
             if self
@@ -507,11 +591,16 @@ impl Renderer3D {
             }
             _ => None,
         };
+        let mut stats = RenderStats::default();
+        let instances = if style == CameraStyle::Textured {
+            self.model_instances(scene, overlay, &planes, &mut stats)
+        } else {
+            None
+        };
         let target = self.targets[slot].as_ref().expect("target was just created");
         self.queue
             .write_buffer(&target.uniform_buffer, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
 
-        let mut stats = RenderStats::default();
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mallet camera"),
         });
@@ -536,6 +625,9 @@ impl Renderer3D {
                             pass.draw(range.clone(), 0..1);
                         }
                     }
+                    if let Some((buffer, ranges)) = &instances {
+                        self.draw_models(&mut pass, buffer, ranges, false, &mut stats);
+                    }
                     if let Some(tinted) = &tinted {
                         pass.set_pipeline(&self.overdraw_pipeline);
                         pass.set_vertex_buffer(0, tinted.buffer.slice(..));
@@ -552,6 +644,9 @@ impl Renderer3D {
                             pass.set_bind_group(1, &self.texture_for(key).bind_group, &[]);
                             pass.draw(range.clone(), 0..1);
                         }
+                    }
+                    if let Some((buffer, ranges)) = &instances {
+                        self.draw_models(&mut pass, buffer, ranges, true, &mut stats);
                     }
                 }
                 (CameraStyle::Wireframe, _) => {
@@ -617,6 +712,137 @@ impl Renderer3D {
             usage: wgpu::BufferUsages::VERTEX,
         });
         Some((buffer, batches))
+    }
+
+    /// Uploads every model the scene places that is not on the GPU yet.
+    fn upload_models(&mut self, scene: &Scene, models: &ModelCache) {
+        for instance in scene.meshes.iter().filter_map(|mesh| mesh.model.as_ref()) {
+            if self.gpu_models.contains_key(&instance.key) {
+                continue;
+            }
+            let uploaded = models.get(&instance.key).and_then(Option::as_ref).map(|model| {
+                let vertices: Vec<ModelGpuVertex> = model
+                    .vertices
+                    .iter()
+                    .map(|vertex| ModelGpuVertex {
+                        position: vertex.position,
+                        normal: vertex.normal,
+                        uv: vertex.uv,
+                    })
+                    .collect();
+                let mut indices = Vec::new();
+                let mut meshes = Vec::new();
+                for mesh in &model.meshes {
+                    let start = indices.len() as u32;
+                    indices.extend_from_slice(&mesh.indices);
+                    meshes.push((material_key(&mesh.material), start..indices.len() as u32));
+                }
+                GpuModel {
+                    vertices: self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("mallet model vertices"),
+                        contents: bytemuck::cast_slice(&vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    }),
+                    indices: self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("mallet model indices"),
+                        contents: bytemuck::cast_slice(&indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    }),
+                    meshes,
+                    triangles: model.triangle_count(),
+                }
+            });
+            self.gpu_models.insert(instance.key.clone(), uploaded);
+        }
+    }
+
+    /// Builds this frame's instance buffer: every prop in view, grouped by model, with
+    /// selected props tinted and shown where a move or resize drag puts them. Returns the
+    /// buffer and each model's range of instances in it.
+    #[allow(clippy::type_complexity)]
+    fn model_instances(
+        &self,
+        scene: &Scene,
+        overlay: &Overlay,
+        planes: &[Vec4; 6],
+        stats: &mut RenderStats,
+    ) -> Option<(wgpu::Buffer, Vec<(String, Range<u32>)>)> {
+        let mut by_model: HashMap<&str, Vec<ModelInstanceData>> = HashMap::new();
+        for mesh in &scene.meshes {
+            let Some(instance) = &mesh.model else {
+                continue;
+            };
+            if self.gpu_models.get(&instance.key).is_none_or(Option::is_none) {
+                continue;
+            }
+            stats.models += 1;
+            let (_, remap) = mesh.appearance(overlay);
+            let bounds = mesh.mapped_bounds(remap.as_ref());
+            if !box_visible(planes, bounds.min.as_vec3(), bounds.max.as_vec3()) {
+                continue;
+            }
+            stats.models_drawn += 1;
+            let transform = remap.map_or(instance.transform, |remap| remap.matrix() * instance.transform);
+            let highlight = if mesh.selected { SELECTION_TINT } else { 0.0 };
+            by_model
+                .entry(instance.key.as_str())
+                .or_default()
+                .push(ModelInstanceData {
+                    transform: transform.as_mat4().to_cols_array(),
+                    tint: [1.0, 1.0, 1.0, highlight],
+                });
+        }
+        if by_model.is_empty() {
+            return None;
+        }
+        let mut all = Vec::new();
+        let mut ranges = Vec::with_capacity(by_model.len());
+        for (key, instances) in by_model {
+            let start = all.len() as u32;
+            all.extend(instances);
+            ranges.push((key.to_owned(), start..all.len() as u32));
+        }
+        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mallet model instances"),
+            contents: bytemuck::cast_slice(&all),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        Some((buffer, ranges))
+    }
+
+    /// Draws every visible prop's opaque meshes, or with `translucent` its blended ones.
+    fn draw_models<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        instances: &'a wgpu::Buffer,
+        ranges: &[(String, Range<u32>)],
+        translucent: bool,
+        stats: &mut RenderStats,
+    ) {
+        pass.set_pipeline(if translucent {
+            &self.translucent_model_pipeline
+        } else {
+            &self.model_pipeline
+        });
+        pass.set_vertex_buffer(1, instances.slice(..));
+        for (key, instance_range) in ranges {
+            let Some(Some(model)) = self.gpu_models.get(key) else {
+                continue;
+            };
+            pass.set_vertex_buffer(0, model.vertices.slice(..));
+            pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for (material, range) in &model.meshes {
+                let texture = self.texture_for(material);
+                if matches!(texture.alpha, AlphaMode::Blend(_)) != translucent {
+                    continue;
+                }
+                pass.set_bind_group(1, &texture.bind_group, &[]);
+                pass.draw_indexed(range.clone(), 0, instance_range.clone());
+            }
+            if !translucent {
+                stats.triangles_drawn += model.triangles * instance_range.len();
+            }
+        }
     }
 
     /// Rebuilds the cached buffer of every brush edge when the geometry changed.
@@ -786,12 +1012,18 @@ impl Renderer3D {
 
     /// Starts loading, on a background thread, every material in the scene that has not
     /// been seen yet. Faces show a grey stand-in until their texture arrives.
-    fn load_textures(&mut self, scene: &Scene, materials: Option<&mut Materials>) {
+    fn load_textures(&mut self, scene: &Scene, materials: Option<&mut Materials>, models: &ModelCache) {
+        let model_materials = scene
+            .meshes
+            .iter()
+            .filter_map(|mesh| models.get(&mesh.model.as_ref()?.key)?.as_ref())
+            .flat_map(|model| model.meshes.iter().map(|mesh| mesh.material.as_str()));
         let wanted: HashSet<String> = scene
             .meshes
             .iter()
             .flat_map(|mesh| &mesh.faces)
             .filter_map(|face| face.material.as_deref())
+            .chain(model_materials)
             .map(material_key)
             .filter(|key| !self.textures.contains_key(key))
             .collect();
@@ -1171,6 +1403,16 @@ fn upload(
         );
     }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let alpha_values: [f32; 4] = match alpha {
+        AlphaMode::Opaque => [0.0; 4],
+        AlphaMode::Test(reference) => [reference, 0.0, 0.0, 0.0],
+        AlphaMode::Blend(opacity) => [0.0, opacity.max(f32::EPSILON), 0.0, 0.0],
+    };
+    let alpha_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("mallet material alpha"),
+        contents: bytemuck::cast_slice(&alpha_values),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("mallet material"),
         layout,
@@ -1182,6 +1424,10 @@ fn upload(
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: alpha_buffer.as_entire_binding(),
             },
         ],
     });
@@ -1310,14 +1556,16 @@ fn material_key(material: &str) -> String {
     material.replace('\\', "/").to_ascii_lowercase()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     (vertex_entry, fragment_entry): (&str, &str),
-    buffer: wgpu::VertexBufferLayout<'_>,
+    buffers: &[wgpu::VertexBufferLayout<'_>],
     topology: wgpu::PrimitiveTopology,
     depth: Depth,
+    cull_back_faces: bool,
 ) -> wgpu::RenderPipeline {
     let depth_stencil = match depth {
         Depth::None => None,
@@ -1339,13 +1587,13 @@ fn pipeline(
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some(vertex_entry),
-            buffers: &[buffer],
+            buffers,
             compilation_options: Default::default(),
         },
         primitive: wgpu::PrimitiveState {
             topology,
             front_face: wgpu::FrontFace::Ccw,
-            cull_mode: (topology == wgpu::PrimitiveTopology::TriangleList).then_some(wgpu::Face::Back),
+            cull_mode: cull_back_faces.then_some(wgpu::Face::Back),
             ..Default::default()
         },
         depth_stencil,

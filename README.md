@@ -18,6 +18,10 @@ Mod, Half-Life 2, the Source SDK Base 2013 games or Counter-Strike: Source in yo
 libraries; choose another with Tools > Game Folder... (the folder that contains
 `gameinfo.txt`). The choice is saved in `%APPDATA%\Mallet\config.json`.
 
+Prop entities with a `model` key show their model in the 3D view, textured with the
+default skin and placed by `origin`, `angles` and `modelscale`. Models the game does not
+have stay as entity boxes; `get_status` lists why they failed.
+
 Without a path it starts with a new, empty map, like Hammer. You can also open a map with
 File > Open or by dropping a `.vmf` onto the window.
 
@@ -54,7 +58,7 @@ These follow Hammer's defaults.
 | W A S D, arrow keys | Move and turn the 3D camera |
 
 View > Net Graph toggles a frame timing overlay in the 3D view's bottom-right corner:
-frame rate, CPU time per frame, how much geometry culling left to draw, how many viewports
+frame rate, CPU time per frame, how many chunks and props culling left to draw, how many viewports
 reused their last image, and how many textures are still loading. View > 3D draw distance
 sets how far the 3D view draws, like Hammer's back clipping plane. For the best
 speed on large maps, run the release build (`cargo build --release -p mallet`).

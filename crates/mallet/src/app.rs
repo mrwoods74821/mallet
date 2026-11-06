@@ -524,6 +524,7 @@ impl MalletApp {
             &editor.camera,
             size,
             editor.materials.as_mut(),
+            &editor.models,
         );
         show_texture(render_state, &mut self.slot_textures[slot], view, recreated)
     }
