@@ -8,6 +8,7 @@ pub mod edit;
 pub mod geometry;
 mod model;
 pub mod texture;
+pub mod transform;
 mod view;
 
 pub use mallet_kv as kv;

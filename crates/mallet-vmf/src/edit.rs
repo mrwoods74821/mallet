@@ -7,9 +7,10 @@
 use std::error::Error;
 use std::fmt;
 
-use glam::DVec3;
+use glam::{DMat4, DVec3};
 
 use crate::geometry::Bounds;
+use crate::transform::{self, TextureLock};
 use crate::{Connection, Entity, EntityItem, Solid, TopLevel, Vmf};
 
 /// One reversible change to a map.
@@ -84,6 +85,17 @@ pub enum Edit {
         /// The box after resizing.
         to: Bounds,
     },
+    /// Applies an affine transform to brushes: rotating, scaling, skewing or mirroring
+    /// them, with textures following as `lock` says. Undoing restores the original
+    /// brushes exactly. Entity origins and angles are changed with [`Edit::SetKey`].
+    Transform {
+        /// Brush ids.
+        solids: Vec<u32>,
+        /// The transform, which must not flatten the brushes.
+        matrix: DMat4,
+        /// How textures follow the brushes.
+        lock: TextureLock,
+    },
     /// Replaces brushes with new versions that have the same ids. This is how resizes are
     /// undone without rounding errors.
     ReplaceSolids(Vec<Solid>),
@@ -111,6 +123,8 @@ pub enum EditError {
     MissingId,
     /// A resize would flatten or turn a box inside out.
     InvalidResize,
+    /// A transform would flatten the brushes or is not a finite number.
+    InvalidTransform,
 }
 
 impl fmt::Display for EditError {
@@ -125,6 +139,7 @@ impl fmt::Display for EditError {
                 f,
                 "the new size must be larger than zero along every axis the selection spans"
             ),
+            Self::InvalidTransform => write!(f, "the transform would flatten the selection"),
         }
     }
 }
@@ -255,6 +270,25 @@ impl Edit {
                 for id in solids {
                     if let Some(solid) = solid_mut(vmf, *id) {
                         solid.transform(&|point| from.remap(&to, point));
+                    }
+                }
+                Ok(Self::ReplaceSolids(originals))
+            }
+            Self::Transform { solids, matrix, lock } => {
+                if !transform::is_invertible(matrix) {
+                    return Err(EditError::InvalidTransform);
+                }
+                let originals = solids
+                    .iter()
+                    .map(|id| {
+                        solid_mut(vmf, *id)
+                            .map(|solid| solid.clone())
+                            .ok_or(EditError::NoSuchSolid(*id))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for id in solids {
+                    if let Some(solid) = solid_mut(vmf, *id) {
+                        solid.apply_matrix(matrix, *lock);
                     }
                 }
                 Ok(Self::ReplaceSolids(originals))
