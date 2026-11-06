@@ -5,12 +5,11 @@ use glam::{DVec2, DVec3};
 use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::Canvas;
-use crate::scene::{box_edges, entity_marker_edges, Overlay, Remap, Scene, HANDLE_COLOR, HANDLE_HALF_SIZE, TOOL_COLOR};
+use crate::scene::{box_edges, entity_marker_edges, Overlay, Remap, Scene, HANDLE_HALF_SIZE};
+use crate::style;
 
 const MIN_SCALE: f64 = 1.0 / 256.0;
 const MAX_SCALE: f64 = 32.0;
-/// Grid lines closer than this many pixels are thinned out by doubling their spacing.
-const MIN_GRID_PIXELS: f64 = 4.0;
 const MAX_GRID_LINES: f64 = 4000.0;
 /// Half the size, in pixels, of the cross marking each brush's centre.
 const CROSS_PIXELS: f64 = 3.0;
@@ -18,7 +17,8 @@ const CROSS_PIXELS: f64 = 3.0;
 const CROSS_MIN_PIXELS: f64 = 10.0;
 /// Scroll distance egui reports for one mouse wheel notch.
 const POINTS_PER_NOTCH: f64 = 50.0;
-const ZOOM_PER_NOTCH: f64 = 1.2;
+/// Default zoom factor of one mouse wheel notch.
+pub const DEFAULT_ZOOM_STEP: f64 = 1.2;
 
 /// Which pair of world axes a 2D viewport shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -180,8 +180,9 @@ impl View2D {
         self.scale = (fit * 0.9).clamp(MIN_SCALE, MAX_SCALE);
     }
 
-    /// Pans with middle-drag or Space+left-drag and zooms around the cursor with the wheel.
-    pub fn handle_input(&mut self, ui: &egui::Ui, response: &Response, rect: Rect) {
+    /// Pans with middle-drag or Space+left-drag and zooms around the cursor with the wheel,
+    /// by `zoom_step` per notch.
+    pub fn handle_input(&mut self, ui: &egui::Ui, response: &Response, rect: Rect, zoom_step: f64) {
         let space_held = ui.input(|input| input.key_down(egui::Key::Space));
         let panning =
             response.dragged_by(PointerButton::Middle) || (space_held && response.dragged_by(PointerButton::Primary));
@@ -196,7 +197,12 @@ impl View2D {
             return;
         };
         let anchor = self.to_world(rect, pointer);
-        let factor = ZOOM_PER_NOTCH.powf(f64::from(scroll) / POINTS_PER_NOTCH);
+        let zoom_step = if zoom_step.is_finite() {
+            zoom_step.clamp(1.01, 4.0)
+        } else {
+            DEFAULT_ZOOM_STEP
+        };
+        let factor = zoom_step.powf(f64::from(scroll) / POINTS_PER_NOTCH);
         self.scale = (self.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
         let center = rect.center();
         self.center.x = anchor.x - f64::from(pointer.x - center.x) / self.scale;
@@ -208,7 +214,8 @@ impl View2D {
     /// Selected meshes are drawn last, in red, where the overlay is moving or resizing them;
     /// then the block tool's box, the resize handles and this view's selection marquee.
     pub fn draw(&self, canvas: &mut dyn Canvas, rect: Rect, scene: &Scene, grid: f64, active: bool, overlay: &Overlay) {
-        canvas.fill(rect, Color32::BLACK);
+        let style = style::current();
+        canvas.fill(rect, style.background);
         self.draw_grid(canvas, rect, grid);
         if let Some(handles) = &overlay.handles {
             self.draw_handle_outline(canvas, rect, handles);
@@ -232,10 +239,10 @@ impl View2D {
             canvas.lines(&[[self.to_screen(rect, a), self.to_screen(rect, b)]], color);
         }
         if let Some(block) = &overlay.block {
-            self.draw_edges(canvas, rect, &box_edges(block), None, TOOL_COLOR);
+            self.draw_edges(canvas, rect, &box_edges(block), None, style.tool);
         }
         if let Some(point) = overlay.entity {
-            self.draw_edges(canvas, rect, &entity_marker_edges(point), None, TOOL_COLOR);
+            self.draw_edges(canvas, rect, &entity_marker_edges(point), None, style.tool);
         }
         self.draw_overlay(canvas, rect, overlay, active);
     }
@@ -268,11 +275,12 @@ impl View2D {
     /// Draws what sits on top of the map: the resize handles, this view's selection
     /// marquee and the corner label. The GPU-drawn views use this on top of their image.
     pub fn draw_overlay(&self, canvas: &mut dyn Canvas, rect: Rect, overlay: &Overlay, active: bool) {
+        let style = style::current();
         if let Some(handles) = &overlay.handles {
             for (_, at) in self.handle_positions(rect, handles) {
                 canvas.fill(
                     Rect::from_center_size(at, egui::Vec2::splat(HANDLE_HALF_SIZE * 2.0)),
-                    HANDLE_COLOR,
+                    style.handles,
                 );
             }
         }
@@ -287,7 +295,7 @@ impl View2D {
                         ]
                     })
                     .collect();
-                canvas.lines(&segments, TOOL_COLOR);
+                canvas.lines(&segments, style.tool);
             }
         }
 
@@ -317,7 +325,7 @@ impl View2D {
             .iter()
             .map(|[a, b]| [self.to_screen(rect, *a), self.to_screen(rect, *b)])
             .collect();
-        canvas.lines(&outline, HANDLE_COLOR);
+        canvas.lines(&outline, style::current().handles);
     }
 
     /// The four sides of a box as projected into this view, in 2D world coordinates.
@@ -352,11 +360,12 @@ impl View2D {
     }
 
     /// The visible grid lines, in 2D world coordinates, with their colours. Lines closer
-    /// than a few pixels are thinned out by doubling the spacing, and nothing is returned
-    /// if even that would be too many lines.
+    /// than the style's minimum spacing are thinned out by doubling the spacing, and
+    /// nothing is returned if even that would be too many lines.
     pub fn grid_lines(&self, rect: Rect, grid: f64) -> Vec<([DVec2; 2], Color32)> {
-        let mut spacing = grid;
-        while spacing * self.scale < MIN_GRID_PIXELS {
+        let style = style::current();
+        let mut spacing = grid.max(MIN_SCALE);
+        while spacing * self.scale < f64::from(style.grid_min_pixels) {
             spacing *= 2.0;
         }
         let min = self.to_world(rect, rect.left_bottom());
@@ -376,22 +385,9 @@ impl View2D {
                 } else {
                     [DVec2::new(min.x, value), DVec2::new(max.x, value)]
                 };
-                lines.push((segment, grid_color(value)));
+                lines.push((segment, style.grid_color(value)));
             }
         }
         lines
-    }
-}
-
-/// Hammer-style grid colours: axis lines, every 1024 units, every 64 units, then the rest.
-fn grid_color(value: f64) -> Color32 {
-    if value == 0.0 {
-        Color32::from_rgb(0, 100, 100)
-    } else if value % 1024.0 == 0.0 {
-        Color32::from_rgb(100, 46, 0)
-    } else if value % 64.0 == 0.0 {
-        Color32::from_gray(65)
-    } else {
-        Color32::from_gray(38)
     }
 }

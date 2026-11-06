@@ -13,6 +13,7 @@ use crate::config::{self, ToolKind};
 use crate::editor::Editor;
 use crate::keymap::KeyMap;
 use crate::shell;
+use crate::view3d::MAX_LOOK_FRAMES;
 
 const GOOD: Color32 = Color32::from_rgb(90, 190, 110);
 const ERROR: Color32 = Color32::from_rgb(235, 90, 80);
@@ -27,18 +28,26 @@ pub(super) enum Section {
     Tools,
     Compiling,
     Viewports,
+    Colors,
+    Editing,
     Files,
+    TextureBrowser,
+    Interface,
     Keyboard,
     Agents,
 }
 
 impl Section {
-    const ALL: [Section; 7] = [
+    const ALL: [Section; 11] = [
         Section::Game,
         Section::Tools,
         Section::Compiling,
         Section::Viewports,
+        Section::Colors,
+        Section::Editing,
         Section::Files,
+        Section::TextureBrowser,
+        Section::Interface,
         Section::Keyboard,
         Section::Agents,
     ];
@@ -49,7 +58,11 @@ impl Section {
             Section::Tools => (icon::WRENCH, "Compile tools"),
             Section::Compiling => (icon::HAMMER, "Compiling"),
             Section::Viewports => (icon::MONITOR, "Viewports"),
+            Section::Colors => (icon::PALETTE, "Colours"),
+            Section::Editing => (icon::CUBE, "Editing"),
             Section::Files => (icon::FILES, "Files"),
+            Section::TextureBrowser => (icon::IMAGES, "Texture browser"),
+            Section::Interface => (icon::APP_WINDOW, "Interface"),
             Section::Keyboard => (icon::KEYBOARD, "Keyboard"),
             Section::Agents => (icon::ROBOT, "AI agents"),
         };
@@ -62,7 +75,11 @@ impl Section {
             "tools" => Section::Tools,
             "compiling" => Section::Compiling,
             "viewports" => Section::Viewports,
+            "colors" => Section::Colors,
+            "editing" => Section::Editing,
             "files" => Section::Files,
+            "texture_browser" => Section::TextureBrowser,
+            "interface" => Section::Interface,
             "keyboard" => Section::Keyboard,
             "agents" => Section::Agents,
             _ => return None,
@@ -133,13 +150,17 @@ impl MalletApp {
                                 .id_salt("options_section")
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| match state.section {
-                                    Section::Game => game_section(ui, editor, &mut commands),
+                                    Section::Game => game_section(ui, editor, &mut commands, &mut state.dirty),
                                     Section::Tools => tools_section(ui, editor, content, &mut state.dirty),
                                     Section::Compiling => compiling_section(ui, editor, &mut state.dirty),
                                     Section::Viewports => viewports_section(ui, editor, &mut state.dirty),
+                                    Section::Colors => colors_section(ui, editor, &mut state.dirty),
+                                    Section::Editing => editing_section(ui, editor, &mut state.dirty),
                                     Section::Files => files_section(ui, editor, &mut state.dirty),
+                                    Section::TextureBrowser => texture_browser_section(ui, editor, &mut state.dirty),
+                                    Section::Interface => interface_section(ui, editor, &mut state.dirty),
                                     Section::Keyboard => keyboard_section(ui, keymap),
-                                    Section::Agents => agents_section(ui, mcp_url.as_deref()),
+                                    Section::Agents => agents_section(ui, editor, mcp_url.as_deref(), &mut state.dirty),
                                 });
                         },
                     );
@@ -151,7 +172,7 @@ impl MalletApp {
         for command in commands {
             let result = match command {
                 Command::ChooseGame(folder) => editor.choose_game(&folder).map(|_| ()),
-                Command::DetectGame => match config::detect_game_dir() {
+                Command::DetectGame => match config::detect_game_dir(editor.config.steam_dir.as_deref()) {
                     Some(folder) => editor.choose_game(&folder).map(|_| ()),
                     None => Err("No known Source game was found in the Steam libraries".to_owned()),
                 },
@@ -191,7 +212,7 @@ fn heading(ui: &mut egui::Ui, text: &str, note: &str) {
     ui.add_space(6.0);
 }
 
-fn game_section(ui: &mut egui::Ui, editor: &mut Editor, commands: &mut Vec<Command>) {
+fn game_section(ui: &mut egui::Ui, editor: &mut Editor, commands: &mut Vec<Command>, dirty: &mut bool) {
     heading(
         ui,
         "Game",
@@ -221,6 +242,7 @@ fn game_section(ui: &mut egui::Ui, editor: &mut Editor, commands: &mut Vec<Comma
         }
         if ui
             .button(format!("{} Find an installed game", icon::MAGNIFYING_GLASS))
+            .on_hover_text("Looks in the Steam folder below and every Steam library it lists.")
             .clicked()
         {
             commands.push(Command::DetectGame);
@@ -231,6 +253,14 @@ fn game_section(ui: &mut egui::Ui, editor: &mut Editor, commands: &mut Vec<Comma
             }
         }
     });
+    ui.add_space(8.0);
+    ui.label(RichText::new("Steam folder").strong());
+    ui.label(
+        RichText::new("Where Steam is installed, for finding an installed game. Leave it empty for the usual place.")
+            .small()
+            .color(MUTED),
+    );
+    *dirty |= folder_field(ui, &mut editor.config.steam_dir, config::DEFAULT_STEAM_DIR);
     if let Some(materials) = &editor.materials {
         ui.label(
             RichText::new(format!(
@@ -449,6 +479,34 @@ fn compiling_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
         "Written to %APPDATA%\\Mallet\\logs.",
     );
     ui.add_space(8.0);
+    egui::Grid::new("compile_options")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Compile folder for .mallet maps").on_hover_text(
+                "The compilers read VMF only, so a .mallet map is compiled from a VMF copy in this folder beside it. \
+                 The BSP and logs end up there too.",
+            );
+            *dirty |= ui
+                .add_sized(
+                    [220.0, ui.spacing().interact_size.y],
+                    egui::TextEdit::singleline(&mut options.compile_folder).hint_text(crate::compile::COMPILE_FOLDER),
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Output lines kept").on_hover_text(
+                "The compile window drops the oldest lines past this, so a long compile cannot use up memory.",
+            );
+            *dirty |= ui
+                .add(
+                    egui::DragValue::new(&mut options.output_lines)
+                        .range(1000..=1_000_000)
+                        .speed(500.0),
+                )
+                .changed();
+            ui.end_row();
+        });
+    ui.add_space(8.0);
     ui.horizontal(|ui| {
         if ui
             .button(format!("{} Open the compile logs", icon::FOLDER_OPEN))
@@ -516,20 +574,59 @@ fn viewports_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
                 )
                 .changed();
             ui.end_row();
+            ui.label("Camera acceleration")
+                .on_hover_text("How quickly the camera speeds up and stops.");
+            *dirty |= ui
+                .add(
+                    egui::Slider::new(&mut view.camera_acceleration, 1.0..=60.0)
+                        .logarithmic(true)
+                        .suffix(" /s"),
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Arrow key turning");
+            *dirty |= ui
+                .add(
+                    egui::Slider::new(&mut view.turn_speed, 10.0..=360.0)
+                        .integer()
+                        .suffix("°/s"),
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Mouse wheel in 3D");
+            *dirty |= ui
+                .add(
+                    egui::Slider::new(&mut view.wheel_step, 8.0..=1024.0)
+                        .logarithmic(true)
+                        .integer()
+                        .suffix(" units per notch"),
+                )
+                .changed();
+            ui.end_row();
             ui.label("Mouselook sensitivity");
             *dirty |= ui
                 .add(egui::Slider::new(&mut view.look_sensitivity, 0.02..=1.0).logarithmic(true))
                 .changed();
             ui.end_row();
-            ui.label("Texture browser scrolling");
-            let mut percent = (view.texture_scroll * 100.0).round();
-            let slider = egui::Slider::new(&mut percent, 25.0..=200.0)
-                .step_by(25.0)
-                .suffix("% of a card per notch");
+            ui.label("Mouselook smoothing")
+                .on_hover_text("Averages mouse movement over this many frames. 1 turns smoothing off.");
+            *dirty |= ui
+                .add(egui::Slider::new(&mut view.look_smoothing, 1..=MAX_LOOK_FRAMES).suffix(" frames"))
+                .changed();
+            ui.end_row();
+            ui.label("2D zoom per wheel notch");
+            let mut percent = ((view.zoom_step - 1.0) * 100.0).round();
+            let slider = egui::Slider::new(&mut percent, 5.0..=100.0).integer().suffix("%");
             if ui.add(slider).changed() {
-                view.texture_scroll = percent / 100.0;
+                view.zoom_step = 1.0 + percent / 100.0;
                 *dirty = true;
             }
+            ui.end_row();
+            ui.label("Click tolerance")
+                .on_hover_text("How close a click in a 2D view must be to a brush's outline to select it.");
+            *dirty |= ui
+                .add(egui::Slider::new(&mut view.pick_tolerance, 1.0..=16.0).suffix(" px"))
+                .changed();
             ui.end_row();
             ui.label("Grid for new maps");
             egui::ComboBox::from_id_salt("default_grid")
@@ -542,15 +639,277 @@ fn viewports_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
                     }
                 });
             ui.end_row();
+            ui.label("Hide grid lines closer than")
+                .on_hover_text("Closer lines are thinned out by doubling their spacing.");
+            *dirty |= ui
+                .add(
+                    egui::Slider::new(&mut view.grid_min_pixels, 2.0..=32.0)
+                        .integer()
+                        .suffix(" px"),
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Highlight grid lines every");
+            *dirty |= spacing_choice(
+                ui,
+                "grid_highlight",
+                &mut view.grid_highlight,
+                &[32.0, 64.0, 128.0, 256.0, 512.0],
+            );
+            ui.end_row();
+            ui.label("Major grid lines every");
+            *dirty |= spacing_choice(
+                ui,
+                "grid_major",
+                &mut view.grid_major,
+                &[512.0, 1024.0, 2048.0, 4096.0, 8192.0],
+            );
+            ui.end_row();
         });
     ui.add_space(8.0);
     if ui
         .button(format!("{} Reset viewport options", icon::ARROW_COUNTER_CLOCKWISE))
         .clicked()
     {
-        *view = config::ViewOptions::default();
+        *view = config::ViewOptions {
+            texture_scroll: view.texture_scroll,
+            ..config::ViewOptions::default()
+        };
         *dirty = true;
     }
+}
+
+/// A menu of grid spacings in units, with an entry for none. Returns whether it changed.
+fn spacing_choice(ui: &mut egui::Ui, id: &str, value: &mut f64, choices: &[f64]) -> bool {
+    let label = |units: f64| {
+        if units > 0.0 {
+            format!("{units} units")
+        } else {
+            "Never".to_owned()
+        }
+    };
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label(*value))
+        .show_ui(ui, |ui| {
+            for units in choices.iter().copied().chain([0.0]) {
+                changed |= ui.selectable_value(value, units, label(units)).changed();
+            }
+        });
+    changed
+}
+
+fn colors_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
+    heading(
+        ui,
+        "Colors",
+        "The colours the viewports are drawn with. The defaults are Hammer's.",
+    );
+    let colors = &mut editor.config.colors;
+    let rows: [(&str, &mut config::Rgb); 9] = [
+        ("Background", &mut colors.background),
+        ("Grid", &mut colors.grid),
+        ("Highlighted grid lines", &mut colors.grid_highlight),
+        ("Major grid lines", &mut colors.grid_major),
+        ("Axis lines", &mut colors.axis),
+        ("Selection", &mut colors.selection),
+        ("Block tool and marquee", &mut colors.tool),
+        ("Selection handles", &mut colors.handles),
+        ("Faces picked for texturing", &mut colors.selected_faces),
+    ];
+    egui::Grid::new("color_options")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            for (name, color) in rows {
+                ui.label(name);
+                *dirty |= ui.color_edit_button_srgb(color).changed();
+                ui.end_row();
+            }
+        });
+    ui.add_space(8.0);
+    if ui
+        .button(format!("{} Use Hammer's colours", icon::ARROW_COUNTER_CLOCKWISE))
+        .clicked()
+    {
+        *colors = config::ColorOptions::default();
+        *dirty = true;
+    }
+}
+
+fn editing_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
+    heading(
+        ui,
+        "Editing",
+        "What Mallet starts with each time it opens. The texture and entity can be changed while you work.",
+    );
+    let defaults = config::EditingOptions::default();
+    let editing = &mut editor.config.editing;
+    let mut use_now = None;
+    egui::Grid::new("editing_options")
+        .num_columns(3)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Texture for new brushes");
+            *dirty |= ui
+                .add_sized(
+                    [260.0, ui.spacing().interact_size.y],
+                    egui::TextEdit::singleline(&mut editing.default_material).hint_text(&defaults.default_material),
+                )
+                .changed();
+            if ui
+                .button("Use the current texture")
+                .on_hover_text("The texture the Block tool applies now.")
+                .clicked()
+            {
+                use_now = Some(true);
+            }
+            ui.end_row();
+            ui.label("Entity tool class");
+            *dirty |= ui
+                .add_sized(
+                    [260.0, ui.spacing().interact_size.y],
+                    egui::TextEdit::singleline(&mut editing.default_entity).hint_text(&defaults.default_entity),
+                )
+                .changed();
+            if ui.button("Use the current class").clicked() {
+                use_now = Some(false);
+            }
+            ui.end_row();
+            ui.label("Recent textures listed");
+            *dirty |= ui
+                .add(egui::DragValue::new(&mut editing.recent_textures).range(1..=100))
+                .changed();
+            ui.end_row();
+        });
+    match use_now {
+        Some(true) => editor.config.editing.default_material = editor.material.clone(),
+        Some(false) => editor.config.editing.default_entity = editor.entity_class.clone(),
+        None => return,
+    }
+    *dirty = true;
+}
+
+fn texture_browser_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
+    heading(
+        ui,
+        "Texture browser",
+        "How the texture browser scrolls and loads its thumbnails.",
+    );
+    let view = &mut editor.config.view;
+    let browser = &mut editor.config.texture_browser;
+    ui.spacing_mut().slider_width = 260.0;
+    egui::Grid::new("texture_browser_options")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Scrolling");
+            let mut percent = (view.texture_scroll * 100.0).round();
+            let slider = egui::Slider::new(&mut percent, 25.0..=200.0)
+                .step_by(25.0)
+                .suffix("% of a card per notch");
+            if ui.add(slider).changed() {
+                view.texture_scroll = percent / 100.0;
+                *dirty = true;
+            }
+            ui.end_row();
+            ui.label("Thumbnail size")
+                .on_hover_text("Larger thumbnails look sharper on big cards but load slower and use more memory.");
+            egui::ComboBox::from_id_salt("thumbnail_size")
+                .selected_text(format!("{} px", browser.thumbnail_size))
+                .show_ui(ui, |ui| {
+                    for side in [128, 256, 512, 1024] {
+                        *dirty |= ui
+                            .selectable_value(&mut browser.thumbnail_size, side, format!("{side} px"))
+                            .changed();
+                    }
+                });
+            ui.end_row();
+            ui.label("Loading threads");
+            *dirty |= ui.add(egui::Slider::new(&mut browser.threads, 1..=16)).changed();
+            ui.end_row();
+            ui.label("Thumbnails kept in memory")
+                .on_hover_text("Past this, thumbnails are dropped and load again when they scroll back into view.");
+            *dirty |= ui
+                .add(
+                    egui::Slider::new(&mut browser.cache, 500..=20_000)
+                        .logarithmic(true)
+                        .step_by(100.0),
+                )
+                .changed();
+            ui.end_row();
+        });
+    ui.add_space(8.0);
+    if ui
+        .button(format!(
+            "{} Reset texture browser options",
+            icon::ARROW_COUNTER_CLOCKWISE
+        ))
+        .clicked()
+    {
+        *browser = config::TextureBrowserOptions::default();
+        view.texture_scroll = config::ViewOptions::default().texture_scroll;
+        *dirty = true;
+    }
+}
+
+fn interface_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
+    heading(ui, "Interface", "How Mallet's window looks and draws.");
+    let interface = &mut editor.config.interface;
+    ui.spacing_mut().slider_width = 260.0;
+    egui::Grid::new("interface_options")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Interface size")
+                .on_hover_text("Scales menus, panels and text. Applied once you let go.");
+            let mut percent = (interface.scale * 100.0).round();
+            let slider = egui::Slider::new(&mut percent, 50.0..=300.0).step_by(5.0).suffix("%");
+            if ui.add(slider).changed() {
+                interface.scale = percent / 100.0;
+                *dirty = true;
+            }
+            ui.end_row();
+            ui.label("Vertical sync");
+            *dirty |= ui
+                .checkbox(&mut interface.vsync, "Wait for the screen's refresh")
+                .on_hover_text(
+                    "Off draws as fast as the computer can, for the lowest input delay. Takes effect when Mallet \
+                     next starts; MALLET_PRESENT overrides it.",
+                )
+                .changed();
+            ui.end_row();
+        });
+}
+
+/// A folder path that can be typed or browsed for; empty means `automatic`. Returns
+/// whether it changed.
+fn folder_field(ui: &mut egui::Ui, folder: &mut Option<PathBuf>, automatic: &str) -> bool {
+    let mut text = folder
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if ui
+            .add_sized(
+                [360.0, ui.spacing().interact_size.y],
+                egui::TextEdit::singleline(&mut text).hint_text(automatic),
+            )
+            .changed()
+        {
+            *folder = (!text.trim().is_empty()).then(|| PathBuf::from(text.trim()));
+            changed = true;
+        }
+        if ui.button(icon::FOLDER_OPEN).on_hover_text("Browse").clicked() {
+            let start = folder.clone().unwrap_or_else(|| PathBuf::from(automatic));
+            if let Some(picked) = rfd::FileDialog::new().set_directory(start).pick_folder() {
+                *folder = Some(picked);
+                changed = true;
+            }
+        }
+    });
+    changed
 }
 
 fn files_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
@@ -574,6 +933,19 @@ fn files_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
         RichText::new("Save As still offers both. Compiling a .mallet map writes a VMF copy for the compilers.")
             .color(MUTED),
     );
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label("File > Recent Maps keeps");
+        let files = &mut editor.config.files;
+        let slider = egui::DragValue::new(&mut files.recent_maps)
+            .range(1..=config::MAX_RECENT_MAPS)
+            .suffix(" maps");
+        if ui.add(slider).changed() {
+            let keep = files.recent_map_count();
+            editor.config.recent_maps.truncate(keep);
+            *dirty = true;
+        }
+    });
 
     ui.add_space(14.0);
     ui.strong("Windows file types");
@@ -676,7 +1048,7 @@ fn keyboard_section(ui: &mut egui::Ui, keymap: &KeyMap) {
         });
 }
 
-fn agents_section(ui: &mut egui::Ui, mcp_url: Option<&str>) {
+fn agents_section(ui: &mut egui::Ui, editor: &mut Editor, mcp_url: Option<&str>, dirty: &mut bool) {
     heading(
         ui,
         "AI agents",
@@ -696,19 +1068,37 @@ fn agents_section(ui: &mut egui::Ui, mcp_url: Option<&str>) {
             ui.label(RichText::new(format!("{} The MCP server is off.", icon::X_CIRCLE)).color(ERROR));
         }
     }
-    ui.add_space(6.0);
+    ui.add_space(8.0);
+    let agents = &mut editor.config.agents;
+    *dirty |= ui
+        .checkbox(&mut agents.enabled, "Run the MCP server")
+        .on_hover_text("Also lets a map opened from Explorer join this Mallet as a tab.")
+        .changed();
+    ui.add_enabled_ui(agents.enabled, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Port");
+            *dirty |= ui
+                .add(egui::DragValue::new(&mut agents.port).range(1024..=65535))
+                .changed();
+            ui.label(RichText::new(format!("on 127.0.0.1, {} by default", crate::mcp::DEFAULT_PORT)).color(MUTED));
+        });
+    });
     ui.label(
         RichText::new(
-            "Set MALLET_MCP_PORT before starting Mallet to use another port, or to 0 to turn the server off.",
+            "Changes take effect when Mallet next starts. MALLET_MCP_PORT, when set, overrides the port, and 0 \
+             turns the server off.",
         )
         .color(MUTED),
     );
-    let config = r#"{ "mcpServers": { "mallet": { "type": "http", "url": "http://127.0.0.1:7414/mcp" } } }"#;
+    let url = mcp_url
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}/mcp", agents.port));
+    let config = format!(r#"{{ "mcpServers": {{ "mallet": {{ "type": "http", "url": "{url}" }} }} }}"#);
     ui.add_space(6.0);
     ui.label("Client configuration (.mcp.json):");
-    ui.label(RichText::new(config).monospace().small());
+    ui.label(RichText::new(&config).monospace().small());
     if ui.small_button(format!("{} Copy", icon::CLIPBOARD_TEXT)).clicked() {
-        ui.ctx().copy_text(config.to_owned());
+        ui.ctx().copy_text(config);
     }
 }
 

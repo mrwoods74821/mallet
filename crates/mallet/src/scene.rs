@@ -57,13 +57,6 @@ pub enum Owner {
     Entity(u32),
 }
 
-/// Colour of selected brushes and entities, as in Hammer.
-pub const SELECTED_COLOR: Color32 = Color32::from_rgb(255, 0, 0);
-/// Colour of the block tool's pending box and the selection marquee.
-pub const TOOL_COLOR: Color32 = Color32::from_rgb(255, 255, 255);
-
-/// Colour of the box and handles drawn around the selection or the pending block.
-pub const HANDLE_COLOR: Color32 = Color32::from_rgb(255, 255, 255);
 /// Half the side length, in pixels, of a selection handle.
 pub const HANDLE_HALF_SIZE: f32 = 3.5;
 
@@ -142,7 +135,7 @@ impl WireMesh {
     /// Colour to draw this mesh with and where to move it, given the current overlay.
     pub fn appearance(&self, overlay: &Overlay) -> (Color32, Option<Remap>) {
         if self.selected {
-            (SELECTED_COLOR, overlay.transform)
+            (crate::style::current().selection, overlay.transform)
         } else {
             (self.color, None)
         }

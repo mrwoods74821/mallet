@@ -93,15 +93,17 @@ impl<F: Fn(&str, &Value) -> ToolResult + Send + 'static> ToolHandler for F {}
 /// Starts the server on a background thread and returns its endpoint URL.
 ///
 /// `tools` is the JSON array returned from `tools/list`; `handler` runs each tool call.
-/// The port the server listens on unless `MALLET_MCP_PORT` says otherwise.
+/// The port the server listens on unless Mallet Options or `MALLET_MCP_PORT` says
+/// otherwise.
 pub const DEFAULT_PORT: u16 = 7414;
 
-/// The port from `MALLET_MCP_PORT`, or the default; `None` when it is 0 or `off`, which
-/// turns the server off.
-pub fn configured_port() -> Result<Option<u16>, String> {
+/// The port from `MALLET_MCP_PORT`, or else the one in Mallet Options; `None` when it is
+/// 0 or `off`, or when the options turn the server off, which leaves it off.
+pub fn configured_port(options: &crate::config::AgentOptions) -> Result<Option<u16>, String> {
     let setting = std::env::var("MALLET_MCP_PORT").ok();
     match setting.as_deref().map(str::trim) {
-        None | Some("") => Ok(Some(DEFAULT_PORT)),
+        None | Some("") if !options.enabled || options.port == 0 => Ok(None),
+        None | Some("") => Ok(Some(options.port)),
         Some("off") => Ok(None),
         Some(value) => match value.parse() {
             Ok(0) => Ok(None),

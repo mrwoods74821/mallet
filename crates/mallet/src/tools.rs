@@ -251,8 +251,9 @@ pub fn definitions() -> Value {
         ),
         tool(
             "get_settings",
-            "Read Mallet Options: game folder, FGD files, compile tool paths (with the programs found on this \
-             computer), compile behaviour and viewport options.",
+            "Read Mallet Options: game and Steam folders, FGD files, compile tool paths (with the programs found \
+             on this computer), compile behaviour, viewport options and colours, editing defaults, files, the \
+             texture browser, the interface and the MCP server.",
             json!({}),
             &[],
         ),
@@ -319,7 +320,7 @@ pub fn definitions() -> Value {
             "Open or close Mallet Options, optionally on a section.",
             json!({
                 "open": { "type": "boolean" },
-                "section": { "type": "string", "enum": ["game", "tools", "compiling", "viewports", "files", "keyboard", "agents"] }
+                "section": { "type": "string", "enum": ["game", "tools", "compiling", "viewports", "colors", "editing", "files", "texture_browser", "interface", "keyboard", "agents"] }
             }),
             &[],
         ),

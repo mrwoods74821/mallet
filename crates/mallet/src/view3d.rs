@@ -8,21 +8,23 @@ use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::Canvas;
 use crate::keymap::{Action, KeyMap};
-use crate::scene::{box_edges, Overlay, Remap, Scene, TOOL_COLOR};
+use crate::scene::{box_edges, Overlay, Remap, Scene};
+use crate::style;
 
 /// World units per second, matching Hammer's default forward speed.
 pub const DEFAULT_MOVE_SPEED: f64 = 1000.0;
 /// Hammer's default horizontal field of view in degrees.
 pub const DEFAULT_FOV: f64 = 90.0;
-/// Degrees per second for arrow-key turning.
-const TURN_SPEED: f64 = 90.0;
+/// Default degrees per second for arrow-key turning.
+pub const DEFAULT_TURN_SPEED: f64 = 90.0;
 /// Degrees per pixel of mouse movement in mouselook.
 pub const DEFAULT_LOOK_SENSITIVITY: f64 = 0.2;
-/// World units the camera moves per mouse wheel notch.
-const WHEEL_STEP: f64 = 64.0;
+/// Default world units the camera moves per mouse wheel notch.
+pub const DEFAULT_WHEEL_STEP: f64 = 64.0;
 const POINTS_PER_NOTCH: f64 = 50.0;
-/// How quickly the camera reaches its target speed, per second; higher is snappier.
-const ACCELERATION: f64 = 14.0;
+/// Default for how quickly the camera reaches its target speed, per second; higher is
+/// snappier.
+pub const DEFAULT_ACCELERATION: f64 = 14.0;
 /// The share of the camera speed flown while crouching (Ctrl in mouselook), like
 /// Source's crouch speed.
 const CROUCH_SPEED_SCALE: f64 = 1.0 / 3.0;
@@ -32,8 +34,10 @@ const STOP_SPEED: f64 = 1.0;
 const MAX_FRAME_SECONDS: f64 = 0.05;
 /// How quickly the smoothed frame time follows the measured one, per frame.
 const FRAME_TIME_SMOOTHING: f64 = 0.1;
-/// How many frames of raw mouse movement mouselook averages over.
-const LOOK_FRAMES: usize = 4;
+/// Default number of frames of raw mouse movement mouselook averages over.
+pub const DEFAULT_LOOK_FRAMES: usize = 4;
+/// The most frames mouselook can average over.
+pub const MAX_LOOK_FRAMES: usize = 16;
 /// Default draw distance in world units.
 pub const DEFAULT_DRAW_DISTANCE: f64 = 8192.0;
 /// Distance of the near clipping plane.
@@ -55,6 +59,14 @@ pub struct Camera3D {
     pub move_speed: f64,
     /// Degrees per point of mouse movement in mouselook.
     pub look_sensitivity: f64,
+    /// Degrees per second the arrow keys turn.
+    pub turn_speed: f64,
+    /// How quickly the camera reaches its target speed, per second.
+    pub acceleration: f64,
+    /// Units one mouse wheel notch moves the camera.
+    pub wheel_step: f64,
+    /// Frames of mouse movement mouselook averages over, from 1 to [`MAX_LOOK_FRAMES`].
+    pub look_frames: usize,
     mouse_look: bool,
     /// Current movement, eased towards what the movement keys ask for.
     velocity: DVec3,
@@ -76,9 +88,13 @@ impl Camera3D {
             far: DEFAULT_DRAW_DISTANCE,
             move_speed: DEFAULT_MOVE_SPEED,
             look_sensitivity: DEFAULT_LOOK_SENSITIVITY,
+            turn_speed: DEFAULT_TURN_SPEED,
+            acceleration: DEFAULT_ACCELERATION,
+            wheel_step: DEFAULT_WHEEL_STEP,
+            look_frames: DEFAULT_LOOK_FRAMES,
             mouse_look: false,
             velocity: DVec3::ZERO,
-            recent_look: std::collections::VecDeque::with_capacity(LOOK_FRAMES),
+            recent_look: std::collections::VecDeque::with_capacity(MAX_LOOK_FRAMES),
             frame_time: 0.0,
             shortcut_keys: HashSet::new(),
         }
@@ -208,7 +224,8 @@ impl Camera3D {
                         _ => None,
                     })
                     .fold(egui::Vec2::ZERO, |total, delta| total + delta);
-                if self.recent_look.len() == LOOK_FRAMES {
+                let frames = self.look_frames.clamp(1, MAX_LOOK_FRAMES);
+                while self.recent_look.len() >= frames {
                     self.recent_look.pop_front();
                 }
                 self.recent_look.push_back(raw);
@@ -216,7 +233,7 @@ impl Camera3D {
                     .recent_look
                     .iter()
                     .fold(egui::Vec2::ZERO, |total, delta| total + *delta)
-                    / LOOK_FRAMES as f32;
+                    / frames as f32;
                 self.yaw -= f64::from(smoothed.x) * self.look_sensitivity;
                 self.pitch = (self.pitch - f64::from(smoothed.y) * self.look_sensitivity).clamp(-MAX_PITCH, MAX_PITCH);
             }
@@ -227,8 +244,8 @@ impl Camera3D {
             };
             let yaw_input = turn(Action::TurnLeft, Action::TurnRight);
             let pitch_input = turn(Action::LookUp, Action::LookDown);
-            self.yaw += yaw_input * TURN_SPEED * dt;
-            self.pitch = (self.pitch + pitch_input * TURN_SPEED * dt).clamp(-MAX_PITCH, MAX_PITCH);
+            self.yaw += yaw_input * self.turn_speed * dt;
+            self.pitch = (self.pitch + pitch_input * self.turn_speed * dt).clamp(-MAX_PITCH, MAX_PITCH);
             self.yaw = self.yaw.rem_euclid(360.0);
 
             let forward = self.forward();
@@ -242,7 +259,7 @@ impl Camera3D {
                 self.move_speed
             };
             let target = wish.normalize_or_zero() * speed;
-            self.velocity += (target - self.velocity) * (ACCELERATION * dt).min(1.0);
+            self.velocity += (target - self.velocity) * (self.acceleration.max(0.1) * dt).min(1.0);
             if target == DVec3::ZERO && self.velocity.length() < STOP_SPEED {
                 self.velocity = DVec3::ZERO;
             }
@@ -250,7 +267,7 @@ impl Camera3D {
 
             let scroll = f64::from(input.raw_scroll_delta.y);
             if (hovered || self.mouse_look) && scroll != 0.0 {
-                self.position += forward * WHEEL_STEP * scroll / POINTS_PER_NOTCH;
+                self.position += forward * self.wheel_step * scroll / POINTS_PER_NOTCH;
             }
             active |= self.velocity != DVec3::ZERO || yaw_input != 0.0 || pitch_input != 0.0;
         });
@@ -307,7 +324,8 @@ impl Camera3D {
     /// Draws every wireframe in perspective, clipping edges at the near plane. Selected
     /// meshes are drawn last in red at the overlay's move offset, then the block tool's box.
     pub fn draw(&self, canvas: &mut dyn Canvas, rect: Rect, scene: &Scene, active: bool, overlay: &Overlay) {
-        canvas.fill(rect, Color32::BLACK);
+        let style = style::current();
+        canvas.fill(rect, style.background);
         let forward = self.forward();
         let right = self.right();
         let up = right.cross(forward);
@@ -353,7 +371,7 @@ impl Camera3D {
             draw_edges(canvas, &mesh.edges, remap.as_ref(), color);
         }
         if let Some(block) = &overlay.block {
-            draw_edges(canvas, &box_edges(block), None, TOOL_COLOR);
+            draw_edges(canvas, &box_edges(block), None, style.tool);
         }
 
         let label_color = if active { Color32::WHITE } else { Color32::GRAY };

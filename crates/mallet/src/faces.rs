@@ -19,8 +19,6 @@ use eframe::egui;
 use crate::editor::{Editor, SelectMode, Tool};
 use crate::scene::{FaceHit, Owner};
 
-/// How many recently used materials the texture browser lists.
-const RECENT_MATERIALS: usize = 24;
 /// Texture size assumed when a material has no texture, as Hammer does.
 const DEFAULT_TEXTURE_SIZE: f64 = 64.0;
 
@@ -244,7 +242,8 @@ impl Editor {
         self.recent_materials
             .retain(|recent| !recent.eq_ignore_ascii_case(material));
         self.recent_materials.insert(0, material.to_owned());
-        self.recent_materials.truncate(RECENT_MATERIALS);
+        self.recent_materials
+            .truncate(self.config.editing.recent_texture_count());
     }
 
     /// What a texture tool click on a face does: Alt picks its material up, Shift takes

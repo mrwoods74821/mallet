@@ -24,9 +24,6 @@ const NO_ENTITIES_INSIDE: &str = concat!(
     "off the origin, even to 0 0 1, or add an entity inside the sealed area."
 );
 
-/// Lines kept in the log; older ones are dropped so a chatty compile cannot use up memory.
-const MAX_LINES: usize = 50_000;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepStatus {
     Pending,
@@ -106,6 +103,9 @@ pub struct JobState {
     pub preset: String,
     pub steps: Vec<StepRun>,
     pub lines: Vec<LogLine>,
+    /// Lines kept in the log; older ones are dropped so a chatty compile cannot use up
+    /// memory.
+    pub max_lines: usize,
     pub problems: Vec<Problem>,
     pub started: Instant,
     pub started_at: SystemTime,
@@ -182,8 +182,9 @@ impl JobState {
     }
 
     fn push(&mut self, step: Option<usize>, kind: LineKind, text: impl Into<String>) {
-        if self.lines.len() >= MAX_LINES {
-            self.lines.drain(..MAX_LINES / 10);
+        let max_lines = self.max_lines.max(10);
+        if self.lines.len() >= max_lines {
+            self.lines.drain(..max_lines / 10);
         }
         self.lines.push(LogLine {
             step,
@@ -229,13 +230,15 @@ pub struct CompileJob {
 impl CompileJob {
     /// Starts running `steps` on a background thread.
     /// Starts running `steps` on a background thread. `notes` are warnings found before
-    /// compiling, listed first with the place they name.
+    /// compiling, listed first with the place they name. The log keeps the latest
+    /// `max_lines` lines.
     pub fn start(
         map: String,
         preset: String,
         steps: Vec<PlannedStep>,
         pointfile: PathBuf,
         low_priority: bool,
+        max_lines: usize,
         notes: Vec<(String, Option<DVec3>)>,
     ) -> Self {
         let state = JobState {
@@ -254,6 +257,7 @@ impl CompileJob {
                 })
                 .collect(),
             lines: Vec::new(),
+            max_lines,
             problems: Vec::new(),
             started: Instant::now(),
             started_at: SystemTime::now(),
@@ -690,6 +694,7 @@ mod tests {
             steps,
             PathBuf::from("none.lin"),
             false,
+            1000,
             vec![("checked first".to_owned(), None)],
         );
         let deadline = Instant::now() + Duration::from_secs(20);

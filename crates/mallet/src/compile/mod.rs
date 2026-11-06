@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{self, ToolKind};
 
 pub use runner::{CompileJob, Outcome, Severity, StepStatus};
+pub use session::COMPILE_FOLDER;
 
 /// What a step does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

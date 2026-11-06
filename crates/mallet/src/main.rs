@@ -24,6 +24,7 @@ mod properties;
 mod render3d;
 mod scene;
 mod shell;
+mod style;
 mod tools;
 mod view2d;
 mod view3d;
@@ -34,8 +35,9 @@ use eframe::egui;
 
 fn main() -> eframe::Result {
     let path = std::env::args_os().nth(1).map(PathBuf::from);
+    let settings = config::Config::load();
     // A map opened from Explorer while Mallet runs goes to that Mallet, as in Hammer.
-    if let (Some(path), Ok(Some(port))) = (&path, mcp::configured_port()) {
+    if let (Some(path), Ok(Some(port))) = (&path, mcp::configured_port(&settings.agents)) {
         if handoff::hand_off(path, port) {
             return Ok(());
         }
@@ -45,7 +47,8 @@ fn main() -> eframe::Result {
         Ok("mailbox") => eframe::wgpu::PresentMode::Mailbox,
         Ok("immediate") => eframe::wgpu::PresentMode::Immediate,
         Ok("novsync") => eframe::wgpu::PresentMode::AutoNoVsync,
-        _ => eframe::wgpu::PresentMode::AutoVsync,
+        _ if settings.interface.vsync => eframe::wgpu::PresentMode::AutoVsync,
+        _ => eframe::wgpu::PresentMode::AutoNoVsync,
     };
     let latency = std::env::var("MALLET_FRAME_LATENCY")
         .ok()

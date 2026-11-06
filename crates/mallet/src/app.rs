@@ -33,8 +33,6 @@ use crate::view2d::{Axis2D, Handle, View2D};
 use crate::view3d::Camera3D;
 use crate::{mcp, tools};
 
-/// How close, in pixels, a 2D click has to be to a brush's outline to pick it.
-const PICK_TOLERANCE_PIXELS: f64 = 4.0;
 /// How long `send_input` waits for the window to handle its input.
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -142,13 +140,17 @@ pub struct MalletApp {
     texture_browser: texture_browser::TextureBrowserState,
     /// The Object Properties window's tab, drafts and other state.
     properties: properties::PropertiesState,
+    /// The interface scale last applied from Mallet Options, so the window's own zoom
+    /// keys keep working until the setting changes.
+    applied_scale: Option<f32>,
 }
 
 impl MalletApp {
     /// Creates the window, starts the MCP server and opens `path` if one was given.
     ///
-    /// The server listens on port 7414, or on `MALLET_MCP_PORT` when set; a value of
-    /// `0` or `off` disables it.
+    /// The server listens on the port set in Mallet Options (7414 unless changed), or on
+    /// `MALLET_MCP_PORT` when set; a value of `0` or `off` disables it, as does turning it
+    /// off in Mallet Options.
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> Self {
         // Always dark, like Hammer++, whatever Windows uses or a saved layout says.
         cc.egui_ctx.set_theme(egui::Theme::Dark);
@@ -170,6 +172,7 @@ impl MalletApp {
             texture_browser: texture_browser::TextureBrowserState::default(),
             options: options::OptionsState::default(),
             properties: properties::PropertiesState::default(),
+            applied_scale: None,
         };
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
@@ -183,7 +186,7 @@ impl MalletApp {
     }
 
     fn start_mcp(&mut self, ctx: &egui::Context) {
-        let port = match mcp::configured_port() {
+        let port = match mcp::configured_port(&Config::load().agents) {
             Ok(Some(port)) => port,
             Ok(None) => return,
             Err(message) => {
@@ -232,6 +235,16 @@ impl MalletApp {
             Err(error) => {
                 editor::lock(&self.editor).message = format!("MCP server could not start on port {port}: {error}");
             }
+        }
+    }
+
+    /// Sizes the interface as Mallet Options says, whenever that setting changes.
+    fn apply_interface_options(&mut self, ctx: &egui::Context, editor: &Editor) {
+        let scale = editor.config.interface.zoom();
+        let dragging = ctx.input(|input| input.pointer.any_down());
+        if self.applied_scale != Some(scale) && !dragging {
+            ctx.set_zoom_factor(scale);
+            self.applied_scale = Some(scale);
         }
     }
 
@@ -683,7 +696,8 @@ impl MalletApp {
         space_held: bool,
     ) {
         if !editor.camera.mouse_look() {
-            editor.views[view_index].handle_input(ui, response, rect);
+            let zoom_step = editor.config.view.zoom_step;
+            editor.views[view_index].handle_input(ui, response, rect, zoom_step);
         }
         let view = editor.views[view_index].clone();
         if !space_held && !editor.camera.mouse_look() {
@@ -839,7 +853,7 @@ impl MalletApp {
             // In 2D the texture tool picks whole brushes, as faces overlap in these views.
             if response.clicked_by(PointerButton::Primary) {
                 if let Some(position) = pointer.position {
-                    let tolerance = PICK_TOLERANCE_PIXELS / view.scale;
+                    let tolerance = pick_tolerance(editor) / view.scale;
                     let hit = editor
                         .scene
                         .pick_2d(view.axis, view.to_world(rect, position), tolerance);
@@ -868,7 +882,7 @@ impl MalletApp {
         let Some(drag) = self.drag.filter(|drag| drag.view() == index) else {
             if response.clicked_by(PointerButton::Primary) && editor.tool == Tool::Select {
                 if let Some(position) = pointer.position {
-                    let tolerance = PICK_TOLERANCE_PIXELS / view.scale;
+                    let tolerance = pick_tolerance(editor) / view.scale;
                     let hit = editor
                         .scene
                         .pick_2d(view.axis, view.to_world(rect, position), tolerance);
@@ -1002,6 +1016,7 @@ impl eframe::App for MalletApp {
         self.about_window(ctx, &mut editor);
         self.finish_compile(ctx, &mut editor);
         apply_view_options(&mut editor);
+        self.apply_interface_options(ctx, &editor);
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(egui::Color32::from_gray(30)))
             .show(ctx, |ui| self.viewports(ui, &mut editor, frame));
@@ -1113,14 +1128,29 @@ fn short_folder(folder: &Path) -> String {
     format!("{root}…{separator}{tail}")
 }
 
-/// Copies the viewport settings from Mallet Options onto the camera every frame, so
-/// changes show at once.
+/// Copies the viewport settings from Mallet Options onto the camera and the view style
+/// every frame, so changes show at once.
 fn apply_view_options(editor: &mut Editor) {
     let view = &editor.config.view;
     editor.camera.far = view.draw_distance;
     editor.camera.fov = view.fov;
     editor.camera.move_speed = view.camera_speed;
     editor.camera.look_sensitivity = view.look_sensitivity;
+    editor.camera.turn_speed = view.turn_speed;
+    editor.camera.acceleration = view.camera_acceleration;
+    editor.camera.wheel_step = view.wheel_step;
+    editor.camera.look_frames = view.look_smoothing;
+    crate::style::set(crate::style::ViewStyle::from_options(&editor.config.colors, view));
+}
+
+/// How close, in pixels, a 2D click must be to a brush's outline to select it.
+fn pick_tolerance(editor: &Editor) -> f64 {
+    let tolerance = editor.config.view.pick_tolerance;
+    if tolerance.is_finite() {
+        tolerance.clamp(1.0, 32.0)
+    } else {
+        4.0
+    }
 }
 
 /// A small progress readout of the running or last compile, in the status bar.
@@ -1241,9 +1271,12 @@ fn wait_for_input(shared: &Mutex<Editor>, ctx: &egui::Context) -> Result<(), Str
 fn load_game_content(editor: &mut Editor) {
     editor.config = Config::load();
     editor.grid = editor.config.view.default_grid;
+    editor.material = editor.config.editing.material();
+    editor.entity_class = editor.config.editing.entity();
     let config = editor.config.clone();
     let detected = config.game_dir.is_none();
-    let Some(game_dir) = config.game_dir.clone().or_else(config::detect_game_dir) else {
+    let found = || config::detect_game_dir(config.steam_dir.as_deref());
+    let Some(game_dir) = config.game_dir.clone().or_else(found) else {
         return;
     };
     if editor.set_game_dir(&game_dir).is_ok() && detected {

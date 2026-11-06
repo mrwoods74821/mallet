@@ -17,10 +17,8 @@ use eframe::wgpu::{self, util::DeviceExt};
 use glam::{DVec3, Mat4, Vec3, Vec4};
 use mallet_content::{parallel_map, AlphaMode, MaterialLoader, Materials};
 
-use crate::scene::{
-    box_edges, entity_marker_edges, ModelCache, Overlay, Owner, Remap, Scene, SceneFace, WireMesh, HANDLE_COLOR,
-    SELECTED_COLOR, TOOL_COLOR,
-};
+use crate::scene::{box_edges, entity_marker_edges, ModelCache, Overlay, Owner, Remap, Scene, SceneFace, WireMesh};
+use crate::style::{self as view_style, ViewStyle};
 use crate::view2d::View2D;
 use crate::view3d::Camera3D;
 
@@ -522,8 +520,10 @@ impl Renderer3D {
         let size = [size[0].max(1), size[1].max(1)];
         let recreated = ensure_target(&self.device, &self.uniform_layout, &mut self.targets[slot], size, true);
         self.poll_loading();
+        let look = view_style::current();
         let signature = signature(|hasher| {
             (slot, style == CameraStyle::Textured, size).hash(hasher);
+            look.hash(hasher);
             (
                 scene.geometry_generation,
                 scene.selection_generation,
@@ -588,16 +588,16 @@ impl Renderer3D {
             push_edges(&mut outline, &mesh.edges, None, mesh.color);
         }
         for mesh in &selected {
-            push_edges(&mut outline, &mesh.edges, overlay.transform.as_ref(), SELECTED_COLOR);
+            push_edges(&mut outline, &mesh.edges, overlay.transform.as_ref(), look.selection);
         }
         for mesh in &selected_faces {
-            push_edges(&mut outline, &mesh.edges, None, FACE_OUTLINE_COLOR);
+            push_edges(&mut outline, &mesh.edges, None, look.selected_faces);
         }
         if let Some(block) = &overlay.block {
-            push_edges(&mut outline, &box_edges(block), None, TOOL_COLOR);
+            push_edges(&mut outline, &box_edges(block), None, look.tool);
         }
         if let Some(point) = overlay.entity {
-            push_edges(&mut outline, &entity_marker_edges(point), None, TOOL_COLOR);
+            push_edges(&mut outline, &entity_marker_edges(point), None, look.tool);
         }
         let outline = self.line_mesh(&outline);
 
@@ -628,7 +628,7 @@ impl Renderer3D {
             label: Some("mallet camera"),
         });
         {
-            let mut pass = begin_pass(&mut encoder, target);
+            let mut pass = begin_pass(&mut encoder, target, &look);
             pass.set_bind_group(0, &target.uniform_group, &[]);
             match (style, &self.faces) {
                 (CameraStyle::Textured, Some(faces)) => {
@@ -909,8 +909,10 @@ impl Renderer3D {
             pixels,
             false,
         );
+        let look = view_style::current();
         let signature = signature(|hasher| {
             (slot, view.axis.axes(), pixels).hash(hasher);
+            look.hash(hasher);
             (scene.geometry_generation, scene.selection_generation).hash(hasher);
             for value in [
                 view.center.x,
@@ -939,20 +941,20 @@ impl Renderer3D {
         let mut over = Vec::new();
         if let Some(handles) = &overlay.handles {
             for [a, b] in view.handle_outline(handles) {
-                push_edges(&mut over, &[[view.axis.lift(a), view.axis.lift(b)]], None, HANDLE_COLOR);
+                push_edges(&mut over, &[[view.axis.lift(a), view.axis.lift(b)]], None, look.handles);
             }
         }
         for ([a, b], color) in view.centre_crosses(local, scene, overlay) {
             push_edges(&mut over, &[[view.axis.lift(a), view.axis.lift(b)]], None, color);
         }
         for mesh in scene.meshes.iter().filter(|mesh| mesh.selected) {
-            push_edges(&mut over, &mesh.edges, overlay.transform.as_ref(), SELECTED_COLOR);
+            push_edges(&mut over, &mesh.edges, overlay.transform.as_ref(), look.selection);
         }
         if let Some(block) = &overlay.block {
-            push_edges(&mut over, &box_edges(block), None, TOOL_COLOR);
+            push_edges(&mut over, &box_edges(block), None, look.tool);
         }
         if let Some(point) = overlay.entity {
-            push_edges(&mut over, &entity_marker_edges(point), None, TOOL_COLOR);
+            push_edges(&mut over, &entity_marker_edges(point), None, look.tool);
         }
         let under = self.line_mesh(&under);
         let over = self.line_mesh(&over);
@@ -965,7 +967,7 @@ impl Renderer3D {
             label: Some("mallet 2d"),
         });
         {
-            let mut pass = begin_pass(&mut encoder, target);
+            let mut pass = begin_pass(&mut encoder, target, &look);
             pass.set_pipeline(&self.flat_line_pipeline);
             pass.set_bind_group(0, &target.uniform_group, &[]);
             let static_edges = self.edges.as_ref().map(|(_, mesh)| mesh);
@@ -1372,14 +1374,21 @@ fn ensure_target(
     true
 }
 
-fn begin_pass<'a>(encoder: &'a mut wgpu::CommandEncoder, target: &'a Target) -> wgpu::RenderPass<'a> {
+/// Starts drawing into a viewport target, cleared to the style's background.
+fn begin_pass<'a>(encoder: &'a mut wgpu::CommandEncoder, target: &'a Target, look: &ViewStyle) -> wgpu::RenderPass<'a> {
+    let background = egui::Rgba::from(look.background);
     encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("mallet viewport"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: &target.color_view,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: f64::from(background.r()),
+                    g: f64::from(background.g()),
+                    b: f64::from(background.b()),
+                    a: 1.0,
+                }),
                 store: wgpu::StoreOp::Store,
             },
         })],
@@ -1660,8 +1669,6 @@ fn chunk_cell(bounds: &mallet_vmf::geometry::Bounds) -> [i32; 3] {
 
 /// How strongly faces the texture tool has selected are tinted red.
 const FACE_TINT: f32 = 0.18;
-/// The outline of faces the texture tool has selected.
-const FACE_OUTLINE_COLOR: Color32 = Color32::from_rgb(255, 210, 60);
 
 /// The faces the texture tool has selected, as meshes holding just those faces and their
 /// edges, so the selection tint and outline can draw them.

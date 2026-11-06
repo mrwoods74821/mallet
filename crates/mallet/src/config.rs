@@ -14,7 +14,8 @@ const KNOWN_GAMES: [&str; 5] = [
     "Source SDK Base 2013 Multiplayer/hl2mp",
     "Counter-Strike Source/cstrike",
 ];
-const DEFAULT_STEAM_DIR: &str = "C:/Program Files (x86)/Steam";
+/// Where Steam is installed unless Mallet Options says otherwise.
+pub const DEFAULT_STEAM_DIR: &str = "C:/Program Files (x86)/Steam";
 
 /// Settings kept between runs. Missing fields take their defaults, so older files load.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -22,6 +23,9 @@ const DEFAULT_STEAM_DIR: &str = "C:/Program Files (x86)/Steam";
 pub struct Config {
     /// The game folder holding `gameinfo.txt`, such as `.../GarrysMod/garrysmod`.
     pub game_dir: Option<PathBuf>,
+    /// Steam's install folder, searched with its libraries for a game to use; `None` for
+    /// the usual place.
+    pub steam_dir: Option<PathBuf>,
     /// FGD files chosen instead of the game's default one; empty to use the default.
     pub fgds: Vec<PathBuf>,
     /// Games listed in Garry's Mod's `cfg/mount.cfg` that Mallet leaves unmounted.
@@ -32,7 +36,12 @@ pub struct Config {
     pub tools: ToolPaths,
     pub compile: CompileOptions,
     pub view: ViewOptions,
+    pub colors: ColorOptions,
+    pub editing: EditingOptions,
     pub files: FileOptions,
+    pub texture_browser: TextureBrowserOptions,
+    pub interface: InterfaceOptions,
+    pub agents: AgentOptions,
 }
 
 /// How maps are saved.
@@ -42,14 +51,201 @@ pub struct FileOptions {
     /// Save As offers Mallet's own `.mallet` format first for a map that has never been
     /// saved; when off, it offers VMF first.
     pub new_maps_as_mallet: bool,
+    /// How many maps File > Recent Maps keeps.
+    pub recent_maps: usize,
 }
 
 impl Default for FileOptions {
     fn default() -> Self {
         Self {
             new_maps_as_mallet: true,
+            recent_maps: 20,
         }
     }
+}
+
+impl FileOptions {
+    /// The recent map count, kept between 1 and [`MAX_RECENT_MAPS`].
+    pub fn recent_map_count(&self) -> usize {
+        self.recent_maps.clamp(1, MAX_RECENT_MAPS)
+    }
+}
+
+/// What new brushes, entities and lists start with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditingOptions {
+    /// The material new brushes get when Mallet starts.
+    pub default_material: String,
+    /// The class the Entity tool creates when Mallet starts.
+    pub default_entity: String,
+    /// How many recently applied textures the texture tool lists.
+    pub recent_textures: usize,
+}
+
+impl Default for EditingOptions {
+    fn default() -> Self {
+        Self {
+            default_material: crate::editor::DEFAULT_MATERIAL.to_owned(),
+            default_entity: crate::editor::ENTITY_CLASSES[0].to_owned(),
+            recent_textures: 24,
+        }
+    }
+}
+
+impl EditingOptions {
+    /// The default material, or Mallet's own when the setting is blank.
+    pub fn material(&self) -> String {
+        non_blank(&self.default_material, crate::editor::DEFAULT_MATERIAL)
+    }
+
+    /// The default entity class, or Mallet's own when the setting is blank.
+    pub fn entity(&self) -> String {
+        non_blank(&self.default_entity, crate::editor::ENTITY_CLASSES[0])
+    }
+
+    /// The recent texture count, kept between 1 and 100.
+    pub fn recent_texture_count(&self) -> usize {
+        self.recent_textures.clamp(1, 100)
+    }
+}
+
+/// How the texture browser loads its thumbnails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextureBrowserOptions {
+    /// Largest side of a thumbnail in pixels; larger looks sharper but loads slower.
+    pub thumbnail_size: u32,
+    /// Background threads loading thumbnails.
+    pub threads: usize,
+    /// Thumbnails kept in memory before they are dropped and reloaded as needed.
+    pub cache: usize,
+}
+
+impl Default for TextureBrowserOptions {
+    fn default() -> Self {
+        Self {
+            thumbnail_size: 256,
+            threads: 4,
+            cache: 2500,
+        }
+    }
+}
+
+impl TextureBrowserOptions {
+    /// The thumbnail size, kept between 64 and 1024 pixels.
+    pub fn thumbnail_side(&self) -> u32 {
+        self.thumbnail_size.clamp(64, 1024)
+    }
+
+    /// The thread count, kept between 1 and 32.
+    pub fn thread_count(&self) -> usize {
+        self.threads.clamp(1, 32)
+    }
+
+    /// The cache size, kept between 200 and 50000 thumbnails.
+    pub fn cache_size(&self) -> usize {
+        self.cache.clamp(200, 50_000)
+    }
+}
+
+/// How the window itself looks and draws.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InterfaceOptions {
+    /// Size of menus, panels and text, where 1 is normal.
+    pub scale: f32,
+    /// Wait for the screen's refresh before showing each frame. Takes effect on restart;
+    /// `MALLET_PRESENT` overrides it.
+    pub vsync: bool,
+}
+
+impl Default for InterfaceOptions {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            vsync: true,
+        }
+    }
+}
+
+impl InterfaceOptions {
+    /// The interface scale, kept between 0.5 and 3.
+    pub fn zoom(&self) -> f32 {
+        if self.scale.is_finite() {
+            self.scale.clamp(0.5, 3.0)
+        } else {
+            1.0
+        }
+    }
+}
+
+/// The MCP server AI agents connect to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentOptions {
+    /// Run the server. Takes effect on restart.
+    pub enabled: bool,
+    /// The port it listens on, on 127.0.0.1. Takes effect on restart.
+    pub port: u16,
+}
+
+impl Default for AgentOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: crate::mcp::DEFAULT_PORT,
+        }
+    }
+}
+
+/// A colour of the views, as red, green and blue from 0 to 255.
+pub type Rgb = [u8; 3];
+
+/// The colours the viewports are drawn with, Hammer's by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColorOptions {
+    /// Behind everything in every view.
+    pub background: Rgb,
+    /// Ordinary grid lines in the 2D views.
+    pub grid: Rgb,
+    /// Grid lines at every highlight spacing.
+    pub grid_highlight: Rgb,
+    /// Grid lines at every major spacing.
+    pub grid_major: Rgb,
+    /// The lines through the world origin.
+    pub axis: Rgb,
+    /// Selected brushes and entities.
+    pub selection: Rgb,
+    /// The Block tool's box, the entity marker and the selection marquee.
+    pub tool: Rgb,
+    /// The box and handles around the selection.
+    pub handles: Rgb,
+    /// The outline of faces the texture tool has selected.
+    pub selected_faces: Rgb,
+}
+
+impl Default for ColorOptions {
+    fn default() -> Self {
+        Self {
+            background: [0, 0, 0],
+            grid: [38, 38, 38],
+            grid_highlight: [65, 65, 65],
+            grid_major: [100, 46, 0],
+            axis: [0, 100, 100],
+            selection: [255, 0, 0],
+            tool: [255, 255, 255],
+            handles: [255, 255, 255],
+            selected_faces: [255, 210, 60],
+        }
+    }
+}
+
+/// `value` trimmed, or `fallback` when it is blank.
+fn non_blank(value: &str, fallback: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() { fallback } else { value }.to_owned()
 }
 
 /// Programs chosen in Mallet Options. `None` means "find it automatically".
@@ -106,6 +302,10 @@ pub struct CompileOptions {
     pub load_pointfile: bool,
     /// Keep each compile's log in `%APPDATA%\Mallet\logs`.
     pub keep_logs: bool,
+    /// The folder beside a `.mallet` map that its VMF copy, BSP and logs are compiled in.
+    pub compile_folder: String,
+    /// Lines of compiler output the compile window keeps; older ones are dropped.
+    pub output_lines: usize,
     /// The preset the compile window starts with and Shift+F9 runs.
     pub last_preset: String,
 }
@@ -118,8 +318,25 @@ impl Default for CompileOptions {
             notify: true,
             load_pointfile: true,
             keep_logs: true,
+            compile_folder: crate::compile::COMPILE_FOLDER.to_owned(),
+            output_lines: 50_000,
             last_preset: "Normal".to_owned(),
         }
+    }
+}
+
+impl CompileOptions {
+    /// The compile folder's name, or Mallet's own when the setting is blank or names
+    /// anything but a plain folder beside the map.
+    pub fn folder_name(&self) -> String {
+        let name = self.compile_folder.trim();
+        let plain = !name.is_empty() && !name.contains(['/', '\\', ':']) && name != "." && name != "..";
+        if plain { name } else { crate::compile::COMPILE_FOLDER }.to_owned()
+    }
+
+    /// The output line limit, kept between 1000 and 1000000.
+    pub fn line_limit(&self) -> usize {
+        self.output_lines.clamp(1000, 1_000_000)
     }
 }
 
@@ -141,6 +358,25 @@ pub struct ViewOptions {
     /// How far one mouse wheel notch scrolls the texture browser, as a share of a card's
     /// height, from 0.25 to 2.
     pub texture_scroll: f64,
+    /// Degrees per second the arrow keys turn the 3D camera.
+    pub turn_speed: f64,
+    /// How quickly the 3D camera reaches its speed and stops, per second; higher is
+    /// snappier.
+    pub camera_acceleration: f64,
+    /// Units one mouse wheel notch moves the 3D camera.
+    pub wheel_step: f64,
+    /// Frames of mouse movement mouselook averages over; 1 turns smoothing off.
+    pub look_smoothing: usize,
+    /// How much one mouse wheel notch zooms a 2D view.
+    pub zoom_step: f64,
+    /// Grid lines closer than this many pixels are thinned out.
+    pub grid_min_pixels: f64,
+    /// Units between highlighted grid lines; 0 for none.
+    pub grid_highlight: f64,
+    /// Units between major grid lines; 0 for none.
+    pub grid_major: f64,
+    /// How close, in pixels, a click must be to a brush's outline to select it.
+    pub pick_tolerance: f64,
 }
 
 impl Default for ViewOptions {
@@ -153,6 +389,15 @@ impl Default for ViewOptions {
             look_sensitivity: crate::view3d::DEFAULT_LOOK_SENSITIVITY,
             default_grid: 64.0,
             texture_scroll: 1.0,
+            turn_speed: crate::view3d::DEFAULT_TURN_SPEED,
+            camera_acceleration: crate::view3d::DEFAULT_ACCELERATION,
+            wheel_step: crate::view3d::DEFAULT_WHEEL_STEP,
+            look_smoothing: crate::view3d::DEFAULT_LOOK_FRAMES,
+            zoom_step: crate::view2d::DEFAULT_ZOOM_STEP,
+            grid_min_pixels: 4.0,
+            grid_highlight: 64.0,
+            grid_major: 1024.0,
+            pick_tolerance: 4.0,
         }
     }
 }
@@ -180,7 +425,7 @@ impl Config {
         let wanted = key(&path);
         self.recent_maps.retain(|recent| key(recent) != wanted);
         self.recent_maps.insert(0, path);
-        self.recent_maps.truncate(MAX_RECENT_MAPS);
+        self.recent_maps.truncate(self.files.recent_map_count());
     }
 
     /// Loads settings from a file, or defaults when it is missing or unreadable.
@@ -206,8 +451,8 @@ impl Config {
     }
 }
 
-/// How many maps File > Recent Maps keeps.
-pub const MAX_RECENT_MAPS: usize = 20;
+/// The most maps File > Recent Maps can be set to keep.
+pub const MAX_RECENT_MAPS: usize = 50;
 
 /// The `MALLET_PROFILE` in use, if any: a separate set of settings and layouts, as test
 /// copies use.
@@ -358,9 +603,10 @@ impl ToolKind {
 }
 
 /// Looks for an installed Source game: the first known game folder found in the Steam
-/// libraries listed by Steam, in the order Steam lists them.
-pub fn detect_game_dir() -> Option<PathBuf> {
-    let steam = PathBuf::from(DEFAULT_STEAM_DIR);
+/// libraries listed by the Steam install at `steam_dir`, or in the usual place, in the
+/// order Steam lists them.
+pub fn detect_game_dir(steam_dir: Option<&Path>) -> Option<PathBuf> {
+    let steam = steam_dir.map_or_else(|| PathBuf::from(DEFAULT_STEAM_DIR), Path::to_path_buf);
     let mut libraries = vec![steam.clone()];
     let listing = fs::read_to_string(steam.join("steamapps").join("libraryfolders.vdf")).unwrap_or_default();
     libraries.extend(

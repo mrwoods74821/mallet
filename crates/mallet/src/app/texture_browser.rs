@@ -16,17 +16,13 @@ use mallet_content::vtf::Image;
 use mallet_content::{parallel_map, MaterialInfo, MaterialLoader, Source, SourceKind};
 
 use super::MalletApp;
+use crate::config::TextureBrowserOptions;
 use crate::editor::Editor;
 
 const MUTED: Color32 = Color32::from_gray(140);
 const ACCENT: Color32 = Color32::from_rgb(70, 140, 230);
-/// Largest side of a thumbnail in pixels.
-const THUMBNAIL_SIDE: u32 = 256;
-/// Thumbnails kept before the oldest are dropped, so browsing never fills GPU memory.
-const MAX_THUMBNAILS: usize = 2500;
 /// Requests waiting to load; older ones are dropped, as they have scrolled out of view.
 const MAX_REQUESTS: usize = 256;
-const THUMBNAIL_WORKERS: usize = 4;
 /// Materials described per batch while indexing.
 const INDEX_BATCH: usize = 1500;
 const SIDEBAR_WIDTH: f32 = 210.0;
@@ -62,9 +58,12 @@ enum Thumbnail {
     Missing,
 }
 
-/// The background thumbnail loaders for one game.
+/// The background thumbnail loaders for one game, started with these thread and size
+/// settings.
 struct Loaders {
     game: PathBuf,
+    threads: usize,
+    side: u32,
     requests: Arc<Mutex<Vec<String>>>,
     results: Receiver<(String, Option<Image>)>,
     stop: Arc<AtomicBool>,
@@ -180,7 +179,8 @@ impl MalletApp {
         };
         let game = editor.game_dir().map(PathBuf::from).unwrap_or_default();
         let state = &mut self.texture_browser;
-        state.start(&game, &loader);
+        let options = editor.config.texture_browser.clone();
+        state.start(&game, &loader, &options);
         state.receive(ctx);
         let used = state.used_materials(editor);
         let scroll_step = editor.config.view.texture_scroll.clamp(0.25, 2.0) as f32;
@@ -225,7 +225,7 @@ impl MalletApp {
                     state.grid(ui, &used, &current, size, scroll_step, &mut commands);
                 });
             });
-        state.trim();
+        state.trim(options.cache_size());
         for command in commands {
             match command {
                 Command::Choose(material, confirm) => {
@@ -262,8 +262,8 @@ impl MalletApp {
 
 impl TextureBrowserState {
     /// Lists the game's materials, starts describing them for the filters, and starts the
-    /// thumbnail loaders, once per game.
-    fn start(&mut self, game: &PathBuf, loader: &MaterialLoader) {
+    /// thumbnail loaders, once per game and again when their settings change.
+    fn start(&mut self, game: &PathBuf, loader: &MaterialLoader, options: &TextureBrowserOptions) {
         self.index_loader = Some(loader.clone());
         let listed = self.listing.as_ref().is_some_and(|listing| &listing.game == game);
         let listing = self.list_receiver.as_ref().is_some_and(|(listing, _)| listing == game);
@@ -295,11 +295,13 @@ impl TextureBrowserState {
             self.hidden_sources.clear();
             self.folder = None;
         }
-        if self.loaders.as_ref().is_none_or(|loaders| &loaders.game != game) {
+        let (threads, side) = (options.thread_count(), options.thumbnail_side());
+        let stale = |loaders: &Loaders| &loaders.game != game || loaders.threads != threads || loaders.side != side;
+        if self.loaders.as_ref().is_none_or(stale) {
             let requests: Arc<Mutex<Vec<String>>> = Arc::default();
             let stop = Arc::new(AtomicBool::new(false));
             let (sender, results) = mpsc::channel();
-            for _ in 0..THUMBNAIL_WORKERS {
+            for _ in 0..threads {
                 let (requests, stop, sender, loader) =
                     (Arc::clone(&requests), Arc::clone(&stop), sender.clone(), loader.clone());
                 thread::spawn(move || {
@@ -308,7 +310,7 @@ impl TextureBrowserState {
                         let next = requests.lock().ok().and_then(|mut queue| queue.pop());
                         match next {
                             Some(name) => {
-                                let image = loader.thumbnail(&name, THUMBNAIL_SIDE);
+                                let image = loader.thumbnail(&name, side);
                                 if sender.send((name, image)).is_err() {
                                     return;
                                 }
@@ -320,6 +322,8 @@ impl TextureBrowserState {
             }
             self.loaders = Some(Loaders {
                 game: game.clone(),
+                threads,
+                side,
                 requests,
                 results,
                 stop,
@@ -907,9 +911,10 @@ impl TextureBrowserState {
         self.thumbnails.insert(name.to_owned(), Thumbnail::Loading);
     }
 
-    /// Drops every thumbnail when there are too many, so they reload as needed.
-    fn trim(&mut self) {
-        if self.thumbnails.len() > MAX_THUMBNAILS {
+    /// Drops every thumbnail when there are more than `limit`, so they reload as needed and
+    /// browsing never fills GPU memory.
+    fn trim(&mut self, limit: usize) {
+        if self.thumbnails.len() > limit {
             self.thumbnails
                 .retain(|_, thumbnail| matches!(thumbnail, Thumbnail::Loading));
         }

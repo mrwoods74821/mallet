@@ -16,7 +16,7 @@ use crate::document::MapFormat;
 use crate::editor::Editor;
 use crate::scene::{next_generation, WireMesh};
 
-/// The folder beside a `.mallet` map that holds the VMF copy its compiles read.
+/// The default folder beside a `.mallet` map that holds the VMF copy its compiles read.
 pub const COMPILE_FOLDER: &str = "mallet_compile";
 
 /// The colour of the leak line, as in Hammer.
@@ -36,8 +36,8 @@ impl Editor {
 
     /// What a compile of the open map would be about, or why it cannot run. The
     /// compilers read VMF only, so a `.mallet` map is compiled from a VMF copy in a
-    /// `mallet_compile` folder beside it, which [`Editor::start_compile`] writes; the BSP
-    /// and logs land there too.
+    /// folder beside it (`mallet_compile` unless Mallet Options names another), which
+    /// [`Editor::start_compile`] writes; the BSP and logs land there too.
     pub fn compile_context(&self) -> Result<Context, String> {
         let document = self.document.as_ref().ok_or("no map is open")?;
         let path = document
@@ -48,7 +48,10 @@ impl Editor {
             MapFormat::Vmf => path,
             MapFormat::Mallet => {
                 let name = path.file_stem().unwrap_or_default();
-                let folder = path.parent().unwrap_or(Path::new("")).join(COMPILE_FOLDER);
+                let folder = path
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .join(self.config.compile.folder_name());
                 folder.join(name).with_extension("vmf")
             }
         };
@@ -109,6 +112,7 @@ impl Editor {
             steps,
             pointfile,
             self.config.compile.low_priority,
+            self.config.compile.line_limit(),
             notes,
         ));
         if self.config.compile.last_preset != preset.name {
