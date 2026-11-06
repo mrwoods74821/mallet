@@ -155,6 +155,11 @@ impl Materials {
 }
 
 impl MaterialLoader {
+    /// Loads a studio model such as `models/props_c17/oildrum001.mdl`.
+    pub fn model(&self, path: &str) -> Result<crate::model::Model, String> {
+        crate::model::load_model(&self.filesystem, path)
+    }
+
     /// Loads a material such as `TOOLS/TOOLSNODRAW`: its texture and alpha mode.
     pub fn load(&self, material: &str) -> Material {
         let key = material_key(material);

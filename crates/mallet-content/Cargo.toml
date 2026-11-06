@@ -8,3 +8,4 @@ publish.workspace = true
 [dependencies]
 mallet-kv.workspace = true
 texpresso = "2"
+vmdl = "0.2"

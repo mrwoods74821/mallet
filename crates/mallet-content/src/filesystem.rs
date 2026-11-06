@@ -66,6 +66,15 @@ impl GameFs {
             .collect()
     }
 
+    /// Whether any mount has a game file, without reading it.
+    pub fn exists(&self, path: &str) -> bool {
+        let path = normalize(path);
+        self.mounts.iter().any(|mount| match mount {
+            Mount::Folder(folder) => folder.join(&path).is_file(),
+            Mount::Vpk(archive) => archive.contains(&path),
+        })
+    }
+
     /// Reads a game file such as `materials/tools/toolsnodraw.vmt` from the first mount
     /// that has it. Paths ignore case and may use either slash.
     pub fn read(&self, path: &str) -> Option<Vec<u8>> {
@@ -89,7 +98,9 @@ impl GameFs {
         let text = path.to_string_lossy().replace('\\', "/");
 
         if let Some(parent) = text.strip_suffix("/*") {
-            let Ok(children) = fs::read_dir(parent) else { return };
+            let Ok(children) = fs::read_dir(parent) else {
+                return;
+            };
             let mut folders: Vec<PathBuf> = children
                 .filter_map(Result::ok)
                 .map(|child| child.path())
