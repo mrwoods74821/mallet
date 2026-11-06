@@ -29,6 +29,18 @@ MCP tools all go through this one path, so an edit made by an agent can be undon
 Ctrl+Z and the other way round. New editing features add `Edit` variants rather than
 mutating the map directly.
 
+Edits that add brushes or entities carry them with ids already assigned by
+`IdAllocator`, which starts above every id in the map, including ids inside blocks kept
+verbatim. Moving a brush shifts its texture offsets so textures stay locked to it, and
+moves a displacement's start position with it.
+
+## Selection
+
+World brushes are selected one by one; clicking any part of an entity selects the whole
+entity, like Hammer's default "groups" mode. The selection lives in `Editor` as a set of
+`Owner`s, so the window and MCP tools share it. 2D clicks pick the smallest brush whose
+outline contains the point; 3D clicks cast a ray against each brush's planes.
+
 ## Shared editor state
 
 `Editor` (in `crates/mallet/src/editor.rs`) owns the open document, the wireframe scene,
@@ -70,6 +82,9 @@ Tools:
 | `open_map`, `save_map` | Load a VMF; save in place or to a new path |
 | `list_entities`, `get_entity` | Browse entities, filtered by classname (`trigger_*` prefix match) |
 | `set_entity_key`, `remove_entity_key` | Undoable key edits |
+| `get_selection`, `select`, `clear_selection` | Read or change the selection the window shows |
+| `move_selection`, `clone_selection`, `delete_selection` | Undoable selection edits; moves keep textures locked |
+| `create_block` | Box brush between two corners, like the Block tool |
 | `undo`, `redo` | Step the shared history |
 | `set_grid`, `center_views` | Grid size and framing |
 | `set_camera`, `set_view_2d` | Aim the 3D camera, pan and zoom the 2D views |
@@ -83,8 +98,8 @@ make any map change through `Editor::apply_edit` so it stays undoable.
 
 ## Roadmap
 
-1. Selection, the block tool, clone, and texture application, all as `Edit`s with
-   matching MCP tools.
+1. Selection handles for resizing and rotating, texture application, and entity creation,
+   all as `Edit`s with matching MCP tools.
 2. Game configuration, VPK mounting, VMT/VTF materials and MDL models in the 3D view (wgpu).
 3. Clip, vertex and displacement tools.
 4. Lighting: a real-time preview first, then a bake through VRAD with lightmaps read back.

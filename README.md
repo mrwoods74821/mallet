@@ -2,8 +2,9 @@
 
 A Hammer-style level editor for Source engine VMF maps, written in Rust.
 
-Early work in progress. It already opens and saves VMF files without losing anything, and
-shows them in Hammer's four-viewport layout with wireframe brushes. A built-in MCP server
+Early work in progress. It already opens and saves VMF files without losing anything,
+shows them in Hammer's four-viewport layout with wireframe brushes, and has Hammer's
+Selection and Block tools for selecting, moving, cloning, deleting and creating brushes. A built-in MCP server
 lets AI agents inspect the map, edit entities and take viewport screenshots.
 
 ## Running
@@ -22,6 +23,12 @@ These follow Hammer's defaults.
 | --- | --- |
 | Ctrl+O / Ctrl+S | Open / save |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
+| Shift+S / Shift+B | Selection tool / Block tool |
+| Click | Select a world brush or a whole entity (Ctrl+click toggles) |
+| Drag on empty space | Select everything fully inside the rectangle (Ctrl adds) |
+| Drag the selection | Move it on the grid, with texture lock; hold Shift on release to clone |
+| Drag with the Block tool, then Enter | Create a box brush; its depth matches the last block |
+| Delete / Escape / Ctrl+A | Delete selection / deselect or cancel the block / select all |
 | `[` / `]` | Smaller / larger grid |
 | Ctrl+E / Ctrl+Shift+E | Centre 2D views / 3D view on the map |
 | Mouse wheel | Zoom a 2D view around the cursor, or move the camera forward |
