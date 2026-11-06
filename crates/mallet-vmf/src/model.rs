@@ -271,6 +271,87 @@ impl Entity {
     pub fn editor_color(&self) -> Option<[u8; 3]> {
         parse_color(self.editor()?.get("color")?)
     }
+
+    /// Iterates mutably over the entity's brushes.
+    pub fn solids_mut(&mut self) -> impl Iterator<Item = &mut Solid> {
+        self.items.iter_mut().filter_map(|item| match item {
+            EntityItem::Solid(solid) => Some(solid),
+            _ => None,
+        })
+    }
+
+    /// Moves the entity's brushes and origin, keeping textures in place on the brushes.
+    pub fn translate(&mut self, offset: DVec3) {
+        for solid in self.solids_mut() {
+            solid.translate(offset);
+        }
+        if let Some(origin) = self.origin() {
+            self.set("origin", format_vec3(origin + offset));
+        }
+    }
+
+    /// Gives the entity, its brushes and their faces fresh ids, as needed for a copy.
+    pub fn renumber(&mut self, ids: &mut IdAllocator) {
+        self.set("id", ids.object().to_string());
+        for solid in self.solids_mut() {
+            solid.renumber(ids);
+        }
+    }
+}
+
+/// Hands out ids that are unused in a map: one sequence for entities and solids, and one
+/// for faces, matching how Hammer numbers them.
+#[derive(Debug, Clone)]
+pub struct IdAllocator {
+    next_object: u32,
+    next_side: u32,
+}
+
+impl IdAllocator {
+    /// Starts after the highest ids used anywhere in the map, including inside hidden
+    /// and grouped blocks that Mallet keeps verbatim.
+    pub fn for_map(vmf: &Vmf) -> Self {
+        let mut allocator = Self {
+            next_object: 1,
+            next_side: 1,
+        };
+        allocator.scan(&vmf.to_items(), "");
+        allocator
+    }
+
+    fn scan(&mut self, items: &[Item], parent: &str) {
+        for item in items {
+            match item {
+                Item::Pair(pair) if pair.key.eq_ignore_ascii_case("id") => {
+                    let Ok(id) = pair.value.trim().parse::<u32>() else {
+                        continue;
+                    };
+                    let next = if parent.eq_ignore_ascii_case("side") {
+                        &mut self.next_side
+                    } else {
+                        &mut self.next_object
+                    };
+                    *next = (*next).max(id.saturating_add(1));
+                }
+                Item::Pair(_) => {}
+                Item::Block(block) => self.scan(&block.items, &block.name),
+            }
+        }
+    }
+
+    /// Returns an unused entity or solid id.
+    pub fn object(&mut self) -> u32 {
+        let id = self.next_object;
+        self.next_object += 1;
+        id
+    }
+
+    /// Returns an unused face id.
+    pub fn side(&mut self) -> u32 {
+        let id = self.next_side;
+        self.next_side += 1;
+        id
+    }
 }
 
 /// A brush: a convex solid bounded by the planes of its sides.
@@ -330,6 +411,41 @@ impl Solid {
             SolidItem::Key(pair) if pair.key.eq_ignore_ascii_case("id") => pair.value.trim().parse().ok(),
             _ => None,
         })
+    }
+
+    /// Sets the solid's `id`, adding the key first if it is missing.
+    pub fn set_id(&mut self, id: u32) {
+        let existing = self.items.iter_mut().find_map(|item| match item {
+            SolidItem::Key(pair) if pair.key.eq_ignore_ascii_case("id") => Some(pair),
+            _ => None,
+        });
+        match existing {
+            Some(pair) => pair.value = id.to_string(),
+            None => self.items.insert(0, SolidItem::Key(Pair::new("id", id.to_string()))),
+        }
+    }
+
+    /// Iterates mutably over the solid's faces.
+    pub fn sides_mut(&mut self) -> impl Iterator<Item = &mut Side> {
+        self.items.iter_mut().filter_map(|item| match item {
+            SolidItem::Side(side) => Some(side),
+            _ => None,
+        })
+    }
+
+    /// Moves the brush, shifting texture offsets so textures stay put on its faces.
+    pub fn translate(&mut self, offset: DVec3) {
+        for side in self.sides_mut() {
+            side.translate(offset);
+        }
+    }
+
+    /// Gives the solid and its faces fresh ids, as needed for a copy.
+    pub fn renumber(&mut self, ids: &mut IdAllocator) {
+        self.set_id(ids.object());
+        for side in self.sides_mut() {
+            side.id = ids.side();
+        }
     }
 
     /// Iterates over the solid's faces.
@@ -499,6 +615,42 @@ impl Side {
             _ => None,
         })
     }
+
+    /// Moves the face with texture lock: each axis offset changes by the distance moved
+    /// along that axis in texels, so the texture stays fixed to the face. A displacement's
+    /// start position moves with it.
+    pub fn translate(&mut self, offset: DVec3) {
+        for point in &mut self.plane {
+            *point += offset;
+        }
+        for axis in [&mut self.uaxis, &mut self.vaxis] {
+            if axis.scale != 0.0 {
+                axis.offset -= offset.dot(axis.axis) / axis.scale;
+            }
+        }
+        let dispinfo = self.extra.iter_mut().find_map(|item| match item {
+            Item::Block(block) if block.name.eq_ignore_ascii_case("dispinfo") => Some(block),
+            _ => None,
+        });
+        let Some(dispinfo) = dispinfo else {
+            return;
+        };
+        for item in &mut dispinfo.items {
+            if let Item::Pair(pair) = item {
+                if pair.key.eq_ignore_ascii_case("startposition") {
+                    if let Some(start) = parse_vec3(&pair.value) {
+                        let moved = start + offset;
+                        pair.value = format!("[{} {} {}]", moved.x, moved.y, moved.z);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Formats a point as `x y z`, the way entity origins are written.
+pub fn format_vec3(point: DVec3) -> String {
+    format!("{} {} {}", point.x, point.y, point.z)
 }
 
 fn bad_value(context: &str, pair: &Pair) -> VmfError {
