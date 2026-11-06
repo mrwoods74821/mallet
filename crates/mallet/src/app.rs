@@ -1790,7 +1790,10 @@ fn run(action: Action, editor: &mut Editor) {
         }
         Action::ToggleTextureScaleLock => {
             editor.config.transform.texture_scale_lock = !editor.config.transform.texture_scale_lock;
-            editor.message = format!("Texture scale lock {}", on_off(editor.config.transform.texture_scale_lock));
+            editor.message = format!(
+                "Texture scale lock {}",
+                on_off(editor.config.transform.texture_scale_lock)
+            );
             editor.save_config();
         }
         Action::ToggleGizmo => {

@@ -752,7 +752,7 @@ fn editing_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
     heading(
         ui,
         "Editing",
-        "What Mallet starts with each time it opens. The texture and entity can be changed while you work.",
+        "What Mallet starts with each time it opens, and how selections move, turn and scale.",
     );
     let defaults = config::EditingOptions::default();
     let editing = &mut editor.config.editing;
@@ -791,6 +791,59 @@ fn editing_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
             *dirty |= ui
                 .add(egui::DragValue::new(&mut editing.recent_textures).range(1..=100))
                 .changed();
+            ui.end_row();
+        });
+    ui.add_space(12.0);
+    ui.label(RichText::new("Moving, rotating and scaling").strong());
+    let transform = &mut editor.config.transform;
+    egui::Grid::new("transform_options")
+        .num_columns(2)
+        .spacing([16.0, 8.0])
+        .show(ui, |ui| {
+            ui.label("Texture lock");
+            *dirty |= ui
+                .checkbox(
+                    &mut transform.texture_lock,
+                    "Textures move and turn with brushes (Shift+L)",
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Texture scale lock");
+            *dirty |= ui
+                .checkbox(
+                    &mut transform.texture_scale_lock,
+                    "Textures stretch when brushes are scaled",
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Rotation snap")
+                .on_hover_text("Rotations snap to this step while Shift is held; 0 turns snapping off.");
+            *dirty |= ui
+                .add(
+                    egui::DragValue::new(&mut transform.rotation_snap)
+                        .range(0.0..=90.0)
+                        .speed(0.5)
+                        .suffix("\u{b0}"),
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Arrow keys");
+            *dirty |= ui
+                .checkbox(
+                    &mut transform.arrow_nudge,
+                    "Nudge the selection in the 2D view under the mouse (Ctrl: one unit)",
+                )
+                .changed();
+            ui.end_row();
+            ui.label("3D gizmo");
+            ui.horizontal(|ui| {
+                *dirty |= ui.checkbox(&mut transform.gizmo, "Show").changed();
+                for mode in crate::transform::GizmoMode::ALL {
+                    *dirty |= ui
+                        .selectable_value(&mut transform.gizmo_mode, mode, mode.label())
+                        .changed();
+                }
+            });
             ui.end_row();
         });
     match use_now {

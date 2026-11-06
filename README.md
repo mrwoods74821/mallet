@@ -122,9 +122,9 @@ clone. View > 3D Transform Gizmo or the toolbar button hides it.
 Tools > Align Objects lines selected objects up with an edge of the selection in the 2D
 view used last. The toolbar's padlock is Hammer's texture lock: textures move and turn
 with their brushes. Texture scale lock, beside it, also stretches them when brushes are
-scaled; without it they keep their scale and stay pinned to the brush's corner. Both
-locks, the rotation snap step, arrow-key nudging and the gizmo's mode are saved in
-`config.json` under `transform`.
+scaled; without it they keep their scale and stay pinned to the brush's corner. Mallet
+Options > Editing holds both locks, the rotation snap step, arrow-key nudging and the
+gizmo.
 
 ## Texturing
 
@@ -184,8 +184,9 @@ as you change it:
   grid of new maps, how dense the grid may get and how often grid lines are highlighted.
 - **Colours**: the background, grid, axis, selection, tool, handle and texture-face
   colours of the views, Hammer's by default.
-- **Editing**: the texture new brushes get, the Entity tool's class and how many recent
-  textures are listed.
+- **Editing**: the texture new brushes get, the Entity tool's class, how many recent
+  textures are listed, texture lock and texture scale lock, the rotation snap step,
+  arrow-key nudging and the 3D gizmo.
 - **Files**: the format new maps are saved in, how many recent maps are kept, and the
   Windows file types.
 - **Texture browser**: scrolling, thumbnail size, loading threads and how many
