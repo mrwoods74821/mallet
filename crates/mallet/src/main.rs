@@ -1,6 +1,7 @@
 //! Mallet: a Hammer-style level editor for Source engine VMF maps.
 //!
-//! Pass a `.vmf` path as the first argument to open it on start, or drop one onto the window.
+//! Pass a `.vmf` or `.mallet` path as the first argument to open it on start, or drop one onto
+//! the window.
 //! AI agents can drive the editor through its MCP server; see `mcp`.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]

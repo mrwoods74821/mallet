@@ -397,23 +397,42 @@ impl Scene {
             .or_else(|| smallest(&mut self.meshes.iter().filter(on_outline)))
     }
 
-    /// Picks the nearest mesh hit by a ray.
-    pub fn pick_ray(&self, origin: DVec3, direction: DVec3) -> Option<Owner> {
-        self.meshes
-            .iter()
-            .filter_map(|mesh| Some((mesh.owner?, ray_convex(origin, direction, &mesh.planes)?)))
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(owner, _)| owner)
+    /// Picks the nearest mesh hit by a ray, the way Hammer does: a prop counts where the
+    /// ray meets its model's triangles, so clicking through a gap in a fence picks what is
+    /// behind it. Only when the ray hits nothing at all is a prop picked by its bounding
+    /// box, so thin or hollow models can still be clicked.
+    pub fn pick_ray(&self, origin: DVec3, direction: DVec3, models: &ModelCache) -> Option<Owner> {
+        let nearest = |hits: &mut dyn Iterator<Item = (Owner, f64)>| {
+            hits.min_by(|a, b| a.1.total_cmp(&b.1)).map(|(owner, _)| owner)
+        };
+        nearest(
+            &mut self
+                .meshes
+                .iter()
+                .filter_map(|mesh| Some((mesh.owner?, mesh_hit(mesh, origin, direction, models)?))),
+        )
+        .or_else(|| {
+            nearest(
+                &mut self
+                    .meshes
+                    .iter()
+                    .filter(|mesh| mesh.model.is_some())
+                    .filter_map(|mesh| Some((mesh.owner?, ray_box(origin, direction, &mesh.bounds)?))),
+            )
+        })
     }
 
     /// The brush face a ray hits first, for the texture tool. Point entities and props
-    /// block the ray but are not faces.
-    pub fn pick_face(&self, origin: DVec3, direction: DVec3) -> Option<FaceHit> {
+    /// block the ray but are not faces; a prop blocks it only where its model is.
+    pub fn pick_face(&self, origin: DVec3, direction: DVec3, models: &ModelCache) -> Option<FaceHit> {
         let (mesh, distance, plane) = self
             .meshes
             .iter()
             .filter(|mesh| mesh.owner.is_some())
             .filter_map(|mesh| {
+                if mesh.model.is_some() {
+                    return Some((mesh, mesh_hit(mesh, origin, direction, models)?, None));
+                }
                 let (distance, plane) = ray_convex_face(origin, direction, &mesh.planes)?;
                 Some((mesh, distance, plane))
             })
@@ -512,6 +531,91 @@ fn segment_distance(point: DVec2, a: DVec2, b: DVec2) -> f64 {
         0.0
     };
     point.distance(a + along * t)
+}
+
+/// Distance along a ray to where it meets a mesh: the triangles of a prop's model, or
+/// the planes of a brush or entity box. A prop whose model is not loaded counts as its box.
+fn mesh_hit(mesh: &WireMesh, origin: DVec3, direction: DVec3, models: &ModelCache) -> Option<f64> {
+    let loaded = mesh
+        .model
+        .as_ref()
+        .and_then(|instance| Some((instance, models.get(&instance.key)?.as_deref()?)));
+    match loaded {
+        Some((instance, model)) => ray_model(origin, direction, &mesh.bounds, instance, model),
+        None => ray_convex(origin, direction, &mesh.planes),
+    }
+}
+
+/// Distance along a ray to the nearest triangle of a placed model, from either side.
+fn ray_model(origin: DVec3, direction: DVec3, bounds: &Bounds, instance: &ModelInstance, model: &Model) -> Option<f64> {
+    ray_box(origin, direction, bounds)?;
+    if instance.transform.determinant().abs() < 1e-12 {
+        return None;
+    }
+    // An affine transform keeps distances along the ray in proportion, so the distance
+    // found in model space is the distance in the world.
+    let inverse = instance.transform.inverse();
+    let local_origin = inverse.transform_point3(origin);
+    let local_direction = inverse.transform_vector3(direction);
+    let corner = |index: u32| {
+        model
+            .vertices
+            .get(index as usize)
+            .map(|vertex| DVec3::from_array(vertex.position.map(f64::from)))
+    };
+    model
+        .meshes
+        .iter()
+        .flat_map(|mesh| mesh.indices.as_chunks::<3>().0)
+        .filter_map(|&[a, b, c]| {
+            let [a, b, c] = [corner(a)?, corner(b)?, corner(c)?];
+            ray_triangle(local_origin, local_direction, a, b, c)
+        })
+        .min_by(f64::total_cmp)
+}
+
+/// Möller-Trumbore: distance along a ray to a triangle, hit from either side.
+fn ray_triangle(origin: DVec3, direction: DVec3, a: DVec3, b: DVec3, c: DVec3) -> Option<f64> {
+    let edge1 = b - a;
+    let edge2 = c - a;
+    let p = direction.cross(edge2);
+    let determinant = edge1.dot(p);
+    if determinant.abs() < 1e-12 {
+        return None;
+    }
+    let inverse = 1.0 / determinant;
+    let s = origin - a;
+    let u = s.dot(p) * inverse;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = s.cross(edge1);
+    let v = direction.dot(q) * inverse;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let t = edge2.dot(q) * inverse;
+    (t > 0.0).then_some(t)
+}
+
+/// Distance along a ray to an axis-aligned box, or 0 when it starts inside.
+fn ray_box(origin: DVec3, direction: DVec3, bounds: &Bounds) -> Option<f64> {
+    let mut near = f64::NEG_INFINITY;
+    let mut far = f64::INFINITY;
+    for axis in 0..3 {
+        let (start, step) = (origin[axis], direction[axis]);
+        let (low, high) = (bounds.min[axis], bounds.max[axis]);
+        if step.abs() < 1e-12 {
+            if start < low || start > high {
+                return None;
+            }
+            continue;
+        }
+        let (t1, t2) = ((low - start) / step, (high - start) / step);
+        near = near.max(t1.min(t2));
+        far = far.min(t1.max(t2));
+    }
+    (near <= far && far >= 0.0).then_some(near.max(0.0))
 }
 
 /// Distance along the ray to where it enters a convex volume, or `None` on a miss.
@@ -709,4 +813,91 @@ fn box_planes(bounds: &Bounds) -> Vec<Plane> {
             ]
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use mallet_content::{ModelMesh, ModelVertex};
+
+    use super::*;
+
+    fn box_mesh(owner: Owner, min: DVec3, max: DVec3) -> WireMesh {
+        let bounds = Bounds { min, max };
+        WireMesh {
+            color: DEFAULT_COLOR,
+            edges: box_edges(&bounds),
+            faces: Vec::new(),
+            planes: box_planes(&bounds),
+            bounds,
+            owner: Some(owner),
+            selected: false,
+            model: None,
+        }
+    }
+
+    /// A prop whose model is one upright triangle in the plane x = 0, filling only the
+    /// lower corner of its 64-unit bounding box.
+    fn fence() -> (WireMesh, ModelCache) {
+        let vertex = |position: [f32; 3]| ModelVertex {
+            position,
+            normal: [1.0, 0.0, 0.0],
+            uv: [0.0, 0.0],
+        };
+        let model = Model {
+            vertices: vec![
+                vertex([0.0, -32.0, 0.0]),
+                vertex([0.0, 0.0, 0.0]),
+                vertex([0.0, -32.0, 32.0]),
+            ],
+            meshes: vec![ModelMesh {
+                material: "fence".to_owned(),
+                indices: vec![0, 1, 2],
+            }],
+            min: [-32.0, -32.0, 0.0],
+            max: [32.0, 32.0, 64.0],
+        };
+        let transform = DMat4::from_translation(DVec3::new(100.0, 0.0, 0.0));
+        let mut prop = box_mesh(
+            Owner::Entity(7),
+            DVec3::new(68.0, -32.0, 0.0),
+            DVec3::new(132.0, 32.0, 64.0),
+        );
+        prop.model = Some(ModelInstance {
+            key: "fence.mdl".to_owned(),
+            transform,
+        });
+        let models = ModelCache::from([("fence.mdl".to_owned(), Some(Arc::new(model)))]);
+        (prop, models)
+    }
+
+    #[test]
+    fn props_are_picked_by_their_triangles_before_their_box() {
+        let (prop, models) = fence();
+        let wall = box_mesh(
+            Owner::Solid(1),
+            DVec3::new(200.0, -64.0, 0.0),
+            DVec3::new(216.0, 64.0, 64.0),
+        );
+        let scene = Scene {
+            meshes: vec![prop.clone(), wall],
+            ..Scene::default()
+        };
+        let along_x = DVec3::X;
+        // Through the model's triangle: the prop, even though the wall is behind it.
+        let on_model = scene.pick_ray(DVec3::new(0.0, -20.0, 8.0), along_x, &models);
+        assert_eq!(on_model, Some(Owner::Entity(7)));
+        // Through the empty part of its box: the wall behind it.
+        let through_gap = scene.pick_ray(DVec3::new(0.0, 20.0, 40.0), along_x, &models);
+        assert_eq!(through_gap, Some(Owner::Solid(1)));
+        // Nothing behind it: the box still picks the prop.
+        let alone = Scene {
+            meshes: vec![prop],
+            ..Scene::default()
+        };
+        assert_eq!(
+            alone.pick_ray(DVec3::new(0.0, 20.0, 40.0), along_x, &models),
+            Some(Owner::Entity(7))
+        );
+        assert_eq!(alone.pick_ray(DVec3::new(0.0, 200.0, 40.0), along_x, &models), None);
+    }
 }

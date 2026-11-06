@@ -53,9 +53,9 @@ pub fn definitions() -> Value {
         ),
         tool(
             "open_map",
-            "Open a .vmf file in a new tab and switch to it. An untouched empty map in the current tab is \
-             replaced instead.",
-            json!({ "path": { "type": "string", "description": "Absolute path to the .vmf file." } }),
+            "Open a map, a .vmf or a .mallet file, in a new tab and switch to it. An untouched empty map in \
+             the current tab is replaced instead.",
+            json!({ "path": { "type": "string", "description": "Absolute path to the .vmf or .mallet file." } }),
             &["path"],
         ),
         tool(
@@ -82,9 +82,17 @@ pub fn definitions() -> Value {
         tool(
             "save_map",
             "Save the open map. Overwrites its file unless a new path is given, which then becomes the map's \
-             path. A new map needs a path.",
+             path. A new map needs a path. The extension picks the format: .mallet is Mallet's own binary \
+             format (much faster to open and save, about a tenth of the size), anything else is VMF text.",
             json!({ "path": { "type": "string", "description": "Optional absolute path to save to instead." } }),
             &[],
+        ),
+        tool(
+            "export_map",
+            "Write a copy of the open map to another file without making it the map's file, such as a VMF \
+             of a .mallet map for another tool. The extension picks the format, as for save_map.",
+            json!({ "path": { "type": "string", "description": "Absolute path of the copy, ending .vmf or .mallet." } }),
+            &["path"],
         ),
         tool(
             "list_entities",
@@ -422,8 +430,9 @@ pub fn definitions() -> Value {
              wait until it has been handled. Use it to test tools and shortcuts. The window must not be \
              minimized. Each action is one of: {\"key\": \"Enter\"} using egui key names such as A, Enter, \
              Escape, Delete, OpenBracket; {\"click\": [x, y]}; {\"drag\": [[x1, y1], [x2, y2]]}. Clicks and \
-             drags need \"viewport\" (camera, top, front or side); in 2D views coordinates are world units on \
-             the view's axes, in the camera view they are pixels from its top-left corner. Any action may add \
+             drags need \"viewport\" (camera, top, front, side or window); in 2D views coordinates are world \
+             units on the view's axes, in the camera view they are pixels from its top-left corner, and for \
+             window they are pixels of a window screenshot, to reach menus, panels and dialogs. Any action may add \
              \"modifiers\" (ctrl, shift, alt) and clicks and drags may add \"button\" (primary, secondary, middle).",
             json!({
                 "actions": {
@@ -436,7 +445,7 @@ pub fn definitions() -> Value {
                             "modifier_frames": { "type": "integer", "minimum": 1, "description": "Frames the modifiers stay held, to let go of them before the key; default until the key is released." },
                             "click": vec2,
                             "drag": { "type": "array", "items": vec2, "minItems": 2, "maxItems": 2 },
-                            "viewport": { "type": "string", "enum": ["camera", "top", "front", "side"] },
+                            "viewport": { "type": "string", "enum": ["camera", "top", "front", "side", "window"] },
                             "modifiers": { "type": "array", "items": { "type": "string", "enum": ["ctrl", "shift", "alt"] } },
                             "button": { "type": "string", "enum": ["primary", "secondary", "middle"] }
                         }
@@ -582,6 +591,11 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
             let path = optional_string(args, "path")?.map(PathBuf::from);
             let saved = editor.save(path)?;
             Ok(ToolResult::text(format!("Saved {}", saved.display())))
+        }
+        "export_map" => {
+            let path = PathBuf::from(string_arg(args, "path")?);
+            editor.export_copy(&path)?;
+            Ok(ToolResult::text(format!("Exported a copy to {}", path.display())))
         }
         "list_entities" => Ok(ToolResult::json(&list_entities(editor, args)?)),
         "get_entity" => {
@@ -859,7 +873,7 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
             let rect = editor.viewport_rects[slot];
             let at = editor.viewport_point(ShotTarget::Camera, DVec2::new(x, y))?;
             let (origin, direction) = editor.camera.ray(rect, at);
-            let Some(hit) = editor.scene.pick_face(origin, direction) else {
+            let Some(hit) = editor.scene.pick_face(origin, direction, &editor.models) else {
                 return Ok(ToolResult::json(&json!({ "hit": null })));
             };
             let face = editor.faces(&[hit.side].into_iter().collect()).pop();
@@ -1245,15 +1259,21 @@ fn input_action(editor: &Editor, action: &Value) -> Result<Vec<InputFrame>, Stri
         return input::key_press(key, modifiers, frames, modifier_frames);
     }
     let button = input::parse_button(optional_string(action, "button")?.unwrap_or("primary"))?;
+    // `None` for the whole window, in screenshot pixels.
     let viewport = match string_arg(action, "viewport")? {
-        "camera" => ShotTarget::Camera,
-        "top" => ShotTarget::Top,
-        "front" => ShotTarget::Front,
-        "side" => ShotTarget::Side,
+        "camera" => Some(ShotTarget::Camera),
+        "top" => Some(ShotTarget::Top),
+        "front" => Some(ShotTarget::Front),
+        "side" => Some(ShotTarget::Side),
+        "window" => None,
         other => return Err(format!("unknown viewport \"{other}\"")),
     };
+    let to_screen = |at: DVec2| match viewport {
+        Some(viewport) => editor.viewport_point(viewport, at),
+        None => Ok(editor.window_point(at)),
+    };
     if let Some(at) = optional_numbers::<2>(action, "click")? {
-        let at = editor.viewport_point(viewport, DVec2::from_array(at))?;
+        let at = to_screen(DVec2::from_array(at))?;
         return Ok(input::click(at, button, modifiers));
     }
     let path = match action.get("drag").and_then(Value::as_array) {
@@ -1266,7 +1286,7 @@ fn input_action(editor: &Editor, action: &Value) -> Result<Vec<InputFrame>, Stri
             _ => None,
         };
         let (x, y) = pair.ok_or("drag points must be [x, y]")?;
-        editor.viewport_point(viewport, DVec2::new(x, y))
+        to_screen(DVec2::new(x, y))
     };
     Ok(input::drag(point(&path[0])?, point(&path[1])?, button, modifiers))
 }

@@ -2,7 +2,7 @@
 //! cancelling the job, and reacting when it ends (log file, leak line).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use eframe::egui::Color32;
@@ -12,8 +12,12 @@ use mallet_vmf::geometry::Bounds;
 use super::runner::read_pointfile;
 use super::{plan, save_presets, CompileJob, Context, Outcome, Preset, StepKind};
 use crate::config::{self, ToolKind};
+use crate::document::MapFormat;
 use crate::editor::Editor;
 use crate::scene::{next_generation, WireMesh};
+
+/// The folder beside a `.mallet` map that holds the VMF copy its compiles read.
+pub const COMPILE_FOLDER: &str = "mallet_compile";
 
 /// The colour of the leak line, as in Hammer.
 const POINTFILE_COLOR: Color32 = Color32::from_rgb(255, 40, 40);
@@ -30,13 +34,24 @@ impl Editor {
             .or_else(|| tool.candidates(self.game_dir()).into_iter().next())
     }
 
-    /// What a compile of the open map would be about, or why it cannot run.
+    /// What a compile of the open map would be about, or why it cannot run. The
+    /// compilers read VMF only, so a `.mallet` map is compiled from a VMF copy in a
+    /// `mallet_compile` folder beside it, which [`Editor::start_compile`] writes; the BSP
+    /// and logs land there too.
     pub fn compile_context(&self) -> Result<Context, String> {
         let document = self.document.as_ref().ok_or("no map is open")?;
-        let vmf = document
+        let path = document
             .path
             .clone()
-            .ok_or("save the map first, so the compilers have a VMF to read")?;
+            .ok_or("save the map first, so the compilers have a map to read")?;
+        let vmf = match document.format() {
+            MapFormat::Vmf => path,
+            MapFormat::Mallet => {
+                let name = path.file_stem().unwrap_or_default();
+                let folder = path.parent().unwrap_or(Path::new("")).join(COMPILE_FOLDER);
+                folder.join(name).with_extension("vmf")
+            }
+        };
         let game_dir = self
             .game_dir()
             .map(|dir| dir.components().collect::<PathBuf>())
@@ -76,6 +91,7 @@ impl Editor {
         }
         let context = self.compile_context()?;
         let steps = plan(&preset, &context, &|tool| self.tool_path(tool))?;
+        self.write_compile_copy(&context)?;
         let pointfile = context.vmf.with_extension("lin");
         let notes = if preset
             .steps
@@ -101,6 +117,23 @@ impl Editor {
         }
         self.message = format!("Compiling {} with {}", context.map_name(), preset.name);
         Ok(())
+    }
+
+    /// Writes the VMF the compilers read, when the map itself is a `.mallet` file. The copy
+    /// is of the map as it is now, saved or not.
+    fn write_compile_copy(&self, context: &Context) -> Result<(), String> {
+        let Some(document) = &self.document else {
+            return Ok(());
+        };
+        if document.format() != MapFormat::Mallet {
+            return Ok(());
+        }
+        if let Some(folder) = context.vmf.parent() {
+            fs::create_dir_all(folder).map_err(|error| format!("could not create {}: {error}", folder.display()))?;
+        }
+        document
+            .export(&context.vmf)
+            .map_err(|error| format!("could not write {} for the compilers: {error}", context.vmf.display()))
     }
 
     /// Problems VBSP's leak check will have, found before compiling: it needs a point

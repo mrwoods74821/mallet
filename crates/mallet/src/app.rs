@@ -23,6 +23,7 @@ use eframe::egui_wgpu;
 use crate::branding;
 use crate::canvas::{Canvas, PainterCanvas};
 use crate::config::{self, Config};
+use crate::document::MapFormat;
 use crate::editor::{self, Editor, SelectMode, Tool, ViewMode, WindowShot, VIEWPORT_GAP};
 use crate::keymap::{Action, KeyMap};
 use crate::netgraph::{NetGraph, NetGraphExtra};
@@ -272,6 +273,7 @@ impl MalletApp {
     fn menu_bar(&mut self, ctx: &egui::Context, editor: &mut Editor) {
         let mut chosen = None;
         let mut save_as = false;
+        let mut export = false;
         let mut choose_game = false;
         let mut choose_fgds = false;
         let mut recent = RecentChoice::None;
@@ -290,6 +292,16 @@ impl MalletApp {
                     menu_item(ui, &self.keymap, "Close Tab", Action::CloseTab, &mut chosen);
                     if ui.button("Save As...").clicked() {
                         save_as = true;
+                        ui.close_menu();
+                    }
+                    let open = editor.document.is_some();
+                    let export_button = ui
+                        .add_enabled(open, egui::Button::new("Export a Copy..."))
+                        .on_hover_text(
+                            "Write the map to another file, as a VMF or a .mallet map, and keep working on this one.",
+                        );
+                    if export_button.clicked() {
+                        export = true;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -366,6 +378,9 @@ impl MalletApp {
         }
         if save_as {
             save_as_dialog(editor);
+        }
+        if export {
+            export_dialog(editor);
         }
         if choose_game {
             choose_game_dir(editor);
@@ -574,7 +589,7 @@ impl MalletApp {
             let (origin, direction) = editor.camera.ray(rect, aim);
             match editor.tool {
                 Tool::Select => {
-                    let hit = editor.scene.pick_ray(origin, direction);
+                    let hit = editor.scene.pick_ray(origin, direction, &editor.models);
                     pick(editor, hit, pointer.modifiers);
                     // Double-clicking opens the properties of what was picked, as in Hammer.
                     if response.double_clicked_by(PointerButton::Primary) && !editor.selection.is_empty() {
@@ -592,7 +607,7 @@ impl MalletApp {
                     None => editor.message = "Click on a brush face to place the entity".to_owned(),
                 },
                 Tool::Texture => {
-                    let hit = editor.scene.pick_face(origin, direction);
+                    let hit = editor.scene.pick_face(origin, direction, &editor.models);
                     editor.texture_click(hit, pointer.modifiers);
                 }
                 Tool::Block => {}
@@ -606,7 +621,7 @@ impl MalletApp {
             };
             if let (true, Some(aim)) = (applied, aim) {
                 let (origin, direction) = editor.camera.ray(rect, aim);
-                let hit = editor.scene.pick_face(origin, direction);
+                let hit = editor.scene.pick_face(origin, direction, &editor.models);
                 editor.texture_apply_click(hit, pointer.modifiers.alt);
             }
         }
@@ -1338,8 +1353,11 @@ fn pick(editor: &mut Editor, hit: Option<crate::scene::Owner>, modifiers: Modifi
 fn run(action: Action, editor: &mut Editor) {
     match action {
         Action::OpenFile => {
+            let both = [MapFormat::Mallet.extension(), MapFormat::Vmf.extension()];
             if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Valve Map File", &["vmf"])
+                .add_filter("Maps", &both)
+                .add_filter(MapFormat::Mallet.name(), &[MapFormat::Mallet.extension()])
+                .add_filter(MapFormat::Vmf.name(), &[MapFormat::Vmf.extension()])
                 .pick_file()
             {
                 let _ = editor.open_in_tab(&path);
@@ -1395,16 +1413,57 @@ fn run(action: Action, editor: &mut Editor) {
     }
 }
 
+/// File > Save As. The map's own format is offered first (Mallet's for a new map), and
+/// the other one beside it, so saving a VMF as a `.mallet` map is a pick away.
 fn save_as_dialog(editor: &mut Editor) {
     let Some(document) = &editor.document else {
         return;
     };
-    let picked = rfd::FileDialog::new()
-        .add_filter("Valve Map File", &["vmf"])
-        .set_file_name(document.file_name())
-        .save_file();
-    if let Some(path) = picked {
+    let format = if document.path.is_some() {
+        document.format()
+    } else {
+        MapFormat::Mallet
+    };
+    if let Some(path) = map_save_dialog(&document.file_name(), format, "Save As") {
         let _ = editor.save(Some(path));
+    }
+}
+
+/// File > Export a Copy: writes the map elsewhere, in either format, without making the
+/// copy the map's file. The other format is offered first, as that is the usual reason.
+fn export_dialog(editor: &mut Editor) {
+    let Some(document) = &editor.document else {
+        return;
+    };
+    let format = match document.format() {
+        MapFormat::Mallet => MapFormat::Vmf,
+        MapFormat::Vmf => MapFormat::Mallet,
+    };
+    if let Some(path) = map_save_dialog(&document.file_name(), format, "Export a Copy") {
+        let _ = editor.export_copy(&path);
+    }
+}
+
+/// A save dialog offering both map formats, `first` preselected. A name typed without an
+/// extension gets the preselected one.
+fn map_save_dialog(file_name: &str, first: MapFormat, title: &str) -> Option<PathBuf> {
+    let second = match first {
+        MapFormat::Mallet => MapFormat::Vmf,
+        MapFormat::Vmf => MapFormat::Mallet,
+    };
+    let stem = Path::new(file_name)
+        .file_stem()
+        .map_or_else(|| file_name.to_owned(), |stem| stem.to_string_lossy().into_owned());
+    let path = rfd::FileDialog::new()
+        .set_title(title)
+        .add_filter(first.name(), &[first.extension()])
+        .add_filter(second.name(), &[second.extension()])
+        .set_file_name(format!("{stem}.{}", first.extension()))
+        .save_file()?;
+    if path.extension().is_some() {
+        Some(path)
+    } else {
+        Some(path.with_extension(first.extension()))
     }
 }
 

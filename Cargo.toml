@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mallet-kv", "crates/mallet-vmf", "crates/mallet-content", "crates/mallet"]
+members = ["crates/mallet-kv", "crates/mallet-vmf", "crates/mallet-content", "crates/mallet-format", "crates/mallet"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ publish = false
 mallet-kv = { path = "crates/mallet-kv" }
 mallet-vmf = { path = "crates/mallet-vmf" }
 mallet-content = { path = "crates/mallet-content" }
+mallet-format = { path = "crates/mallet-format" }
 glam = "0.29"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "persistence"] }
 rfd = "0.15"

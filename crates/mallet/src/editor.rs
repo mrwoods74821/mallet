@@ -325,7 +325,7 @@ impl Default for Editor {
             layout: [ViewMode::Textured, ViewMode::Top, ViewMode::Front, ViewMode::Side],
             camera: Camera3D::new(),
             grid: DEFAULT_GRID,
-            message: "Open a map with File > Open or drop a .vmf onto the window.".to_owned(),
+            message: "Open a map with File > Open or drop a .vmf or .mallet onto the window.".to_owned(),
             tool: Tool::Select,
             entity_class: ENTITY_CLASSES[0].to_owned(),
             selection: BTreeSet::new(),
@@ -553,19 +553,26 @@ impl Editor {
         self.overlay = Overlay::default();
     }
 
-    /// Saves the open map, first moving it to `path` when one is given. A map that has
-    /// never been saved needs a path.
-    pub fn save(&mut self, path: Option<PathBuf>) -> Result<PathBuf, String> {
+    /// Like Hammer, keeps where the map was viewed from and its grid in the map, so it
+    /// reopens the same way. This is not an edit: it does not dirty the map or go into
+    /// the undo history.
+    fn store_view(&mut self) -> Result<&mut Document, String> {
         let camera = SavedCamera {
             position: self.camera.position,
             look: self.camera.look_point(),
         };
         let grid = self.grid;
         let document = self.document.as_mut().ok_or("no map is open")?;
-        // Like Hammer, keep where the map was viewed from, so it reopens there. This is
-        // not an edit: it does not dirty the map or go into the undo history.
         document.vmf.set_active_camera(camera);
         document.vmf.set_grid_spacing(grid);
+        Ok(document)
+    }
+
+    /// Saves the open map, first moving it to `path` when one is given. A map that has
+    /// never been saved needs a path. The extension picks the format: `.mallet` for
+    /// Mallet's own, anything else for VMF.
+    pub fn save(&mut self, path: Option<PathBuf>) -> Result<PathBuf, String> {
+        let document = self.store_view()?;
         if let Some(path) = path {
             document.path = Some(path);
         }
@@ -573,17 +580,31 @@ impl Editor {
         if result.is_ok() {
             document.dirty = false;
         }
-        self.message = match &result {
+        let message = match &result {
             Ok(()) => format!("Saved {}", document.display_path()),
             Err(error) => format!("Could not save {}: {error}", document.display_path()),
         };
-        match (result, document.path.clone()) {
+        let saved = document.path.clone();
+        self.message = message;
+        match (result, saved) {
             (Ok(()), Some(path)) => {
                 self.remember_map(&path);
                 Ok(path)
             }
             _ => Err(self.message.clone()),
         }
+    }
+
+    /// Writes a copy of the open map to `path`, in the format its extension names,
+    /// leaving the map's own file and unsaved state alone.
+    pub fn export_copy(&mut self, path: &Path) -> Result<(), String> {
+        let document = self.store_view()?;
+        let result = document.export(path);
+        self.message = match &result {
+            Ok(()) => format!("Exported a copy to {}", path.display()),
+            Err(error) => format!("Could not export {}: {error}", path.display()),
+        };
+        result.map_err(|_| self.message.clone())
     }
 
     /// Whether the open map has never been saved, so saving needs a path.
@@ -1113,6 +1134,12 @@ impl Editor {
             self.refit_on_layout = false;
             self.frame_map();
         }
+    }
+
+    /// A point in a window screenshot, in pixels, as a point in the window.
+    pub fn window_point(&self, at: DVec2) -> Pos2 {
+        let scale = self.pixels_per_point.max(0.1);
+        Pos2::new(at.x as f32 / scale, at.y as f32 / scale)
     }
 
     /// Converts a viewport position to a window position. In the 2D views `point` is in

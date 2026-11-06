@@ -624,10 +624,27 @@ impl TextureBrowserState {
                 });
             }
         }
+        // A solid bar that is always shown, with a handle long enough to grab. egui's
+        // default floating bar is hidden until hovered, and with tens of thousands of
+        // materials its handle shrinks to a dot that is hard to find and catch. It fits in
+        // the 16 points the cards leave free on the right.
+        ui.spacing_mut().scroll = egui::style::ScrollStyle {
+            bar_width: 10.0,
+            handle_min_length: 48.0,
+            bar_inner_margin: 4.0,
+            dormant_background_opacity: 0.5,
+            active_background_opacity: 0.7,
+            interact_background_opacity: 0.9,
+            dormant_handle_opacity: 0.8,
+            active_handle_opacity: 1.0,
+            interact_handle_opacity: 1.0,
+            ..egui::style::ScrollStyle::solid()
+        };
         egui::ScrollArea::vertical()
             .id_salt("texture_grid")
             .max_height(height)
             .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
             .show_rows(ui, row_height, rows, |ui, range| {
                 if wheel != 0.0 {
                     ui.scroll_with_delta(egui::vec2(0.0, wheel * row_height * scroll_step));

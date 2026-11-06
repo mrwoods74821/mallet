@@ -6,8 +6,8 @@
 
 <p align="center">A Hammer-style level editor for Source engine VMF maps, written in Rust.</p>
 
-Mallet opens and saves VMF files without losing anything and shows them in Hammer's
-four-viewport layout, with textured brushes and prop models in 3D. It has Hammer's
+Mallet opens and saves VMF files without losing anything, has its own faster `.mallet`
+map format, and shows maps in Hammer's four-viewport layout, with textured brushes and prop models in 3D. It has Hammer's
 Selection, Block and Entity tools, Object Properties driven by the game's FGD, map tabs,
 a CompilePal-style compile window with presets, SourceCubemap and leak lines, and
 Hammer's texture tool with a texture browser that loads every mounted game's materials. A
@@ -31,7 +31,20 @@ default skin and placed by `origin`, `angles` and `modelscale`. Models the game 
 have stay as entity boxes; `get_status` lists why they failed.
 
 Without a path it starts with a new, empty map, like Hammer. You can also open a map with
-File > Open or by dropping a `.vmf` onto the window.
+File > Open or by dropping a `.vmf` or `.mallet` file onto the window.
+
+## The .mallet format
+
+Maps can be saved as VMF, which every Source tool reads, or as `.mallet`, Mallet's own
+binary format. A `.mallet` file holds the same map, so nothing is lost either way, but
+stores face planes and texture axes as numbers rather than text and every repeated string
+once. On a 28.5 MB VMF it is 2.8 MB, opens in about a third of the time and saves about
+four times faster. Save As picks the format by the extension, File > Export a Copy writes
+the map in either format without switching to the copy, and Mallet tells the formats
+apart by their contents, so a renamed file still opens. The compilers only read VMF, so
+compiling a `.mallet` map first writes a VMF copy to a `mallet_compile` folder beside it;
+the BSP and logs end up there too. The layout is described in
+[crates/mallet-format](crates/mallet-format/src/lib.rs).
 
 ## Layout
 
@@ -54,7 +67,7 @@ These follow Hammer's defaults.
 | Shift+S / Shift+B / Shift+E / Shift+A | Selection tool / Block tool / Entity tool / Texture application |
 | Alt+Enter or double-click | Object Properties for the selection: keyvalues, outputs, inputs and flags from the game's FGD |
 | F9 / Shift+F9 | Open the compile window / compile again with the preset used last |
-| Click | In 2D, click a brush's centre × or its outline to select it; in 3D, click it (or aim the crosshair at it in mouselook). Entities are selected whole; Ctrl+click toggles |
+| Click | In 2D, click a brush's centre × or its outline to select it; in 3D, click it (or aim the crosshair at it in mouselook). Props are hit where their model is, so clicks through gaps reach what is behind; only when nothing else is hit does a prop's box count. Entities are selected whole; Ctrl+click toggles |
 | Drag on empty space | Select everything fully inside the rectangle (Ctrl adds) |
 | Drag the selection | Move it so its corner snaps to the grid, with texture lock; hold Shift on release to clone |
 | Drag a white handle | Resize the selection or the pending block from that edge or corner |

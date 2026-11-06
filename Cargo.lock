@@ -1567,6 +1567,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "mallet"
 version = "0.1.0"
 dependencies = [
@@ -1577,6 +1586,7 @@ dependencies = [
  "embed-resource",
  "glam",
  "mallet-content",
+ "mallet-format",
  "mallet-vmf",
  "rfd",
  "serde",
@@ -1592,6 +1602,17 @@ dependencies = [
  "mallet-kv",
  "texpresso",
  "vmdl",
+]
+
+[[package]]
+name = "mallet-format"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "glam",
+ "lz4_flex",
+ "mallet-kv",
+ "mallet-vmf",
 ]
 
 [[package]]
@@ -2991,6 +3012,12 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "type-map"

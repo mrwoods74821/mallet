@@ -10,6 +10,7 @@ maps through a built-in MCP server.
 | --- | --- |
 | `mallet-kv` | Reads and writes Valve KeyValues text. Keeps every key, block and duplicate in order and writes Hammer's exact layout (tabs, CRLF). |
 | `mallet-vmf` | Typed VMF model on top of `mallet-kv`, brush geometry, and the edit/undo layer. No UI dependencies. |
+| `mallet-format` | The `.mallet` map format: the `Vmf` model as compact binary, with a checksum per section and room for the editor's own state. |
 | `mallet-content` | Game content: `gameinfo.txt` search paths, VPK archives, VMT materials, VTF textures, MDL models and FGD entity classes. |
 | `mallet` | The editor application: window, viewports, key bindings and the MCP server. |
 
@@ -31,6 +32,33 @@ The one thing saving adds is where the map was viewed from, as Hammer does: the 
 goes into the active entry of the `cameras` block (other cameras are kept) and the grid
 size into `viewsettings`. Opening a map puts the camera and grid back, in Mallet and in
 Hammer. This is not an edit, so it neither dirties the map nor enters the undo history.
+
+## The .mallet format
+
+`mallet-format` writes the `Vmf` model straight to bytes, without going through KeyValues
+text. Sides are fixed records: their id, plane points and texture axes are numbers (whole
+numbers as zigzag varints of one to three bytes, anything else as the exact `f64`), and
+every key, value, block name and material is an index into a string table that holds each
+string once. Everything `Vmf` keeps verbatim is kept the same way, along with where a
+side's extra items sat among its typed fields, so VMF to `.mallet` to VMF gives the same
+bytes. The map section is LZ4 compressed.
+
+A file is a signature (`89 'MALL' 0D 0A 1A`, which catches text-mode copies), a format
+version and a list of sections, each tagged, sized and checksummed with CRC-32. `MAP ` holds
+the map; `META` is JSON that `Document` fills in, currently the writing Mallet's version and
+the text encoding the map had as a VMF, so exporting it again writes the same bytes.
+Readers skip sections they do not know, and refuse a newer format version with a clear
+message.
+
+`Document::load` tells the formats apart by the signature, and `Document::save` and
+`Document::export` choose by the extension. On City 17 (28.5 MB of VMF, 9,289 brushes and
+9,504 entities) a release build reads the map in 119 ms against 328 ms for VMF and writes
+it in 140 ms against 554 ms, and the file is 2.8 MB. `MALLET_BIG_VMF=<map> cargo test
+--release -p mallet-format big -- --nocapture` measures it on any map.
+
+The compilers read VMF only. For a `.mallet` map, `Editor::compile_context` points the
+compile at `mallet_compile/<name>.vmf` beside the map, and `start_compile` writes that copy
+of the map as it is, saved or not, before the first step.
 
 ## Edits and undo
 
@@ -54,7 +82,11 @@ entity, like Hammer's default "groups" mode. The selection lives in `Editor` as 
 `Owner`s, so the window and MCP tools share it. 2D clicks pick, like Hammer, a brush's
 centre × first and then its outline, preferring the smallest brush; empty space inside a
 brush picks nothing. 3D clicks cast a ray against each brush's planes, skipping a brush
-the camera is inside; in mouselook the ray goes through the crosshair. The camera smooths
+the camera is inside; in mouselook the ray goes through the crosshair. Props are tested
+against their model's triangles, in model space through the inverse of their placement,
+so a click through a gap in a fence picks the wall behind it; only when the ray hits
+nothing at all does a prop's bounding box count, so thin or hollow models can still be
+picked. The texture tool uses the same test, so props block it only where they are. The camera smooths
 raw mouse movement over two frames and eases its speed, using real frame times.
 
 ## Map tabs
@@ -245,7 +277,8 @@ Tools:
 | --- | --- |
 | `get_status` | Open map, counts, bounds, grid, camera, 2D views, undo/redo state |
 | `set_game_dir` | Mount a game's content for textures and remember it |
-| `new_map`, `open_map`, `save_map` | Start an empty map or load a VMF in a new tab; save in place or to a new path |
+| `new_map`, `open_map`, `save_map` | Start an empty map or load a VMF or `.mallet` map in a new tab; save in place or to a new path, the extension picking the format |
+| `export_map` | Write a copy of the map in either format without switching to it |
 | `list_tabs`, `switch_tab`, `close_tab` | Work with the open map tabs; closing unsaved work needs `discard` |
 | `list_entities`, `get_entity` | Browse entities, filtered by classname (`trigger_*` prefix match) |
 | `set_entity_key`, `remove_entity_key` | Undoable key edits |
@@ -275,7 +308,7 @@ Tools:
 | `set_faces` | Material, scale, shift, rotation, lightmap scale, alignment and justify, as one undo step |
 | `replace_material` | Replace a material in the map or the selected faces |
 | `show_texture_browser` | Open the texture browser with a search |
-| `send_input` | Key presses, clicks and drags fed into the window as if a user made them |
+| `send_input` | Key presses, clicks and drags fed into the window as if a user made them, in a viewport or anywhere in the window (`window`, in screenshot pixels) |
 
 `send_input` queues synthetic egui events that `MalletApp::raw_input_hook` feeds into the
 window one frame at a time, so they take the same path as real input. The tool returns
