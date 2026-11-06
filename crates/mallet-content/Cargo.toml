@@ -1,0 +1,10 @@
+[package]
+name = "mallet-content"
+description = "Reads Source engine game content: gameinfo search paths, VPK archives, VMT materials and VTF textures."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mallet-kv.workspace = true
+texpresso = "2"
