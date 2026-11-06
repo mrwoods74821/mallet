@@ -33,7 +33,7 @@ const PICK_TOLERANCE_PIXELS: f64 = 4.0;
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 18] = [
+const KEY_ACTIONS: [Action; 19] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -46,6 +46,7 @@ const KEY_ACTIONS: [Action; 18] = [
     Action::GridLarger,
     Action::SelectionTool,
     Action::BlockTool,
+    Action::EntityTool,
     Action::SelectAll,
     Action::ClearSelection,
     Action::DeleteSelection,
@@ -278,6 +279,7 @@ impl MalletApp {
                     ui.separator();
                     menu_item(ui, &self.keymap, "Selection Tool", Action::SelectionTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Block Tool", Action::BlockTool, &mut chosen);
+                    menu_item(ui, &self.keymap, "Entity Tool", Action::EntityTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Create Block", Action::CreateBlock, &mut chosen);
                 });
             });
@@ -413,10 +415,25 @@ impl MalletApp {
             response.clicked_by(PointerButton::Primary)
         };
         let aim = if looking { Some(rect.center()) } else { pointer.position };
-        if let (true, Tool::Select, Some(aim)) = (clicked, editor.tool, aim) {
+        if let (true, Some(aim)) = (clicked, aim) {
             let (origin, direction) = editor.camera.ray(rect, aim);
-            let hit = editor.scene.pick_ray(origin, direction);
-            pick(editor, hit, pointer.modifiers);
+            match editor.tool {
+                Tool::Select => {
+                    let hit = editor.scene.pick_ray(origin, direction);
+                    pick(editor, hit, pointer.modifiers);
+                }
+                Tool::Entity => match editor.scene.surface_hit(origin, direction) {
+                    Some(point) => {
+                        // Adding zero turns -0 into 0, so the origin is never written as "-0".
+                        let classname = editor.entity_class.clone();
+                        if let Err(error) = editor.create_entity(&classname, point.round() + DVec3::ZERO, &[]) {
+                            editor.message = error;
+                        }
+                    }
+                    None => editor.message = "Click on a brush face to place the entity".to_owned(),
+                },
+                Tool::Block => {}
+            }
         }
         let active = response.hovered() || moving;
         let painter = ui.painter_at(rect);
@@ -586,6 +603,7 @@ impl MalletApp {
                 start,
                 bounds,
             },
+            (Tool::Entity, ..) => Drag::Marquee { view: index, start },
             (Tool::Block, ..) => Drag::NewBlock {
                 view: index,
                 start: snap(start, editor.grid),
@@ -628,6 +646,17 @@ impl MalletApp {
         pointer: &PointerState,
     ) {
         let grid = editor.grid;
+        if editor.tool == Tool::Entity {
+            // Hammer's entity tool: pressing or dragging in a 2D view moves the marker
+            // for the new entity; Enter creates it.
+            let held = response.is_pointer_button_down_on() && response.ctx.input(|input| input.pointer.primary_down());
+            if held || response.clicked_by(PointerButton::Primary) {
+                if let Some(position) = pointer.position {
+                    editor.place_entity_marker(view.axis, view.to_world(rect, position));
+                }
+            }
+            return;
+        }
         if response.drag_started_by(PointerButton::Primary) {
             if let Some(origin) = pointer.press_origin {
                 self.drag = Some(Self::begin_drag(index, view, rect, origin, editor));
@@ -960,11 +989,20 @@ fn run(action: Action, editor: &mut Editor) {
         Action::SelectionTool => {
             editor.tool = Tool::Select;
             editor.overlay.block = None;
+            editor.overlay.entity = None;
         }
-        Action::BlockTool => editor.tool = Tool::Block,
+        Action::BlockTool => {
+            editor.tool = Tool::Block;
+            editor.overlay.entity = None;
+        }
+        Action::EntityTool => {
+            editor.tool = Tool::Entity;
+            editor.overlay.block = None;
+        }
         Action::SelectAll => editor.select_all(),
         Action::ClearSelection => {
-            if editor.overlay.block.take().is_none() {
+            let pending = editor.overlay.block.take().is_some() | editor.overlay.entity.take().is_some();
+            if !pending {
                 editor.clear_selection();
             }
         }
@@ -972,10 +1010,13 @@ fn run(action: Action, editor: &mut Editor) {
             let _ = editor.delete_selection();
         }
         Action::CreateBlock => {
-            if editor.tool == Tool::Block {
-                if let Err(error) = editor.commit_block() {
-                    editor.message = error;
-                }
+            let result = match editor.tool {
+                Tool::Block => editor.commit_block().map(|_| ()),
+                Tool::Entity => editor.commit_entity().map(|_| ()),
+                Tool::Select => Ok(()),
+            };
+            if let Err(error) = result {
+                editor.message = error;
             }
         }
         Action::CenterViews2D => editor.fit_2d(),

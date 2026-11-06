@@ -5,7 +5,7 @@ use glam::{DVec2, DVec3};
 use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::Canvas;
-use crate::scene::{box_edges, Overlay, Remap, Scene, HANDLE_COLOR, HANDLE_HALF_SIZE, TOOL_COLOR};
+use crate::scene::{box_edges, entity_marker_edges, Overlay, Remap, Scene, HANDLE_COLOR, HANDLE_HALF_SIZE, TOOL_COLOR};
 
 const MIN_SCALE: f64 = 1.0 / 256.0;
 const MAX_SCALE: f64 = 32.0;
@@ -233,6 +233,9 @@ impl View2D {
         }
         if let Some(block) = &overlay.block {
             self.draw_edges(canvas, rect, &box_edges(block), None, TOOL_COLOR);
+        }
+        if let Some(point) = overlay.entity {
+            self.draw_edges(canvas, rect, &entity_marker_edges(point), None, TOOL_COLOR);
         }
         self.draw_overlay(canvas, rect, overlay, active);
     }

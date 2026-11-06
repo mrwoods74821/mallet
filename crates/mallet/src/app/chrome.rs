@@ -8,7 +8,7 @@ use eframe::egui::{self, Color32, RichText, Sense, Vec2};
 use egui_phosphor::regular as icon;
 
 use super::{run, save_as_dialog, MalletApp};
-use crate::editor::{Editor, Tool};
+use crate::editor::{Editor, Tool, ENTITY_CLASSES};
 use crate::keymap::Action;
 
 const TOOLBAR_ICON_SIZE: f32 = 17.0;
@@ -34,7 +34,7 @@ const PALETTE: [PaletteEntry; 9] = [
         "Selection tool",
         Some((Tool::Select, Action::SelectionTool)),
     ),
-    (icon::LIGHTBULB, "Entity tool", None),
+    (icon::LIGHTBULB, "Entity tool", Some((Tool::Entity, Action::EntityTool))),
     (icon::CUBE, "Block tool", Some((Tool::Block, Action::BlockTool))),
     (icon::PAINT_BRUSH, "Texture application", None),
     (icon::STAMP, "Apply decals", None),
@@ -280,6 +280,28 @@ impl MalletApp {
                         .on_disabled_hover_text("Texture browser (coming soon)");
                     });
                 });
+                ui.separator();
+
+                ui.label(RichText::new("New entity").strong());
+                ui.add(
+                    egui::TextEdit::singleline(&mut editor.entity_class)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("classname"),
+                )
+                .on_hover_text("Class the entity tool creates");
+                ui.menu_button(format!("{} Common classes", icon::LIST), |ui| {
+                    for class in ENTITY_CLASSES {
+                        if ui.selectable_label(editor.entity_class == *class, *class).clicked() {
+                            editor.entity_class = (*class).to_owned();
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.label(
+                    RichText::new("Entity tool: click a surface in 3D, or place in 2D and press Enter")
+                        .small()
+                        .color(Color32::GRAY),
+                );
                 ui.separator();
 
                 ui.label(RichText::new("Selection").strong());

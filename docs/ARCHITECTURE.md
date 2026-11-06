@@ -170,6 +170,7 @@ Tools:
 | `move_selection`, `clone_selection`, `delete_selection` | Undoable selection edits; moves keep textures locked |
 | `resize_selection` | Stretch the selection to a new bounding box, like dragging its handles |
 | `create_block` | Box brush between two corners, like the Block tool |
+| `create_entity` | Point entity of any class at a position, with extra keyvalues, like the Entity tool |
 | `undo`, `redo` | Step the shared history |
 | `set_grid`, `center_views` | Grid size and framing |
 | `set_viewport_type` | Switch a viewport slot between 3D and 2D types |
@@ -190,7 +191,7 @@ make any map change through `Editor::apply_edit` so it stays undoable.
 
 ## Roadmap
 
-1. Rotate handles, texture application, and entity creation,
+1. Rotate handles, texture application, an object properties dialog and FGD classes,
    all as `Edit`s with matching MCP tools.
 2. A texture browser, model skins and bodygroups, and a model browser for prop
    entities.

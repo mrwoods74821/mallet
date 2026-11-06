@@ -42,7 +42,36 @@ pub enum Tool {
     Select,
     /// Hammer's Block tool (Shift+B).
     Block,
+    /// Hammer's Entity tool (Shift+E).
+    Entity,
 }
+
+/// Point entity classes offered by the entity tool's class list. Any other class name
+/// can be typed in.
+pub const ENTITY_CLASSES: &[&str] = &[
+    "info_player_start",
+    "info_player_combine",
+    "info_player_rebel",
+    "info_target",
+    "info_node",
+    "info_teleport_destination",
+    "light",
+    "light_spot",
+    "light_environment",
+    "env_sprite",
+    "env_soundscape",
+    "ambient_generic",
+    "prop_static",
+    "prop_dynamic",
+    "prop_physics",
+    "point_spotlight",
+    "path_track",
+    "logic_auto",
+    "logic_relay",
+    "npc_citizen",
+    "npc_combine_s",
+    "npc_metropolice",
+];
 
 /// How a selection change combines with what is already selected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,6 +220,8 @@ pub struct Editor {
     /// Latest status line, shown at the bottom of the window.
     pub message: String,
     pub tool: Tool,
+    /// The class the entity tool creates.
+    pub entity_class: String,
     /// Selected world brushes and entities.
     pub selection: BTreeSet<Owner>,
     /// Tool previews drawn over the map.
@@ -237,6 +268,7 @@ impl Default for Editor {
             grid: DEFAULT_GRID,
             message: "Open a map with File > Open or drop a .vmf onto the window.".to_owned(),
             tool: Tool::Select,
+            entity_class: ENTITY_CLASSES[0].to_owned(),
             selection: BTreeSet::new(),
             overlay: Overlay::default(),
             material: DEFAULT_MATERIAL.to_owned(),
@@ -601,6 +633,7 @@ impl Editor {
     pub fn handle_box(&self) -> Option<Bounds> {
         match self.tool {
             Tool::Block => self.overlay.block,
+            Tool::Entity => None,
             Tool::Select => {
                 let bounds = self.scene.selection_bounds();
                 (!bounds.is_empty()).then(|| self.overlay.transform.map_or(bounds, |remap| remap.to))
@@ -699,6 +732,52 @@ impl Editor {
         self.select([Owner::Solid(id)], SelectMode::Replace);
         self.message = format!("Created block {id}");
         Ok(id)
+    }
+
+    /// Creates a point entity at `origin` with an id, the class, zero angles and any extra
+    /// keys, and selects it. Undoable. Returns the new entity's id.
+    pub fn create_entity(&mut self, classname: &str, origin: DVec3, keys: &[(String, String)]) -> Result<u32, String> {
+        let classname = classname.trim();
+        if classname.is_empty() {
+            return Err("choose an entity class first".to_owned());
+        }
+        let vmf = &self.document.as_ref().ok_or("no map is open")?.vmf;
+        let id = IdAllocator::for_map(vmf).object();
+        let mut entity = Entity::default();
+        entity.set("id", id.to_string());
+        entity.set("classname", classname);
+        entity.set("angles", "0 0 0");
+        entity.set("origin", format_vec3(origin));
+        for (key, value) in keys {
+            entity.set(key, value.clone());
+        }
+        self.apply_edit(&Edit::AddEntity { index: None, entity })?;
+        self.overlay.entity = None;
+        self.select([Owner::Entity(id)], SelectMode::Replace);
+        self.message = format!("Created {classname} {id}");
+        Ok(id)
+    }
+
+    /// Creates an entity of the current class at the entity tool's marker.
+    pub fn commit_entity(&mut self) -> Result<u32, String> {
+        let origin = self
+            .overlay
+            .entity
+            .ok_or("click in a 2D view to place the entity first")?;
+        let classname = self.entity_class.clone();
+        self.create_entity(&classname, origin, &[])
+    }
+
+    /// Moves the entity tool's marker to a grid-snapped point in a 2D view. The axis
+    /// the view looks along keeps the marker's previous value, so clicking in two views
+    /// sets all three coordinates.
+    pub fn place_entity_marker(&mut self, axis: Axis2D, point: DVec2) {
+        let [horizontal, vertical, _] = axis.axes();
+        let snapped = (point / self.grid).round() * self.grid;
+        let mut marker = self.overlay.entity.unwrap_or(DVec3::ZERO);
+        marker[horizontal] = snapped.x;
+        marker[vertical] = snapped.y;
+        self.overlay.entity = Some(marker);
     }
 
     /// Creates the block tool's pending box.

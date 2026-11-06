@@ -42,11 +42,13 @@ These follow Hammer's defaults.
 | Ctrl+N / Ctrl+O / Ctrl+S | New map tab / open in a tab / save (a new map asks where to save) |
 | Ctrl+W / Ctrl+Tab / Ctrl+Shift+Tab | Close tab (asks about unsaved changes) / next tab / previous tab |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
-| Shift+S / Shift+B | Selection tool / Block tool |
+| Shift+S / Shift+B / Shift+E | Selection tool / Block tool / Entity tool |
 | Click | In 2D, click a brush's centre × or its outline to select it; in 3D, click it (or aim the crosshair at it in mouselook). Entities are selected whole; Ctrl+click toggles |
 | Drag on empty space | Select everything fully inside the rectangle (Ctrl adds) |
 | Drag the selection | Move it so its corner snaps to the grid, with texture lock; hold Shift on release to clone |
 | Drag a white handle | Resize the selection or the pending block from that edge or corner |
+| Entity tool: click in 3D | Create an entity of the class chosen under New entity on the brush face under the cursor |
+| Entity tool: click in 2D views, then Enter | Place the new entity's marker (each view sets its two axes, snapped to the grid), then create it |
 | Drag with the Block tool, then Enter | Create a box brush; drag inside it to move it, drag handles in any view to resize it (its depth starts from the last block) |
 | Delete / Escape / Ctrl+A | Delete selection / deselect or cancel the block / select all |
 | `[` / `]` | Smaller / larger grid |

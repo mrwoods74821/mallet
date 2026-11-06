@@ -18,7 +18,8 @@ use glam::{DVec3, Mat4, Vec3, Vec4};
 use mallet_content::{parallel_map, AlphaMode, MaterialLoader, Materials};
 
 use crate::scene::{
-    box_edges, ModelCache, Overlay, Owner, Remap, Scene, SceneFace, WireMesh, HANDLE_COLOR, SELECTED_COLOR, TOOL_COLOR,
+    box_edges, entity_marker_edges, ModelCache, Overlay, Owner, Remap, Scene, SceneFace, WireMesh, HANDLE_COLOR,
+    SELECTED_COLOR, TOOL_COLOR,
 };
 use crate::view2d::View2D;
 use crate::view3d::Camera3D;
@@ -576,6 +577,9 @@ impl Renderer3D {
         if let Some(block) = &overlay.block {
             push_edges(&mut outline, &box_edges(block), None, TOOL_COLOR);
         }
+        if let Some(point) = overlay.entity {
+            push_edges(&mut outline, &entity_marker_edges(point), None, TOOL_COLOR);
+        }
         let outline = self.line_mesh(&outline);
 
         let aspect = size[0] as f32 / size[1] as f32;
@@ -927,6 +931,9 @@ impl Renderer3D {
         }
         if let Some(block) = &overlay.block {
             push_edges(&mut over, &box_edges(block), None, TOOL_COLOR);
+        }
+        if let Some(point) = overlay.entity {
+            push_edges(&mut over, &entity_marker_edges(point), None, TOOL_COLOR);
         }
         let under = self.line_mesh(&under);
         let over = self.line_mesh(&over);

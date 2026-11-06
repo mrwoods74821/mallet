@@ -163,6 +163,22 @@ pub fn definitions() -> Value {
             &["min", "max"],
         ),
         tool(
+            "create_entity",
+            "Create a point entity such as info_player_start or light at a position and select it. \
+             Undoable. It gets an id and \"angles\" \"0 0 0\" unless keys override them. Returns the new \
+             entity id.",
+            json!({
+                "classname": { "type": "string" },
+                "origin": vec3,
+                "keys": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" },
+                    "description": "Extra keyvalues, such as {\"model\": \"models/props_c17/oildrum001.mdl\"}."
+                }
+            }),
+            &["classname", "origin"],
+        ),
+        tool(
             "send_input",
             "Feed keyboard and mouse input to the editor window, frame by frame, as if a user did it, then \
              wait until it has been handled. Use it to test tools and shortcuts. The window must not be \
@@ -399,6 +415,24 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
             }
             Ok(ToolResult::json(&json!({ "solid": result? })))
         }
+        "create_entity" => {
+            let classname = optional_string(args, "classname")?
+                .ok_or("\"classname\" is required")?
+                .to_owned();
+            let origin = required_vec3(args, "origin")?;
+            let mut keys = Vec::new();
+            if let Some(object) = args.get("keys") {
+                let object = object.as_object().ok_or("\"keys\" must be an object of strings")?;
+                for (key, value) in object {
+                    let value = value
+                        .as_str()
+                        .ok_or_else(|| format!("key \"{key}\" must have a string value"))?;
+                    keys.push((key.clone(), value.to_owned()));
+                }
+            }
+            let id = editor.create_entity(&classname, origin, &keys)?;
+            Ok(ToolResult::json(&json!({ "entity": id })))
+        }
         "send_input" => {
             let actions = args
                 .get("actions")
@@ -531,7 +565,10 @@ fn status_json(editor: &Editor) -> Value {
         "tool": match editor.tool {
             Tool::Select => "selection",
             Tool::Block => "block",
+            Tool::Entity => "entity",
         },
+        "entity_class": editor.entity_class,
+        "entity_marker": editor.overlay.entity.map(|point| [point.x, point.y, point.z]),
         "selected": editor.selection.len(),
         "material": editor.material,
         "camera": {

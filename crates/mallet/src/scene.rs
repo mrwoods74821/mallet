@@ -19,6 +19,18 @@ const DEFAULT_COLOR: Color32 = Color32::from_rgb(220, 220, 220);
 /// Half-size of the box drawn for point entities until FGD sizes are loaded.
 const POINT_ENTITY_HALF_SIZE: f64 = 8.0;
 
+/// The box of a point entity relative to its origin, as the Half-Life 2 FGD gives it:
+/// the standing player hull for spawn points and NPCs, a small cube otherwise.
+fn point_entity_box(classname: &str) -> (DVec3, DVec3) {
+    let classname = classname.to_ascii_lowercase();
+    if classname.starts_with("info_player_") || classname.starts_with("npc_") {
+        (DVec3::new(-16.0, -16.0, 0.0), DVec3::new(16.0, 16.0, 72.0))
+    } else {
+        let half = DVec3::splat(POINT_ENTITY_HALF_SIZE);
+        (-half, half)
+    }
+}
+
 /// Edge coordinates are rounded to this many steps per unit when removing shared edges.
 const EDGE_QUANTIZE: f64 = 100.0;
 
@@ -91,6 +103,26 @@ pub struct Overlay {
     pub marquee: Option<(Axis2D, DVec2, DVec2)>,
     /// The box that gets resize handles in the 2D views: the selection or the pending block.
     pub handles: Option<Bounds>,
+    /// The entity tool's position for a new entity, waiting for Enter.
+    pub entity: Option<DVec3>,
+}
+
+/// Half-size of the marker the entity tool draws where a new entity will go.
+const ENTITY_MARKER_HALF_SIZE: f64 = 8.0;
+
+/// The edges of the entity tool's marker: a small box around the point with a cross
+/// through it, so it is visible from any side.
+pub fn entity_marker_edges(point: DVec3) -> Vec<[DVec3; 2]> {
+    let half = DVec3::splat(ENTITY_MARKER_HALF_SIZE);
+    let mut edges = box_edges(&Bounds {
+        min: point - half,
+        max: point + half,
+    });
+    for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
+        let arm = axis * ENTITY_MARKER_HALF_SIZE * 2.0;
+        edges.push([point - arm, point + arm]);
+    }
+    edges
 }
 
 impl WireMesh {
@@ -242,10 +274,10 @@ impl Scene {
                 scene.bounds.add_bounds(&mesh.bounds);
                 scene.meshes.push(mesh);
             } else if let Some(origin) = entity.origin() {
-                let half = DVec3::splat(POINT_ENTITY_HALF_SIZE);
+                let (min, max) = point_entity_box(entity.classname());
                 let bounds = Bounds {
-                    min: origin - half,
-                    max: origin + half,
+                    min: origin + min,
+                    max: origin + max,
                 };
                 let mesh = WireMesh {
                     color: to_color(entity_color),
@@ -324,6 +356,17 @@ impl Scene {
             .filter_map(|mesh| Some((mesh.owner?, ray_convex(origin, direction, &mesh.planes)?)))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(owner, _)| owner)
+    }
+
+    /// Where a ray first hits a brush face, ignoring point entities and props. Used to
+    /// place new entities on the surface under the cursor.
+    pub fn surface_hit(&self, origin: DVec3, direction: DVec3) -> Option<DVec3> {
+        self.meshes
+            .iter()
+            .filter(|mesh| mesh.model.is_none() && mesh.faces.iter().any(|face| face.material.is_some()))
+            .filter_map(|mesh| ray_convex(origin, direction, &mesh.planes))
+            .min_by(f64::total_cmp)
+            .map(|distance| origin + direction * distance)
     }
 
     /// Owners with a centre cross inside a 2D rectangle, the way Hammer's selection
