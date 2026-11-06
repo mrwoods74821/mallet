@@ -15,7 +15,10 @@ use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
 use mallet_vmf::{format_vec3, Entity, IdAllocator, Solid, Vmf};
 
+use mallet_content::{GameFs, Materials};
+
 use crate::canvas::PixmapCanvas;
+use crate::render3d::Renderer3D;
 use crate::document::Document;
 use crate::input::InputFrame;
 use crate::scene::{Overlay, Owner, Scene};
@@ -100,10 +103,16 @@ pub struct Editor {
     pub input_queue: VecDeque<InputFrame>,
     /// Frames the window has finished, used to wait for synthetic input to take effect.
     pub frames_drawn: u64,
+    /// Textures from the configured game, when one is set.
+    pub materials: Option<Materials>,
+    /// The GPU renderer for the textured camera view, created once the window has a GPU.
+    pub gpu: Option<Renderer3D>,
     /// The last block created; new blocks reuse its depth.
     last_block: Bounds,
     /// Camera, top, front and side viewport rectangles from the latest window layout.
     viewport_rects: [Rect; 4],
+    /// Physical pixels per layout point in the window.
+    pixels_per_point: f32,
     refit_on_layout: bool,
 }
 
@@ -126,8 +135,11 @@ impl Default for Editor {
             material: DEFAULT_MATERIAL.to_owned(),
             input_queue: VecDeque::new(),
             frames_drawn: 0,
+            materials: None,
+            gpu: None,
             last_block: DEFAULT_BLOCK,
             viewport_rects: quad_rects(Rect::from_min_size(Pos2::ZERO, DEFAULT_AREA), VIEWPORT_GAP),
+            pixels_per_point: 1.0,
             refit_on_layout: false,
         }
     }
@@ -476,10 +488,35 @@ impl Editor {
         self.camera.look_at(&self.scene.bounds);
     }
 
+    /// Mounts a game folder, the one holding `gameinfo.txt`, so materials show their
+    /// textures. Returns how many search paths were mounted.
+    pub fn set_game_dir(&mut self, game_dir: &Path) -> Result<usize, String> {
+        let filesystem = GameFs::from_gameinfo(game_dir).map_err(|error| error.to_string())?;
+        let mounts = filesystem.mounts().len();
+        self.materials = Some(Materials::new(filesystem));
+        if let Some(gpu) = &mut self.gpu {
+            gpu.clear_textures();
+        }
+        self.message = format!("Using game content from {} ({mounts} search paths)", game_dir.display());
+        Ok(mounts)
+    }
+
+    /// The mounted game folder, if any.
+    pub fn game_dir(&self) -> Option<&Path> {
+        self.materials.as_ref().map(|materials| materials.filesystem().game_dir())
+    }
+
+    /// The size in physical pixels of the camera viewport.
+    pub fn camera_pixels(&self) -> [u32; 2] {
+        let size = self.viewport_rects[0].size() * self.pixels_per_point;
+        [size.x.round().max(1.0) as u32, size.y.round().max(1.0) as u32]
+    }
+
     /// Records the window's viewport layout. A map opened before the first layout is
     /// framed again once the real viewport sizes are known.
-    pub fn set_layout(&mut self, rects: [Rect; 4]) {
+    pub fn set_layout(&mut self, rects: [Rect; 4], pixels_per_point: f32) {
         self.viewport_rects = rects;
+        self.pixels_per_point = pixels_per_point;
         if self.refit_on_layout {
             self.refit_on_layout = false;
             self.fit_2d();
@@ -503,7 +540,12 @@ impl Editor {
     ///
     /// Uses the same drawing code as the window but does not need it to be visible.
     /// Viewport labels are left out.
-    pub fn render_png(&self, target: ShotTarget) -> Result<Vec<u8>, String> {
+    pub fn render_png(&mut self, target: ShotTarget) -> Result<Vec<u8>, String> {
+        if target == ShotTarget::Camera {
+            if let Some(camera) = self.render_camera_gpu() {
+                return camera.encode_png();
+            }
+        }
         if let Some(index) = target.index() {
             return self.render_viewport(index)?.encode_png();
         }
@@ -511,11 +553,29 @@ impl Editor {
         let area = rects[0].union(rects[3]);
         let mut canvas = canvas_for(area.size())?;
         canvas.fill_all(GAP_COLOR);
-        for (index, rect) in rects.iter().enumerate() {
+        if let Some(camera) = self.render_camera_gpu() {
+            let offset = rects[0].min - area.min;
+            canvas.draw_canvas_scaled(&camera, offset.x, offset.y, 1.0 / self.pixels_per_point);
+        } else {
+            let offset = rects[0].min - area.min;
+            canvas.draw_canvas(&self.render_viewport(0)?, offset.x.round() as i32, offset.y.round() as i32);
+        }
+        for (index, rect) in rects.iter().enumerate().skip(1) {
             let offset = rect.min - area.min;
             canvas.draw_canvas(&self.render_viewport(index)?, offset.x.round() as i32, offset.y.round() as i32);
         }
         canvas.encode_png()
+    }
+
+    /// Renders the textured camera view on the GPU, when the window has created the
+    /// renderer, and reads it back.
+    fn render_camera_gpu(&mut self) -> Option<PixmapCanvas> {
+        let overlay = self.display_overlay();
+        let size = self.camera_pixels();
+        let gpu = self.gpu.as_mut()?;
+        gpu.render(&self.scene, &overlay, &self.camera, size, self.materials.as_mut());
+        let (width, height, rgba) = gpu.read_pixels()?;
+        PixmapCanvas::from_rgba(width, height, rgba)
     }
 
     fn render_viewport(&self, index: usize) -> Result<PixmapCanvas, String> {

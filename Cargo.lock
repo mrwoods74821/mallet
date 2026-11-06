@@ -1467,8 +1467,10 @@ name = "mallet"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytemuck",
  "eframe",
  "glam",
+ "mallet-content",
  "mallet-vmf",
  "rfd",
  "serde_json",

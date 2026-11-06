@@ -7,11 +7,13 @@
 
 mod app;
 mod canvas;
+mod config;
 mod document;
 mod editor;
 mod input;
 mod keymap;
 mod mcp;
+mod render3d;
 mod scene;
 mod tools;
 mod view2d;

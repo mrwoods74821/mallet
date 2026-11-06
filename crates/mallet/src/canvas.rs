@@ -48,6 +48,22 @@ impl PixmapCanvas {
         Pixmap::new(width, height).map(|pixmap| Self { pixmap })
     }
 
+    /// Wraps opaque RGBA pixels, such as a GPU render read back to memory.
+    pub fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Option<Self> {
+        let size = tiny_skia::IntSize::from_wh(width, height)?;
+        Pixmap::from_vec(rgba, size).map(|pixmap| Self { pixmap })
+    }
+
+    /// Copies another canvas's image into this one at `(x, y)`, scaled by `scale`.
+    pub fn draw_canvas_scaled(&mut self, other: &PixmapCanvas, x: f32, y: f32, scale: f32) {
+        let paint = PixmapPaint {
+            quality: tiny_skia::FilterQuality::Bilinear,
+            ..PixmapPaint::default()
+        };
+        let transform = Transform::from_row(scale, 0.0, 0.0, scale, x, y);
+        self.pixmap.draw_pixmap(0, 0, other.pixmap.as_ref(), &paint, transform, None);
+    }
+
     /// Fills the whole image with one colour.
     pub fn fill_all(&mut self, color: Color32) {
         let [r, g, b, a] = color.to_array();

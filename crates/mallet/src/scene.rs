@@ -2,11 +2,12 @@
 //! plus hit testing for selection.
 
 use std::collections::{BTreeSet, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use eframe::egui::Color32;
 use glam::{DVec2, DVec3};
 use mallet_vmf::geometry::{faces_bounds, solid_faces, Bounds, Plane};
-use mallet_vmf::{Solid, Vmf};
+use mallet_vmf::{Side, Solid, TexAxis, Vmf};
 
 use crate::view2d::Axis2D;
 
@@ -101,10 +102,24 @@ impl WireMesh {
     }
 }
 
-/// The edges of one brush or point entity.
+/// One polygon of a brush or point entity box, for the textured 3D view.
+pub struct SceneFace {
+    /// The face's material, or `None` for point entity boxes drawn in a flat colour.
+    pub material: Option<String>,
+    /// Convex polygon in winding order.
+    pub vertices: Vec<DVec3>,
+    /// Outward unit normal.
+    pub normal: DVec3,
+    pub uaxis: TexAxis,
+    pub vaxis: TexAxis,
+}
+
+/// The geometry of one brush or point entity.
 pub struct WireMesh {
     pub color: Color32,
     pub edges: Vec<[DVec3; 2]>,
+    /// Polygons for the textured 3D view.
+    pub faces: Vec<SceneFace>,
     pub bounds: Bounds,
     /// Planes enclosing the mesh, used for 3D picking.
     pub planes: Vec<Plane>,
@@ -117,6 +132,9 @@ pub struct WireMesh {
 #[derive(Default)]
 pub struct Scene {
     pub meshes: Vec<WireMesh>,
+    /// Changes whenever the geometry or the selection changes, so renderers know when to
+    /// rebuild cached buffers.
+    pub generation: u64,
     pub bounds: Bounds,
     pub solid_count: usize,
     pub entity_count: usize,
@@ -128,7 +146,10 @@ impl Scene {
     /// World brushes use their own editor colour; brushes of brush entities use the
     /// entity's colour, matching Hammer's 2D views.
     pub fn build(vmf: &Vmf) -> Self {
-        let mut scene = Self::default();
+        let mut scene = Self {
+            generation: next_generation(),
+            ..Self::default()
+        };
         for entity in vmf.all_entities() {
             let is_world = entity.classname().eq_ignore_ascii_case("worldspawn");
             if !is_world {
@@ -162,6 +183,7 @@ impl Scene {
                 let mesh = WireMesh {
                     color: to_color(entity_color),
                     edges: box_edges(&bounds),
+                    faces: box_faces(&bounds),
                     bounds,
                     planes: box_planes(&bounds),
                     owner: entity_owner,
@@ -184,6 +206,7 @@ impl Scene {
         for mesh in &mut self.meshes {
             mesh.selected = mesh.owner.is_some_and(|owner| selection.contains(&owner));
         }
+        self.generation = next_generation();
     }
 
     /// Bounds of every selected mesh; empty when nothing is selected.
@@ -300,9 +323,24 @@ fn brush_mesh(solid: &Solid, color: Color32, owner: Option<Owner>) -> Option<Wir
             }
         }
     }
+    let sides: Vec<&Side> = solid.sides().collect();
+    let scene_faces = faces
+        .iter()
+        .filter_map(|face| {
+            let side = sides.get(face.side)?;
+            Some(SceneFace {
+                material: Some(side.material.clone()),
+                vertices: face.vertices.clone(),
+                normal: face.plane.normal,
+                uaxis: side.uaxis,
+                vaxis: side.vaxis,
+            })
+        })
+        .collect();
     Some(WireMesh {
         color,
         edges,
+        faces: scene_faces,
         bounds: faces_bounds(&faces),
         planes: faces.iter().map(|face| face.plane).collect(),
         owner,
@@ -329,6 +367,42 @@ pub fn box_edges(bounds: &Bounds) -> Vec<[DVec3; 2]> {
         }
     }
     edges
+}
+
+/// The six outward-facing quads of an axis-aligned box, without a material.
+fn box_faces(bounds: &Bounds) -> Vec<SceneFace> {
+    let flat_axis = TexAxis {
+        axis: DVec3::ZERO,
+        offset: 0.0,
+        scale: 1.0,
+    };
+    box_planes(bounds)
+        .into_iter()
+        .map(|plane| {
+            let normal = plane.normal;
+            let (u, v) = if normal.z.abs() > 0.5 { (DVec3::X, DVec3::Y) } else { (DVec3::Z, normal.cross(DVec3::Z)) };
+            let center = bounds.center() + normal * (bounds.size() * 0.5).dot(normal.abs());
+            let half = bounds.size() * 0.5;
+            let (du, dv) = (u * half.dot(u.abs()), v * half.dot(v.abs()));
+            let mut vertices = vec![center - du - dv, center + du - dv, center + du + dv, center - du + dv];
+            if (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0]).dot(normal) < 0.0 {
+                vertices.reverse();
+            }
+            SceneFace {
+                material: None,
+                vertices,
+                normal,
+                uaxis: flat_axis,
+                vaxis: flat_axis,
+            }
+        })
+        .collect()
+}
+
+static GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
 fn box_planes(bounds: &Bounds) -> Vec<Plane> {

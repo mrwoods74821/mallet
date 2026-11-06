@@ -9,7 +9,11 @@ use eframe::egui::{self, Id, Modifiers, PointerButton, Pos2, Rect, Response, Sen
 use glam::{DVec2, DVec3};
 use mallet_vmf::geometry::Bounds;
 
-use crate::canvas::PainterCanvas;
+use eframe::egui_wgpu;
+
+use crate::canvas::{Canvas, PainterCanvas};
+use crate::config::{self, Config};
+use crate::render3d::Renderer3D;
 use crate::editor::{self, Editor, SelectMode, Tool, VIEWPORT_GAP};
 use crate::keymap::{Action, KeyMap};
 use crate::scene::Remap;
@@ -88,6 +92,8 @@ pub struct MalletApp {
     title: String,
     mcp_url: Option<String>,
     drag: Option<Drag>,
+    /// The GPU camera image as registered with egui, once the 3D view has been drawn.
+    camera_texture: Option<egui::TextureId>,
 }
 
 impl MalletApp {
@@ -103,9 +109,13 @@ impl MalletApp {
             title: String::new(),
             mcp_url: None,
             drag: None,
+            camera_texture: None,
         };
         app.start_mcp(&cc.egui_ctx);
-        open_or_new(&mut editor::lock(&app.editor), path);
+        let mut editor = editor::lock(&app.editor);
+        load_game_content(&mut editor);
+        open_or_new(&mut editor, path);
+        drop(editor);
         app
     }
 
@@ -178,6 +188,7 @@ impl MalletApp {
     fn menu_bar(&self, ctx: &egui::Context, editor: &mut Editor) {
         let mut chosen = None;
         let mut save_as = false;
+        let mut choose_game = false;
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -209,6 +220,11 @@ impl MalletApp {
                     menu_item(ui, &self.keymap, "Larger Grid", Action::GridLarger, &mut chosen);
                 });
                 ui.menu_button("Tools", |ui| {
+                    if ui.button("Game Folder...").clicked() {
+                        choose_game = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     menu_item(ui, &self.keymap, "Selection Tool", Action::SelectionTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Block Tool", Action::BlockTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Create Block", Action::CreateBlock, &mut chosen);
@@ -220,6 +236,9 @@ impl MalletApp {
         }
         if save_as {
             save_as_dialog(editor);
+        }
+        if choose_game {
+            choose_game_dir(editor);
         }
     }
 
@@ -270,9 +289,9 @@ impl MalletApp {
         });
     }
 
-    fn viewports(&mut self, ui: &mut egui::Ui, editor: &mut Editor) {
+    fn viewports(&mut self, ui: &mut egui::Ui, editor: &mut Editor, frame: &eframe::Frame) {
         let rects = editor::quad_rects(ui.available_rect_before_wrap(), VIEWPORT_GAP);
-        editor.set_layout(rects);
+        editor.set_layout(rects, ui.ctx().pixels_per_point());
         let pointer = ui.input(|input| PointerState {
             position: input.pointer.latest_pos(),
             press_origin: input.pointer.press_origin(),
@@ -291,8 +310,19 @@ impl MalletApp {
             }
         }
         let active = response.hovered() || moving;
-        let canvas = &mut PainterCanvas(&ui.painter_at(rects[0]));
-        editor.camera.draw(canvas, rects[0], &editor.scene, active, &editor.display_overlay());
+        let painter = ui.painter_at(rects[0]);
+        let canvas = &mut PainterCanvas(&painter);
+        match frame.wgpu_render_state() {
+            Some(render_state) => {
+                let texture = self.render_camera(render_state, editor);
+                let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                painter.image(texture, rects[0], full, egui::Color32::WHITE);
+                let label = if editor.materials.is_some() { "camera (textured)" } else { "camera (no game set)" };
+                let color = if active { egui::Color32::WHITE } else { egui::Color32::GRAY };
+                canvas.label(rects[0].left_top() + egui::vec2(6.0, 4.0), label, color);
+            }
+            None => editor.camera.draw(canvas, rects[0], &editor.scene, active, &editor.display_overlay()),
+        }
         if moving {
             ctx.request_repaint();
         }
@@ -313,6 +343,30 @@ impl MalletApp {
             view.draw(canvas, rect, &editor.scene, editor.grid, response.hovered(), &editor.display_overlay());
             if let Some(position) = response.hover_pos() {
                 self.cursor = Some(snap(view.to_world(rect, position), editor.grid));
+            }
+        }
+    }
+
+    /// Renders the textured camera view on the GPU and returns it as an egui texture.
+    fn render_camera(&mut self, render_state: &egui_wgpu::RenderState, editor: &mut Editor) -> egui::TextureId {
+        let overlay = editor.display_overlay();
+        let size = editor.camera_pixels();
+        let renderer = editor
+            .gpu
+            .get_or_insert_with(|| Renderer3D::new(&render_state.device, &render_state.queue));
+        let (view, recreated) = renderer.render(&editor.scene, &overlay, &editor.camera, size, editor.materials.as_mut());
+        let mut egui_renderer = render_state.renderer.write();
+        let filter = eframe::wgpu::FilterMode::Linear;
+        match self.camera_texture {
+            Some(id) if !recreated => id,
+            Some(id) => {
+                egui_renderer.update_egui_texture_from_wgpu_texture(&render_state.device, view, filter, id);
+                id
+            }
+            None => {
+                let id = egui_renderer.register_native_texture(&render_state.device, view, filter);
+                self.camera_texture = Some(id);
+                id
             }
         }
     }
@@ -466,7 +520,7 @@ fn box_contains(axis: Axis2D, bounds: &Bounds, point: DVec2) -> bool {
 }
 
 impl eframe::App for MalletApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let shared = Arc::clone(&self.editor);
         let mut editor = editor::lock(&shared);
         self.handle_input(ctx, &mut editor);
@@ -476,7 +530,7 @@ impl eframe::App for MalletApp {
         self.tool_bar(ctx, &mut editor);
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(egui::Color32::from_gray(30)))
-            .show(ctx, |ui| self.viewports(ui, &mut editor));
+            .show(ctx, |ui| self.viewports(ui, &mut editor, frame));
         editor.frames_drawn += 1;
     }
 
@@ -510,6 +564,43 @@ fn wait_for_input(shared: &Mutex<Editor>, ctx: &egui::Context) -> Result<(), Str
     }
     editor::lock(shared).input_queue.clear();
     Err("the window did not handle the input in time; it may be minimized".to_owned())
+}
+
+/// Mounts the configured game folder, or finds an installed Source game the first time
+/// and remembers it.
+fn load_game_content(editor: &mut Editor) {
+    let mut config = Config::load();
+    let detected = config.game_dir.is_none();
+    let Some(game_dir) = config.game_dir.clone().or_else(config::detect_game_dir) else {
+        return;
+    };
+    if editor.set_game_dir(&game_dir).is_ok() && detected {
+        config.game_dir = Some(game_dir);
+        if let Err(error) = config.save() {
+            editor.message = format!("Could not save settings: {error}");
+        }
+    }
+}
+
+/// Asks for the game folder that holds `gameinfo.txt`, mounts it and remembers it.
+fn choose_game_dir(editor: &mut Editor) {
+    let Some(folder) = rfd::FileDialog::new()
+        .set_title("Choose the game folder that contains gameinfo.txt")
+        .pick_folder()
+    else {
+        return;
+    };
+    match editor.set_game_dir(&folder) {
+        Ok(_) => {
+            let config = Config {
+                game_dir: Some(folder),
+            };
+            if let Err(error) = config.save() {
+                editor.message = format!("Could not save settings: {error}");
+            }
+        }
+        Err(error) => editor.message = error,
+    }
 }
 
 /// Opens the map given on the command line, or starts a new map like Hammer when there is

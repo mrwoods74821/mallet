@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use eframe::egui::Pos2;
 
+use crate::config::Config;
 use crate::editor::{Editor, SelectMode, ShotTarget, Tool, MAX_GRID, MIN_GRID};
 use crate::input::{self, InputFrame};
 use crate::mcp::ToolResult;
@@ -31,6 +32,14 @@ pub fn definitions() -> Value {
              the 2D view positions, and whether undo or redo is available.",
             json!({}),
             &[],
+        ),
+        tool(
+            "set_game_dir",
+            "Mount a Source game's content so the 3D view shows textures, and remember it for next time. \
+             The folder is the one that contains gameinfo.txt, such as .../GarrysMod/garrysmod or \
+             .../Half-Life 2/hl2.",
+            json!({ "path": { "type": "string", "description": "Absolute path to the game folder." } }),
+            &["path"],
         ),
         tool(
             "new_map",
@@ -237,6 +246,15 @@ pub fn run(editor: &mut Editor, name: &str, args: &Value) -> ToolResult {
 fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResult, String> {
     match name {
         "get_status" => Ok(ToolResult::json(&status_json(editor))),
+        "set_game_dir" => {
+            let path = PathBuf::from(string_arg(args, "path")?);
+            let mounts = editor.set_game_dir(&path)?;
+            let config = Config {
+                game_dir: Some(path.clone()),
+            };
+            config.save()?;
+            Ok(ToolResult::text(format!("Mounted {} with {mounts} search paths.", path.display())))
+        }
         "new_map" => {
             editor.new_map();
             Ok(ToolResult::json(&status_json(editor)))
@@ -403,6 +421,8 @@ fn status_json(editor: &Editor) -> Value {
             "max": bounds.max.to_array(),
         })),
         "grid": editor.grid,
+        "game_dir": editor.game_dir().map(|dir| dir.display().to_string()),
+        "textured_3d": editor.gpu.is_some(),
         "tool": match editor.tool {
             Tool::Select => "selection",
             Tool::Block => "block",
