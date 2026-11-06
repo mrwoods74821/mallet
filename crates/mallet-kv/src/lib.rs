@@ -138,18 +138,28 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Skips whitespace, `//` comments and unquoted platform conditionals such as
+    /// `[$X360]` or `[!$WIN32]`, which Mallet treats as always true.
     fn skip_trivia(&mut self) {
         let bytes = self.src.as_bytes();
         loop {
             while bytes.get(self.pos).is_some_and(u8::is_ascii_whitespace) {
                 self.pos += 1;
             }
-            if !bytes[self.pos..].starts_with(b"//") {
-                return;
+            if bytes[self.pos..].starts_with(b"//") {
+                while bytes.get(self.pos).is_some_and(|&byte| byte != b'\n') {
+                    self.pos += 1;
+                }
+                continue;
             }
-            while bytes.get(self.pos).is_some_and(|&byte| byte != b'\n') {
-                self.pos += 1;
+            if bytes.get(self.pos) == Some(&b'[') {
+                let length = unquoted_length(&bytes[self.pos..]);
+                if bytes[self.pos + length - 1] == b']' {
+                    self.pos += length;
+                    continue;
+                }
             }
+            return;
         }
     }
 
@@ -179,16 +189,21 @@ impl<'a> Lexer<'a> {
                 Token::Text(&self.src[body..body + length])
             }
             _ => {
-                let length = bytes[start..]
-                    .iter()
-                    .position(|&byte| byte.is_ascii_whitespace() || matches!(byte, b'{' | b'}' | b'"'))
-                    .unwrap_or(bytes.len() - start);
+                let length = unquoted_length(&bytes[start..]);
                 self.pos = start + length;
                 Token::Text(&self.src[start..start + length])
             }
         };
         Ok(Some((token, start)))
     }
+}
+
+/// Length of the unquoted token at the start of `bytes`.
+fn unquoted_length(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .position(|&byte| byte.is_ascii_whitespace() || matches!(byte, b'{' | b'}' | b'"'))
+        .unwrap_or(bytes.len())
 }
 
 /// Parses a KeyValues document into its top-level items.
