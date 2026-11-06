@@ -309,8 +309,31 @@ impl Camera3D {
     }
 
     /// Focal length in pixels for a viewport of this size.
-    fn focal(&self, rect: Rect) -> f64 {
+    pub fn focal(&self, rect: Rect) -> f64 {
         f64::from(rect.width()) * 0.5 / (self.fov.to_radians() * 0.5).tan()
+    }
+
+    /// How far in front of the camera a point is, along the view direction.
+    pub fn depth(&self, point: DVec3) -> f64 {
+        (point - self.position).dot(self.forward())
+    }
+
+    /// Where a world point shows in a viewport, or `None` when it is behind the near plane.
+    pub fn project(&self, rect: Rect, point: DVec3) -> Option<Pos2> {
+        let forward = self.forward();
+        let right = self.right();
+        let up = right.cross(forward);
+        let offset = point - self.position;
+        let depth = offset.dot(forward);
+        if depth < NEAR {
+            return None;
+        }
+        let focal = self.focal(rect);
+        let center = rect.center();
+        Some(Pos2::new(
+            center.x + (offset.dot(right) / depth * focal) as f32,
+            center.y - (offset.dot(up) / depth * focal) as f32,
+        ))
     }
 
     /// The world-space ray from the camera through a point of the viewport.

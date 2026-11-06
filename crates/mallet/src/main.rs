@@ -16,6 +16,7 @@ mod config;
 mod document;
 mod editor;
 mod faces;
+mod gizmo;
 mod handoff;
 mod input;
 mod keymap;

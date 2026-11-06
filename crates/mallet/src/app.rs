@@ -26,6 +26,7 @@ use crate::canvas::{Canvas, PainterCanvas};
 use crate::config::{self, Config};
 use crate::document::MapFormat;
 use crate::editor::{self, Editor, SelectMode, Tool, ViewMode, WindowShot, VIEWPORT_GAP};
+use crate::gizmo::{Change as GizmoChange, Gizmo, GizmoDrag, Part as GizmoPart};
 use crate::keymap::{Action, KeyMap};
 use crate::netgraph::{NetGraph, NetGraphExtra};
 use crate::render3d::{CameraStyle, Renderer3D};
@@ -169,6 +170,8 @@ pub struct MalletApp {
     applied_scale: Option<f32>,
     /// The Transform dialog's mode and numbers.
     transform: transform_window::TransformState,
+    /// The 3D gizmo part being dragged, if any.
+    gizmo_drag: Option<crate::gizmo::GizmoDrag>,
 }
 
 impl MalletApp {
@@ -200,6 +203,7 @@ impl MalletApp {
             properties: properties::PropertiesState::default(),
             applied_scale: None,
             transform: transform_window::TransformState::default(),
+            gizmo_drag: None,
         };
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
@@ -666,13 +670,14 @@ impl MalletApp {
             }
         }
         let looking = editor.camera.mouse_look();
+        let gizmo_hot = self.use_gizmo(slot, rect, response, editor, pointer);
         let clicked = if looking {
             ui.input(|input| input.pointer.primary_pressed())
         } else {
             response.clicked_by(PointerButton::Primary)
         };
         let aim = if looking { Some(rect.center()) } else { pointer.position };
-        if let (true, Some(aim)) = (clicked, aim) {
+        if let (true, Some(aim), false) = (clicked, aim, gizmo_hot) {
             let (origin, direction) = editor.camera.ray(rect, aim);
             match editor.tool {
                 Tool::Select => {
@@ -731,6 +736,7 @@ impl MalletApp {
                 };
                 canvas.label(rect.left_top() + egui::vec2(6.0, 4.0), label, color);
                 Camera3D::draw_crosshair(&painter, rect);
+                self.draw_gizmo(&painter, slot, rect, response, editor);
                 if editor.config.view.net_graph && style == CameraStyle::Textured {
                     let extra = editor.gpu.as_ref().map(|gpu| NetGraphExtra {
                         stats: gpu.stats,
@@ -750,6 +756,125 @@ impl MalletApp {
         if moving {
             ctx.request_repaint();
         }
+    }
+
+    /// The gizmo for the selection in a 3D view, while the selection tool has one.
+    /// During a drag it follows the previewed move.
+    fn gizmo_for(&self, slot: usize, rect: Rect, editor: &Editor) -> Option<Gizmo> {
+        let shown = editor.tool == Tool::Select
+            && editor.config.transform.gizmo
+            && !editor.selection.is_empty()
+            && !editor.camera.mouse_look();
+        if !shown {
+            return None;
+        }
+        if let Some(drag) = self.gizmo_drag.filter(|drag| drag.slot == slot) {
+            let center = editor
+                .overlay
+                .transform
+                .map_or(drag.gizmo.center, |remap| remap.apply(drag.gizmo.center));
+            return Gizmo::new(&editor.camera, rect, center, drag.gizmo.mode);
+        }
+        Gizmo::new(&editor.camera, rect, editor.pivot(), editor.config.transform.gizmo_mode)
+    }
+
+    /// Runs the gizmo for one frame of a 3D view: starts, follows and finishes drags,
+    /// and switches its mode when its centre is clicked. Returns whether the mouse is on
+    /// the gizmo, so a click there does not also select.
+    fn use_gizmo(
+        &mut self,
+        slot: usize,
+        rect: Rect,
+        response: &Response,
+        editor: &mut Editor,
+        pointer: &PointerState,
+    ) -> bool {
+        let Some(gizmo) = self.gizmo_for(slot, rect, editor) else {
+            if self.gizmo_drag.is_some_and(|drag| drag.slot == slot) {
+                self.gizmo_drag = None;
+                editor.overlay.transform = None;
+            }
+            return false;
+        };
+        let camera = &editor.camera;
+        let hovered = pointer
+            .position
+            .filter(|_| response.hovered())
+            .and_then(|position| gizmo.hit(camera, rect, position));
+        if response.drag_started_by(PointerButton::Primary) {
+            let pressed = pointer
+                .press_origin
+                .and_then(|origin| gizmo.hit(camera, rect, origin).map(|part| (part, origin)));
+            if let Some((part, origin)) = pressed {
+                let bounds = editor.scene.selection_bounds();
+                self.gizmo_drag = GizmoDrag::begin(slot, gizmo, part, camera, rect, origin, bounds);
+            }
+        }
+        let Some(drag) = self.gizmo_drag.filter(|drag| drag.slot == slot) else {
+            if response.clicked_by(PointerButton::Primary) && hovered == Some(GizmoPart::Center) {
+                editor.config.transform.gizmo_mode = editor.config.transform.gizmo_mode.next();
+                editor.message = format!("Gizmo: {}", editor.config.transform.gizmo_mode.label());
+                editor.save_config();
+            }
+            if hovered.is_some() {
+                response.ctx.set_cursor_icon(egui::CursorIcon::Grab);
+            }
+            return hovered.is_some();
+        };
+        response.ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        let step = editor.config.transform.rotation_snap;
+        let angle_step = (pointer.modifiers.shift && step > 0.0).then_some(step);
+        let change = pointer
+            .position
+            .and_then(|position| drag.change(&editor.camera, rect, position, editor.grid, angle_step));
+        if let Some(change) = change {
+            editor.overlay.transform = Some(Remap {
+                matrix: change.matrix(),
+            });
+            if let GizmoChange::Rotate(matrix) = change {
+                let degrees = mallet_vmf::transform::matrix_angles(mallet_vmf::transform::linear_part(&matrix));
+                editor.message = format!("Rotating {}; hold Shift to snap", mallet_vmf::format_vec3(degrees));
+            }
+        }
+        if response.drag_stopped() {
+            self.gizmo_drag = None;
+            editor.overlay.transform = None;
+            let center = drag.gizmo.center;
+            let result = match change {
+                Some(GizmoChange::Move(offset)) if offset != DVec3::ZERO => {
+                    if pointer.modifiers.shift {
+                        editor.clone_selection(offset)
+                    } else {
+                        editor.move_selection(offset)
+                    }
+                }
+                Some(GizmoChange::Rotate(matrix)) if matrix != glam::DMat4::IDENTITY => editor
+                    .transform_selection(matrix, true, center)
+                    .map(|()| editor.message = "Rotated selection".to_owned()),
+                Some(GizmoChange::Scale(matrix)) if matrix != glam::DMat4::IDENTITY => editor
+                    .transform_selection(matrix, false, center)
+                    .map(|()| editor.message = "Scaled selection".to_owned()),
+                _ => Ok(()),
+            };
+            if let Err(error) = result {
+                editor.message = error;
+            }
+        }
+        true
+    }
+
+    /// Draws the gizmo over a 3D view, highlighting the part under the mouse or dragged.
+    fn draw_gizmo(&self, painter: &egui::Painter, slot: usize, rect: Rect, response: &Response, editor: &Editor) {
+        let Some(gizmo) = self.gizmo_for(slot, rect, editor) else {
+            return;
+        };
+        let hot = match self.gizmo_drag.filter(|drag| drag.slot == slot) {
+            Some(drag) => Some(drag.part),
+            None => response
+                .hover_pos()
+                .and_then(|position| gizmo.hit(&editor.camera, rect, position)),
+        };
+        gizmo.draw(painter, &editor.camera, rect, hot);
     }
 
     /// Handles and draws a 2D viewport slot showing one of the editor's three 2D views.
