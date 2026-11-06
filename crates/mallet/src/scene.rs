@@ -270,9 +270,10 @@ impl Scene {
 }
 
 /// Distance along the ray to where it enters a convex volume, or `None` on a miss.
-/// A ray starting inside the volume hits at distance zero.
+/// A ray starting inside the volume misses it, so clicking from inside a brush picks
+/// what is beyond it, as faces seen from inside are not drawn either.
 fn ray_convex(origin: DVec3, direction: DVec3, planes: &[Plane]) -> Option<f64> {
-    if planes.is_empty() {
+    if planes.is_empty() || planes.iter().all(|plane| plane.distance(origin) <= 0.0) {
         return None;
     }
     let mut enter: f64 = 0.0;
