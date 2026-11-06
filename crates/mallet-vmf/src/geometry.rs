@@ -95,6 +95,22 @@ impl Bounds {
     pub fn size(&self) -> DVec3 {
         self.max - self.min
     }
+
+    /// Maps a point from this box onto another, scaling each axis so the corners line up.
+    /// Along an axis where this box is flat, the point is only shifted.
+    pub fn remap(&self, to: &Bounds, point: DVec3) -> DVec3 {
+        let from_size = self.size();
+        let to_size = to.size();
+        let mut mapped = DVec3::ZERO;
+        for axis in 0..3 {
+            mapped[axis] = if from_size[axis] > 0.0 {
+                to.min[axis] + (point[axis] - self.min[axis]) * to_size[axis] / from_size[axis]
+            } else {
+                point[axis] + to.min[axis] - self.min[axis]
+            };
+        }
+        mapped
+    }
 }
 
 /// One polygonal face of a brush.

@@ -9,6 +9,7 @@ use std::fmt;
 
 use glam::DVec3;
 
+use crate::geometry::Bounds;
 use crate::{Entity, EntityItem, Solid, TopLevel, Vmf};
 
 /// One reversible change to a map.
@@ -66,6 +67,19 @@ pub enum Edit {
         /// Distance to move.
         offset: DVec3,
     },
+    /// Stretches brushes so that the box `from` maps onto the box `to`, as when dragging a
+    /// selection handle. Undoing restores the original brushes exactly.
+    Rescale {
+        /// Brush ids.
+        solids: Vec<u32>,
+        /// The box before resizing, normally the selection's bounds.
+        from: Bounds,
+        /// The box after resizing.
+        to: Bounds,
+    },
+    /// Replaces brushes with new versions that have the same ids. This is how resizes are
+    /// undone without rounding errors.
+    ReplaceSolids(Vec<Solid>),
     /// Several edits applied in order and undone in reverse as a single step.
     Batch(Vec<Edit>),
 }
@@ -88,6 +102,8 @@ pub enum EditError {
     CannotRemoveWorld,
     /// A brush or entity being added has no numeric id, so it could not be undone.
     MissingId,
+    /// A resize would flatten or turn a box inside out.
+    InvalidResize,
 }
 
 impl fmt::Display for EditError {
@@ -98,6 +114,7 @@ impl fmt::Display for EditError {
             Self::NoSuchKey { entity, key } => write!(f, "entity {entity} has no key \"{key}\""),
             Self::CannotRemoveWorld => write!(f, "the world cannot be removed"),
             Self::MissingId => write!(f, "the added brush or entity has no id"),
+            Self::InvalidResize => write!(f, "the new size must be larger than zero along every axis the selection spans"),
         }
     }
 }
@@ -203,6 +220,39 @@ impl Edit {
                     solids: solids.clone(),
                     offset: -*offset,
                 })
+            }
+            Self::Rescale { solids, from, to } => {
+                let flattened = (0..3).any(|axis| from.size()[axis] > 0.0 && to.size()[axis] <= 0.0);
+                if flattened || from.is_empty() || to.is_empty() {
+                    return Err(EditError::InvalidResize);
+                }
+                let originals = solids
+                    .iter()
+                    .map(|id| solid_mut(vmf, *id).map(|solid| solid.clone()).ok_or(EditError::NoSuchSolid(*id)))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let (from, to) = (*from, *to);
+                for id in solids {
+                    if let Some(solid) = solid_mut(vmf, *id) {
+                        solid.transform(&|point| from.remap(&to, point));
+                    }
+                }
+                Ok(Self::ReplaceSolids(originals))
+            }
+            Self::ReplaceSolids(replacements) => {
+                let ids = replacements
+                    .iter()
+                    .map(|solid| solid.id().ok_or(EditError::MissingId))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(missing) = ids.iter().find(|id| find_solid(vmf, **id).is_none()) {
+                    return Err(EditError::NoSuchSolid(*missing));
+                }
+                let mut previous = Vec::with_capacity(replacements.len());
+                for (id, replacement) in ids.iter().zip(replacements) {
+                    if let Some(solid) = solid_mut(vmf, *id) {
+                        previous.push(std::mem::replace(solid, replacement.clone()));
+                    }
+                }
+                Ok(Self::ReplaceSolids(previous))
             }
             Self::Batch(edits) => {
                 let mut inverses = Vec::with_capacity(edits.len());

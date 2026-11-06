@@ -485,6 +485,17 @@ impl Solid {
         }
     }
 
+    /// Moves every plane point, and each displacement's start position, through `map`.
+    ///
+    /// Texture axes are left alone, so textures keep their world alignment and size, as in
+    /// Hammer with texture scale lock off. `map` must preserve orientation (no mirroring),
+    /// or face normals would point into the brush.
+    pub fn transform(&mut self, map: &dyn Fn(DVec3) -> DVec3) {
+        for side in self.sides_mut() {
+            side.transform(map);
+        }
+    }
+
     /// Gives the solid and its faces fresh ids, as needed for a copy.
     pub fn renumber(&mut self, ids: &mut IdAllocator) {
         self.set_id(ids.object());
@@ -665,13 +676,19 @@ impl Side {
     /// along that axis in texels, so the texture stays fixed to the face. A displacement's
     /// start position moves with it.
     pub fn translate(&mut self, offset: DVec3) {
-        for point in &mut self.plane {
-            *point += offset;
-        }
         for axis in [&mut self.uaxis, &mut self.vaxis] {
             if axis.scale != 0.0 {
                 axis.offset -= offset.dot(axis.axis) / axis.scale;
             }
+        }
+        self.transform(&|point| point + offset);
+    }
+
+    /// Moves the plane points and a displacement's start position through `map`, leaving
+    /// texture axes alone.
+    pub fn transform(&mut self, map: &dyn Fn(DVec3) -> DVec3) {
+        for point in &mut self.plane {
+            *point = map(*point);
         }
         let dispinfo = self.extra.iter_mut().find_map(|item| match item {
             Item::Block(block) if block.name.eq_ignore_ascii_case("dispinfo") => Some(block),
@@ -684,7 +701,7 @@ impl Side {
             if let Item::Pair(pair) = item {
                 if pair.key.eq_ignore_ascii_case("startposition") {
                     if let Some(start) = parse_vec3(&pair.value) {
-                        let moved = start + offset;
+                        let moved = map(start);
                         pair.value = format!("[{} {} {}]", moved.x, moved.y, moved.z);
                     }
                 }
