@@ -9,6 +9,7 @@ mod app;
 mod canvas;
 mod document;
 mod editor;
+mod input;
 mod keymap;
 mod mcp;
 mod scene;

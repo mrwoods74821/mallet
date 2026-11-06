@@ -4,7 +4,7 @@
 //! calls therefore never wait for a frame, and keep working while the window is covered
 //! or minimized.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -17,6 +17,7 @@ use mallet_vmf::{format_vec3, Entity, IdAllocator, Solid, Vmf};
 
 use crate::canvas::PixmapCanvas;
 use crate::document::Document;
+use crate::input::InputFrame;
 use crate::scene::{Overlay, Owner, Scene};
 use crate::view2d::{Axis2D, View2D};
 use crate::view3d::Camera3D;
@@ -95,6 +96,10 @@ pub struct Editor {
     pub overlay: Overlay,
     /// Material applied to new brushes.
     pub material: String,
+    /// Synthetic input waiting to be fed to the window, one entry per frame.
+    pub input_queue: VecDeque<InputFrame>,
+    /// Frames the window has finished, used to wait for synthetic input to take effect.
+    pub frames_drawn: u64,
     /// The last block created; new blocks reuse its depth.
     last_block: Bounds,
     /// Camera, top, front and side viewport rectangles from the latest window layout.
@@ -119,6 +124,8 @@ impl Default for Editor {
             selection: BTreeSet::new(),
             overlay: Overlay::default(),
             material: DEFAULT_MATERIAL.to_owned(),
+            input_queue: VecDeque::new(),
+            frames_drawn: 0,
             last_block: DEFAULT_BLOCK,
             viewport_rects: quad_rects(Rect::from_min_size(Pos2::ZERO, DEFAULT_AREA), VIEWPORT_GAP),
             refit_on_layout: false,
@@ -445,6 +452,18 @@ impl Editor {
             self.fit_2d();
             self.fit_3d();
         }
+    }
+
+    /// Converts a viewport position to a window position. In the 2D views `point` is in
+    /// world units on the view's two axes; in the camera view it is pixels from the
+    /// viewport's top-left corner.
+    pub fn viewport_point(&self, target: ShotTarget, point: DVec2) -> Result<Pos2, String> {
+        let index = target.index().ok_or("pick one viewport: camera, top, front or side")?;
+        let rect = self.viewport_rects[index];
+        Ok(match index {
+            0 => rect.min + Vec2::new(point.x as f32, point.y as f32),
+            _ => self.views[index - 1].to_screen(rect, point),
+        })
     }
 
     /// Renders viewports offscreen at their on-screen size and encodes them as PNG.

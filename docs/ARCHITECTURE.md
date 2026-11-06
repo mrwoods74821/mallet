@@ -89,6 +89,12 @@ Tools:
 | `set_grid`, `center_views` | Grid size and framing |
 | `set_camera`, `set_view_2d` | Aim the 3D camera, pan and zoom the 2D views |
 | `screenshot` | PNG of one or all viewports, rendered offscreen |
+| `send_input` | Key presses, clicks and drags fed into the window as if a user made them |
+
+`send_input` queues synthetic egui events that `MalletApp::raw_input_hook` feeds into the
+window one frame at a time, so they take the same path as real input. The tool returns
+once the window has handled them. Unlike the other tools it needs the window to be drawing,
+so it fails if the window stays minimized. Use it to test tools and shortcuts end to end.
 
 The repository's `.mcp.json` registers the server for MCP clients such as Claude Code.
 Mallet has to be running for the tools to connect.

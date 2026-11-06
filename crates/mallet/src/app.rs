@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Id, Modifiers, PointerButton, Pos2, Rect, Response, Sense, ViewportCommand};
 use glam::{DVec2, DVec3};
@@ -16,6 +18,8 @@ use crate::{mcp, tools};
 const DEFAULT_MCP_PORT: u16 = 7414;
 /// How close, in pixels, a 2D click has to be to a brush's outline to pick it.
 const PICK_TOLERANCE_PIXELS: f64 = 4.0;
+/// How long `send_input` waits for the window to handle its input.
+const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
 const KEY_ACTIONS: [Action; 15] = [
@@ -111,6 +115,11 @@ impl MalletApp {
         let handler = move |name: &str, arguments: &serde_json::Value| {
             let result = tools::run(&mut editor::lock(&shared), name, arguments);
             ctx.request_repaint();
+            if name == "send_input" && !result.is_error {
+                if let Err(message) = wait_for_input(&shared, &ctx) {
+                    return mcp::ToolResult::error(message);
+                }
+            }
             result
         };
         match mcp::start(port, tools::definitions(), handler) {
@@ -383,7 +392,39 @@ impl eframe::App for MalletApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(egui::Color32::from_gray(30)))
             .show(ctx, |ui| self.viewports(ui, &mut editor));
+        editor.frames_drawn += 1;
     }
+
+    /// Feeds one frame of queued synthetic input from the `send_input` tool.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let mut editor = editor::lock(&self.editor);
+        if let Some(frame) = editor.input_queue.pop_front() {
+            raw_input.modifiers = frame.modifiers;
+            raw_input.events.extend(frame.events);
+            ctx.request_repaint();
+        }
+    }
+}
+
+/// Waits until the window has handled all queued synthetic input, including the frame
+/// that consumed the last of it.
+fn wait_for_input(shared: &Mutex<Editor>, ctx: &egui::Context) -> Result<(), String> {
+    let deadline = Instant::now() + INPUT_TIMEOUT;
+    let mut drained_at = None;
+    while Instant::now() < deadline {
+        {
+            let editor = editor::lock(shared);
+            match drained_at {
+                None if editor.input_queue.is_empty() => drained_at = Some(editor.frames_drawn),
+                Some(frame) if editor.frames_drawn > frame => return Ok(()),
+                _ => {}
+            }
+        }
+        ctx.request_repaint();
+        thread::sleep(Duration::from_millis(5));
+    }
+    editor::lock(shared).input_queue.clear();
+    Err("the window did not handle the input in time; it may be minimized".to_owned())
 }
 
 /// Opens the map given on the command line, or starts a new map like Hammer when there is

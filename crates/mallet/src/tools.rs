@@ -7,7 +7,10 @@ use mallet_vmf::edit::Edit;
 use mallet_vmf::{Entity, EntityItem};
 use serde_json::{json, Value};
 
+use eframe::egui::Pos2;
+
 use crate::editor::{Editor, SelectMode, ShotTarget, Tool, MAX_GRID, MIN_GRID};
+use crate::input::{self, InputFrame};
 use crate::mcp::ToolResult;
 use crate::scene::Owner;
 
@@ -124,6 +127,33 @@ pub fn definitions() -> Value {
                 "material": { "type": "string", "description": "Material for every face; default is the editor's current material." }
             }),
             &["min", "max"],
+        ),
+        tool(
+            "send_input",
+            "Feed keyboard and mouse input to the editor window, frame by frame, as if a user did it, then \
+             wait until it has been handled. Use it to test tools and shortcuts. The window must not be \
+             minimized. Each action is one of: {\"key\": \"Enter\"} using egui key names such as A, Enter, \
+             Escape, Delete, OpenBracket; {\"click\": [x, y]}; {\"drag\": [[x1, y1], [x2, y2]]}. Clicks and \
+             drags need \"viewport\" (camera, top, front or side); in 2D views coordinates are world units on \
+             the view's axes, in the camera view they are pixels from its top-left corner. Any action may add \
+             \"modifiers\" (ctrl, shift, alt) and clicks and drags may add \"button\" (primary, secondary, middle).",
+            json!({
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "key": { "type": "string" },
+                            "click": vec2,
+                            "drag": { "type": "array", "items": vec2, "minItems": 2, "maxItems": 2 },
+                            "viewport": { "type": "string", "enum": ["camera", "top", "front", "side"] },
+                            "modifiers": { "type": "array", "items": { "type": "string", "enum": ["ctrl", "shift", "alt"] } },
+                            "button": { "type": "string", "enum": ["primary", "secondary", "middle"] }
+                        }
+                    }
+                }
+            }),
+            &["actions"],
         ),
         tool("undo", "Undo the last edit, whether it was made by hand or by a tool.", json!({}), &[]),
         tool("redo", "Redo the last undone edit.", json!({}), &[]),
@@ -274,6 +304,19 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
             }
             Ok(ToolResult::json(&json!({ "solid": result? })))
         }
+        "send_input" => {
+            let actions = args
+                .get("actions")
+                .and_then(Value::as_array)
+                .ok_or("\"actions\" must be an array")?;
+            let mut frames = Vec::new();
+            for (index, action) in actions.iter().enumerate() {
+                frames.extend(input_action(editor, action).map_err(|error| format!("action {index}: {error}"))?);
+            }
+            let count = frames.len();
+            editor.input_queue.extend(frames);
+            Ok(ToolResult::text(format!("Delivered {count} frames of input.")))
+        }
         "undo" | "redo" => {
             let changed = editor.step_history(name == "redo")?;
             let text = match (changed, name) {
@@ -359,6 +402,47 @@ fn status_json(editor: &Editor) -> Value {
         "can_undo": history.is_some_and(|history| history.can_undo()),
         "can_redo": history.is_some_and(|history| history.can_redo()),
     })
+}
+
+/// Turns one `send_input` action into the frames that perform it.
+fn input_action(editor: &Editor, action: &Value) -> Result<Vec<InputFrame>, String> {
+    let names: Vec<&str> = match action.get("modifiers") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_str().ok_or("\"modifiers\" must be strings"))
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err("\"modifiers\" must be an array".to_owned()),
+    };
+    let modifiers = input::parse_modifiers(&names)?;
+    if let Some(key) = optional_string(action, "key")? {
+        return input::key_press(key, modifiers);
+    }
+    let button = input::parse_button(optional_string(action, "button")?.unwrap_or("primary"))?;
+    let viewport = match string_arg(action, "viewport")? {
+        "camera" => ShotTarget::Camera,
+        "top" => ShotTarget::Top,
+        "front" => ShotTarget::Front,
+        "side" => ShotTarget::Side,
+        other => return Err(format!("unknown viewport \"{other}\"")),
+    };
+    if let Some(at) = optional_numbers::<2>(action, "click")? {
+        let at = editor.viewport_point(viewport, DVec2::from_array(at))?;
+        return Ok(input::click(at, button, modifiers));
+    }
+    let path = match action.get("drag").and_then(Value::as_array) {
+        Some(points) if points.len() == 2 => points,
+        _ => return Err("an action needs \"key\", \"click\" or \"drag\" with two points".to_owned()),
+    };
+    let point = |value: &Value| -> Result<Pos2, String> {
+        let pair = match value.as_array().map(Vec::as_slice) {
+            Some([x, y]) => x.as_f64().zip(y.as_f64()),
+            _ => None,
+        };
+        let (x, y) = pair.ok_or("drag points must be [x, y]")?;
+        editor.viewport_point(viewport, DVec2::new(x, y))
+    };
+    Ok(input::drag(point(&path[0])?, point(&path[1])?, button, modifiers))
 }
 
 fn selection_json(editor: &Editor) -> Value {
