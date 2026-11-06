@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/mallet-kv"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+mallet-kv = { path = "crates/mallet-kv" }
+mallet-vmf = { path = "crates/mallet-vmf" }
+glam = "0.29"
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu"] }
+rfd = "0.15"
+
+[profile.dev.package."*"]
+opt-level = 2

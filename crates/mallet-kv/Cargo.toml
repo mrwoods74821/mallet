@@ -1,0 +1,8 @@
+[package]
+name = "mallet-kv"
+description = "Reader and writer for Valve KeyValues text as used by VMF files."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
