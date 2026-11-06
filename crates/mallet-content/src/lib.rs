@@ -12,4 +12,4 @@ pub mod vtf;
 
 pub use error::ContentError;
 pub use filesystem::GameFs;
-pub use material::{Materials, Texture};
+pub use material::{parallel_map, Materials, Texture};

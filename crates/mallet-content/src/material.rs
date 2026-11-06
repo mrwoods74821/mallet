@@ -48,6 +48,20 @@ impl Materials {
         texture
     }
 
+    /// Loads several materials' textures at once, spread over every CPU core, and returns
+    /// them in the same order. Results are cached like [`Materials::texture`].
+    pub fn textures(&mut self, materials: &[&str]) -> Vec<Option<Texture>> {
+        let keys: Vec<String> = materials.iter().map(|material| material_key(material)).collect();
+        let mut missing: Vec<&String> = keys.iter().filter(|key| !self.cache.contains_key(*key)).collect();
+        missing.sort();
+        missing.dedup();
+        let loaded = parallel_map(&missing, |key| self.load(key));
+        for (key, texture) in missing.into_iter().zip(loaded) {
+            self.cache.insert(key.clone(), texture);
+        }
+        keys.iter().map(|key| self.cache.get(key).cloned().flatten()).collect()
+    }
+
     fn load(&self, key: &str) -> Option<Texture> {
         let texture_name = self.texture_name(key, 0)?;
         let data = self.filesystem.read(&format!("materials/{texture_name}.vtf"))?;
@@ -80,6 +94,22 @@ impl Materials {
         }
         editor_texture(root)
     }
+}
+
+/// Applies `work` to every item using one thread per CPU core, keeping the input order.
+pub fn parallel_map<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(4, usize::from);
+    let chunk = items.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .chunks(chunk)
+            .map(|part| scope.spawn(|| part.iter().map(&work).collect::<Vec<R>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("texture worker panicked"))
+            .collect()
+    })
 }
 
 fn editor_texture(block: &Block) -> Option<String> {
