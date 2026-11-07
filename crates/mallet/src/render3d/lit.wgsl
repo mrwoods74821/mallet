@@ -74,6 +74,8 @@ struct Light {
     shadow: vec4<f32>,
     // x: normal offset per unit of distance; y: bounce share; z: projection matrix.
     extra: vec4<f32>,
+    // x: surfaces it lights (0 all, 1 brushes only, 2 models only).
+    routing: vec4<f32>,
 };
 
 const FLAG_SELF_ILLUM: u32 = 1u;
@@ -127,6 +129,8 @@ struct LitOut {
     @location(3) alpha: vec2<f32>,
     @location(4) world: vec3<f32>,
     @location(5) normal: vec3<f32>,
+    // 1 for models, 0 for brushes.
+    @location(6) model: f32,
 };
 
 @vertex
@@ -139,6 +143,7 @@ fn vs_lit_face(input: FaceIn) -> LitOut {
     out.alpha = input.alpha;
     out.world = input.position;
     out.normal = input.normal;
+    out.model = 0.0;
     return out;
 }
 
@@ -154,6 +159,7 @@ fn vs_lit_model(input: ModelIn) -> LitOut {
     out.alpha = material.alpha.xy;
     out.world = world.xyz;
     out.normal = (model * vec4<f32>(input.normal, 0.0)).xyz;
+    out.model = 1.0;
     return out;
 }
 
@@ -282,7 +288,13 @@ fn sky_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
     return seen * frame.sky_shadow.y;
 }
 
-fn shine(light: Light, world: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+// A dynamic light lights brushes the way the engine's dlights do, as strongly as its
+// distance gives on every surface facing it, and models with the usual angle.
+fn shine(light: Light, world: vec3<f32>, normal: vec3<f32>, model: bool) -> vec3<f32> {
+    let receivers = u32(light.routing.x);
+    if ((receivers == 1u && model) || (receivers == 2u && !model)) {
+        return vec3<f32>(0.0);
+    }
     let kind = u32(light.position.w);
     if (kind == 2u) {
         let facing = dot(normal, -light.direction.xyz);
@@ -318,7 +330,10 @@ fn shine(light: Light, world: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     if (all(strength <= vec3<f32>(0.0))) {
         return vec3<f32>(0.0);
     }
-    let facing = max(dot(normal, toward), 0.0);
+    var facing = max(dot(normal, toward), 0.0);
+    if (u32(light.fade.w) == 2u && !model) {
+        facing = select(0.0, 1.0, facing > 0.0);
+    }
     let bounce = frame.fill.w * light.extra.y;
     if (facing <= 0.0 && bounce <= 0.0) {
         return vec3<f32>(0.0);
@@ -334,18 +349,18 @@ fn cell_index(world: vec3<f32>) -> u32 {
     return u32(cell.x + size.x * (cell.y + size.y * cell.z));
 }
 
-fn gather(world: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+fn gather(world: vec3<f32>, normal: vec3<f32>, model: bool) -> vec3<f32> {
     var total = frame.fill.rgb;
     if (any(frame.sky_light.rgb > vec3<f32>(0.0))) {
         total = total + frame.sky_light.rgb * sky_visibility(world, normal);
     }
     let everywhere = frame.grid_size.w;
     for (var index = 0u; index < everywhere; index = index + 1u) {
-        total = total + shine(lights[index], world, normal);
+        total = total + shine(lights[index], world, normal, model);
     }
     let range = cells[cell_index(world)];
     for (var index = 0u; index < range.y; index = index + 1u) {
-        total = total + shine(lights[indices[range.x + index]], world, normal);
+        total = total + shine(lights[indices[range.x + index]], world, normal, model);
     }
     return total;
 }
@@ -457,7 +472,7 @@ fn fs_lit(input: LitOut, @builtin(front_facing) front: bool) -> @location(0) vec
             if (!front) {
                 normal = -normal;
             }
-            color = base * gather(input.world, normal);
+            color = base * gather(input.world, normal, input.model > 0.5);
             if ((flags & FLAG_SELF_ILLUM) != 0u && (frame.options.x & 2u) != 0u) {
                 color = mix(color, base * material.self_illum.rgb, texel.a);
             }

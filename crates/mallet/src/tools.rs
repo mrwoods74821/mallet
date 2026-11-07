@@ -1611,6 +1611,7 @@ fn lights_json(editor: &Editor, args: &Value) -> Result<Value, String> {
                 "starts_dark": light.starts_dark,
                 "casts_shadows": light.shadows,
                 "dynamic": light.dynamic,
+                "lights": format!("{:?}", light.receivers).to_lowercase(),
                 "projection": light.projection.as_ref().map(|projection| json!({
                     "texture": projection.texture,
                     "fov": projection.fov,

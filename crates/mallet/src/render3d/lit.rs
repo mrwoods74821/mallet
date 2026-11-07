@@ -22,7 +22,9 @@ use eframe::wgpu::{self, util::DeviceExt};
 use glam::{DVec3, Mat4, Vec3, Vec4};
 use mallet_content::{AlphaMode, MaterialLoader, Surface};
 use mallet_vmf::geometry::Bounds;
-use mallet_vmf::light::{pattern_brightness, texture_light_scale, Falloff, Light, LightKind, MAX_REACH, QUADRATIC};
+use mallet_vmf::light::{
+    pattern_brightness, texture_light_scale, Falloff, Light, LightKind, Receivers, MAX_REACH, QUADRATIC,
+};
 
 use super::{
     box_visible, frustum_planes, material_key, pipeline, signature, Batches, Depth, FaceMesh, GpuTexture,
@@ -108,6 +110,7 @@ struct GpuLight {
     fade: [f32; 4],
     shadow: [f32; 4],
     extra: [f32; 4],
+    routing: [f32; 4],
 }
 
 #[repr(C)]
@@ -1748,6 +1751,7 @@ fn surface_lights(scene: &Scene, renderer: &Renderer3D, table: &TextureLights) -
                 dynamic: false,
                 projection: None,
                 spread: 0.0,
+                receivers: Receivers::All,
             });
         }
     }
@@ -2014,6 +2018,12 @@ fn pack(light: &PreviewLight, brightness: f64) -> GpuLight {
     let origin = source.origin.as_vec3();
     let direction = source.direction.as_vec3().normalize_or(Vec3::NEG_Z);
     let color = (light.color * brightness).as_vec3();
+    let receivers = match source.receivers {
+        Receivers::All => 0.0,
+        Receivers::World => 1.0,
+        Receivers::Models => 2.0,
+    };
+    let bounces = source.kind != LightKind::Directional && !source.dynamic;
     GpuLight {
         position: origin.extend(kind).to_array(),
         direction: direction.extend(outer).to_array(),
@@ -2021,7 +2031,8 @@ fn pack(light: &PreviewLight, brightness: f64) -> GpuLight {
         falloff,
         fade,
         shadow: [-1.0, 0.0, -1.0, focus],
-        extra: [0.0, if kind == 2.0 { 0.0 } else { 1.0 }, -1.0, 0.0],
+        extra: [0.0, if bounces { 1.0 } else { 0.0 }, -1.0, 0.0],
+        routing: [receivers, 0.0, 0.0, 0.0],
     }
 }
 

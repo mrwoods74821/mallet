@@ -304,9 +304,15 @@ light, fog, sky, glows and beams:
   does, with `_hardfalloff` and `_distance`. Spotlights fade between their cones raised to
   the focus. Directions use SetupLightNormalFromProps (`pitch`, `angle`, `angles`, or the
   `target`), and projected textures and beams the engine's AngleVectors.
-- Dynamic lights fade out over their radius, projected textures use the flashlight
-  shader's `100 / d` with its fade near the far plane and its HDR and LDR scale, and
-  appearances are the engine's light style patterns at ten letters a second.
+- light_dynamic is split the way C_DynamicLight splits it: its colour bytes times two to
+  the `brightness`, without a gamma curve. Without a cone it is one light for brushes and
+  models out to `distance`. With a cone, models get the cone and brushes get a round
+  light of `spotlight_radius` where a trace along its middle meets a world brush,
+  dimmed by `(1 - fraction)²`. `Receivers` says which surfaces a light reaches; brushes
+  take dynamic lights at full strength whatever angle they face them at, as dlights
+  do. Projected textures use the flashlight shader's `100 / d` with its fade near the
+  far plane and its HDR and LDR scale. Appearances are the engine's light style
+  patterns at ten letters a second.
 - `parse_lights_rad` reads `lights.rad` with its `ldr:` and `hdr:` lines;
   `texture_light_scale` gives a face VRAD's brightness of one tile per texture repeat.
 

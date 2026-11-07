@@ -140,7 +140,7 @@ hard falloff, `_distance`, spotlight cones and focus, `pitch`, `angles` and aim 
 | `light`, `light_spot` | Point and spot lights with VRAD's falloff; they cast shadows |
 | `light_environment` | Sunlight that shines in through sky faces, with shadows, and sky light that reaches what can see the sky |
 | `light_directional` | Light from one direction with shadows, like the sun without sky light |
-| `light_dynamic` | Lights out to its maximum distance, in its cone when it has one, without shadows as in the game |
+| `light_dynamic` | Without a cone, lights everything out to its maximum distance. With one, lights models in the cone and brushes in a round spot where its middle lands, as the game does. No shadows, as in the game |
 | `env_projectedtexture` | Projects its texture through its field of view out to its far distance, with shadows |
 | Texture lights | Faces whose material `lights.rad` lists give off light, split into patches like VRAD's, and glow; the map's own `.rad` file beside it counts too |
 | `$selfillum` materials | Glow where their texture's alpha says |

@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use glam::DVec3;
 
+use crate::geometry::{faces_bounds, solid_faces, Bounds, Plane};
 use crate::{parse_numbers, parse_vec3, Entity, Vmf};
 
 /// Where a lighting class belongs in the catalogue.
@@ -156,7 +157,7 @@ pub const CATALOGUE: &[LightingClass] = &[
         classname: "light_dynamic",
         group: LightingGroup::Dynamic,
         description: "A dynamic light the engine draws as the game runs; it can change, move and be switched.",
-        preview: "Lights out to its maximum distance, in its cone when it has one; no shadows, as in the game.",
+        preview: "Without a cone, lights everything out to its maximum distance. With one, lights models in the                   cone and brushes in a round spot where its middle lands, as the game does. No shadows.",
         defaults: &[
             ("_light", "255 255 255 200"),
             ("brightness", "0"),
@@ -399,6 +400,20 @@ pub enum LightKind {
     Surface,
 }
 
+/// Which surfaces a light reaches. The engine lights brushes and models separately, so a
+/// dynamic light can reach just one of them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Receivers {
+    /// Brushes, displacements and models.
+    #[default]
+    All,
+    /// Brushes and displacements only: a dlight, which lights every surface facing it at
+    /// the strength its distance gives, whatever angle it is seen at.
+    World,
+    /// Models only: an elight, or a projected texture that does not light the world.
+    Models,
+}
+
 /// How a light dims with distance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Falloff {
@@ -638,6 +653,7 @@ pub struct Light {
     pub projection: Option<Projection>,
     /// The sun's size in degrees, which softens its shadows (`SunSpreadAngle`).
     pub spread: f64,
+    pub receivers: Receivers,
 }
 
 impl Light {
@@ -788,6 +804,7 @@ impl MapLighting {
             lighting.sky.name = world.get("skyname").unwrap_or_default().trim().to_owned();
         }
         let mut sun_glow = None;
+        let mut world_brushes: Option<WorldBrushes> = None;
         for entity in vmf.entities() {
             let classname = entity.classname().to_ascii_lowercase();
             let Some(origin) = entity.origin() else {
@@ -810,6 +827,7 @@ impl MapLighting {
                 dynamic: false,
                 projection: None,
                 spread: 0.0,
+                receivers: Receivers::All,
             };
             match classname.as_str() {
                 "light" | "light_spot" => {
@@ -855,31 +873,67 @@ impl MapLighting {
                     }
                 }
                 "light_dynamic" => {
-                    let rgb = entity.get("_light").and_then(rgb_color).unwrap_or(DVec3::ONE);
-                    let exponent = number(entity, "brightness").unwrap_or(0.0).clamp(-16.0, 16.0);
+                    let rgb = entity.get("_light").and_then(byte_color).unwrap_or(DVec3::ONE);
+                    let exponent = number(entity, "brightness").unwrap_or(0.0).trunc().clamp(-127.0, 127.0);
                     let color = rgb * 2f64.powf(exponent);
+                    let radius = number(entity, "distance").unwrap_or(120.0).max(1.0);
                     let outer = number(entity, "_cone").unwrap_or(0.0);
-                    let cone = (outer > 0.0 && outer < 90.0)
-                        .then(|| Cone::from_degrees(number(entity, "_inner_cone").unwrap_or(0.0), outer, 1.0));
-                    let direction = aim(entity, origin).unwrap_or_else(|| vrad_direction(entity));
-                    lighting.lights.push(Light {
+                    let direction = aim(entity, origin).unwrap_or_else(|| dynamic_forward(entity));
+                    let spawnflags = flags(entity);
+                    let (lights_world, lights_models) = (spawnflags & 1 == 0, spawnflags & 2 == 0);
+                    let dynamic = |kind, at, radius, color, cone, receivers| Light {
+                        origin: at,
                         ldr: color,
                         hdr: color,
-                        falloff: Falloff::Radius {
-                            radius: number(entity, "distance").unwrap_or(120.0).max(1.0),
-                        },
+                        falloff: Falloff::Radius { radius },
                         cone,
+                        pattern: style_pattern(entity),
                         shadows: false,
                         dynamic: true,
-                        ..base(
-                            if cone.is_some() {
-                                LightKind::Spot
-                            } else {
-                                LightKind::Point
-                            },
-                            direction,
-                        )
-                    });
+                        receivers,
+                        ..base(kind, direction)
+                    };
+                    if outer <= 0.0 {
+                        let receivers = match (lights_world, lights_models) {
+                            (true, true) => Receivers::All,
+                            (true, false) => Receivers::World,
+                            (false, true) => Receivers::Models,
+                            (false, false) => continue,
+                        };
+                        lighting
+                            .lights
+                            .push(dynamic(LightKind::Point, origin, radius, color, None, receivers));
+                        continue;
+                    }
+                    if lights_models {
+                        let cone = (outer < 180.0)
+                            .then(|| Cone::from_degrees(number(entity, "_inner_cone").unwrap_or(0.0), outer, 1.0));
+                        let kind = if cone.is_some() {
+                            LightKind::Spot
+                        } else {
+                            LightKind::Point
+                        };
+                        lighting
+                            .lights
+                            .push(dynamic(kind, origin, radius, color, cone, Receivers::Models));
+                    }
+                    if !lights_world {
+                        continue;
+                    }
+                    let brushes = world_brushes.get_or_insert_with(|| WorldBrushes::new(vmf));
+                    if let Some(fraction) = brushes.trace(origin, direction * radius) {
+                        let left = (1.0 - fraction) * (1.0 - fraction);
+                        let end = origin + direction * (radius * fraction - 1.0).max(0.0);
+                        let spot = number(entity, "spotlight_radius").unwrap_or(80.0).max(1.0);
+                        lighting.lights.push(dynamic(
+                            LightKind::Point,
+                            end,
+                            spot,
+                            color * left,
+                            None,
+                            Receivers::World,
+                        ));
+                    }
                 }
                 "env_projectedtexture" => {
                     let numbers = entity.get("lightcolor").and_then(parse_numbers).unwrap_or_default();
@@ -1204,9 +1258,132 @@ pub fn vrad_direction(entity: &Entity) -> DVec3 {
 /// The way an entity faces by its `angles`, as the engine's AngleVectors: positive pitch
 /// looks down.
 pub fn engine_forward(entity: &Entity) -> DVec3 {
-    let angles = entity.get("angles").and_then(parse_vec3).unwrap_or(DVec3::ZERO);
+    angle_vectors(entity.get("angles").and_then(parse_vec3).unwrap_or(DVec3::ZERO))
+}
+
+/// The way a light_dynamic points, as the game reads it: its `angles`, with the pitch
+/// replaced by `pitch` turned around when that is set, so `-90` points straight down
+/// whatever `angles` says.
+pub fn dynamic_forward(entity: &Entity) -> DVec3 {
+    let mut angles = entity.get("angles").and_then(parse_vec3).unwrap_or(DVec3::ZERO);
+    if let Some(pitch) = number(entity, "pitch").filter(|pitch| *pitch != 0.0) {
+        angles.x = -pitch;
+    }
+    angle_vectors(angles)
+}
+
+/// The engine's AngleVectors: the forward direction of pitch, yaw and roll in degrees.
+fn angle_vectors(angles: DVec3) -> DVec3 {
     let (pitch, yaw) = (angles.x.to_radians(), angles.y.to_radians());
     DVec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), -pitch.sin()).normalize_or(DVec3::X)
+}
+
+/// The brushes the engine's traces against the world hit, for where a light_dynamic's
+/// spot lands: world and func_detail brushes, leaving out those made only of tool
+/// textures traces pass through.
+struct WorldBrushes {
+    brushes: Vec<(Bounds, Vec<Plane>)>,
+}
+
+impl WorldBrushes {
+    fn new(vmf: &Vmf) -> Self {
+        let details = vmf
+            .entities()
+            .filter(|entity| entity.classname().eq_ignore_ascii_case("func_detail"));
+        let brushes = vmf
+            .world()
+            .into_iter()
+            .chain(details)
+            .flat_map(|entity| entity.solids())
+            .filter(|solid| solid.sides().any(|side| !passable(&side.material)))
+            .filter_map(|solid| {
+                let bounds = faces_bounds(&solid_faces(solid));
+                let planes: Vec<Plane> = solid
+                    .sides()
+                    .filter_map(|side| Plane::from_points(side.plane))
+                    .collect();
+                (!bounds.is_empty()).then_some((bounds, planes))
+            })
+            .collect();
+        Self { brushes }
+    }
+
+    /// Where a line from `from` along `delta` first meets a brush, as a share of `delta`
+    /// from 0 to 1; 0 when it starts inside one.
+    fn trace(&self, from: DVec3, delta: DVec3) -> Option<f64> {
+        self.brushes
+            .iter()
+            .filter(|(bounds, _)| segment_meets_box(from, delta, bounds))
+            .filter_map(|(_, planes)| enter_convex(from, delta, planes))
+            .min_by(f64::total_cmp)
+    }
+}
+
+/// Tool textures that traces pass through, as brushes made of them are not solid.
+const PASSABLE_TOOLS: [&str; 11] = [
+    "tools/toolstrigger",
+    "tools/toolshint",
+    "tools/toolsskip",
+    "tools/toolsareaportal",
+    "tools/toolsoccluder",
+    "tools/toolsorigin",
+    "tools/toolsfog",
+    "tools/toolsplayerclip",
+    "tools/toolsinvisibleladder",
+    "tools/toolsblock_los",
+    "tools/toolsblocklight",
+];
+
+fn passable(material: &str) -> bool {
+    let name = material.trim().replace('\\', "/");
+    PASSABLE_TOOLS.iter().any(|tool| name.eq_ignore_ascii_case(tool))
+}
+
+/// Whether a line from `from` along `delta` passes through a box, give or take a unit.
+fn segment_meets_box(from: DVec3, delta: DVec3, bounds: &Bounds) -> bool {
+    let (mut enter, mut exit) = (0.0f64, 1.0f64);
+    for axis in 0..3 {
+        let (low, high) = (bounds.min[axis] - 1.0, bounds.max[axis] + 1.0);
+        if delta[axis].abs() < 1e-12 {
+            if from[axis] < low || from[axis] > high {
+                return false;
+            }
+            continue;
+        }
+        let (a, b) = ((low - from[axis]) / delta[axis], (high - from[axis]) / delta[axis]);
+        enter = enter.max(a.min(b));
+        exit = exit.min(a.max(b));
+        if enter > exit {
+            return false;
+        }
+    }
+    true
+}
+
+/// Where a line from `from` along `delta` enters a convex brush, as a share of `delta`;
+/// 0 when it starts inside, and `None` when it misses or stops short.
+fn enter_convex(from: DVec3, delta: DVec3, planes: &[Plane]) -> Option<f64> {
+    let (mut enter, mut exit) = (0.0f64, 1.0f64);
+    for plane in planes {
+        let start = plane.distance(from);
+        let along = plane.normal.dot(delta);
+        if along.abs() < 1e-12 {
+            if start > 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let at = -start / along;
+        if along < 0.0 {
+            enter = enter.max(at);
+        } else {
+            exit = exit.min(at);
+        }
+        if enter > exit {
+            return None;
+        }
+    }
+    Some(enter)
 }
 
 /// The brightness patterns of Source's light appearances (`style`), by number.
@@ -1236,14 +1413,21 @@ fn pattern(entity: &Entity) -> Option<String> {
         .get("pattern")
         .map(str::trim)
         .filter(|pattern| !pattern.is_empty());
-    let pattern = match custom {
-        Some(pattern) => pattern.to_ascii_lowercase(),
-        None => {
-            let style = number(entity, "style").unwrap_or(0.0) as usize;
-            STYLE_PATTERNS.get(style)?.to_string()
+    match custom {
+        Some(pattern) => {
+            let pattern = pattern.to_ascii_lowercase();
+            pattern.chars().any(|letter| letter != 'm').then_some(pattern)
         }
-    };
-    (pattern.chars().any(|letter| letter != 'm')).then_some(pattern)
+        None => style_pattern(entity),
+    }
+}
+
+/// The pattern of a light's `style`, unless it is steady. The engine's dynamic lights
+/// only play these, never a custom pattern.
+fn style_pattern(entity: &Entity) -> Option<String> {
+    let style = number(entity, "style").unwrap_or(0.0) as usize;
+    let pattern = STYLE_PATTERNS.get(style)?;
+    pattern.chars().any(|letter| letter != 'm').then(|| pattern.to_string())
 }
 
 /// The brightness a pattern gives at a time in seconds, where `m` is 1, `a` is dark and
@@ -1323,6 +1507,14 @@ pub fn texture_light_scale(face_area: f64, tile_area: f64) -> f64 {
         return 0.0;
     }
     face_area / tile_area * 100.0 * 100.0
+}
+
+/// A colour key as the engine reads it into a dynamic light: red, green and blue bytes,
+/// taken as 0 to 1 without turning them linear.
+fn byte_color(text: &str) -> Option<DVec3> {
+    let numbers = parse_numbers(text)?;
+    let [r, g, b] = [*numbers.first()?, *numbers.get(1)?, *numbers.get(2)?];
+    Some(DVec3::new(r, g, b).clamp(DVec3::ZERO, DVec3::splat(255.0)) / 255.0)
 }
 
 /// A colour key such as `rendercolor`, as linear red, green and blue from 0 to 1. Values
