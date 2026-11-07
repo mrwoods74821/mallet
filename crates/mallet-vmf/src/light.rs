@@ -941,11 +941,17 @@ impl MapLighting {
                         [r, g, b, ..] => DVec3::new(linear(*r), linear(*g), linear(*b)),
                         _ => DVec3::ONE,
                     };
-                    let intensity = numbers.get(3).map_or(1.0, |alpha| alpha.max(0.0) / 255.0)
-                        * number(entity, "lightstrength").unwrap_or(1.0).max(0.0);
+                    let alpha = numbers
+                        .get(3)
+                        .copied()
+                        .filter(|alpha| *alpha > 0.0)
+                        .map_or(1.0, |alpha| alpha / 255.0);
+                    let intensity = alpha * number(entity, "lightstrength").unwrap_or(1.0).max(0.0);
                     let direction = aim(entity, origin).unwrap_or_else(|| engine_forward(entity));
-                    let fov = number(entity, "lightfov").unwrap_or(90.0).clamp(1.0, 179.0);
+                    let fov = number(entity, "lightfov").unwrap_or(45.0).clamp(1.0, 179.0);
                     let far = number(entity, "farz").unwrap_or(750.0).max(1.0);
+                    let lights_world = number(entity, "lightworld").unwrap_or(1.0) != 0.0
+                        && number(entity, "lightonlytarget").unwrap_or(0.0) == 0.0;
                     lighting.lights.push(Light {
                         ldr: rgb * intensity * FLASHLIGHT_SCALE_LDR,
                         hdr: rgb * intensity * FLASHLIGHT_SCALE_HDR,
@@ -956,8 +962,13 @@ impl MapLighting {
                             exponent: 1.0,
                         }),
                         starts_dark: flags(entity) & 4 != 0,
-                        shadows: number(entity, "enableshadows").unwrap_or(1.0) != 0.0,
+                        shadows: number(entity, "enableshadows").unwrap_or(0.0) != 0.0,
                         dynamic: true,
+                        receivers: if lights_world {
+                            Receivers::All
+                        } else {
+                            Receivers::Models
+                        },
                         projection: Some(Projection {
                             texture: entity
                                 .get("texturename")
