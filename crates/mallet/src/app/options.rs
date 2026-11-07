@@ -20,6 +20,9 @@ const GOOD: Color32 = Color32::from_rgb(90, 190, 110);
 const ERROR: Color32 = Color32::from_rgb(235, 90, 80);
 const WARNING: Color32 = Color32::from_rgb(230, 180, 70);
 const MUTED: Color32 = Color32::from_gray(140);
+/// The width of the label column of the lighting preview's settings, so its grids line
+/// up.
+const LIGHTING_LABEL_WIDTH: f32 = 170.0;
 const SECTION_WIDTH: f32 = 170.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -704,6 +707,7 @@ fn lighting_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
     ui.label(RichText::new("Light sources").strong());
     egui::Grid::new("lighting_sources")
         .num_columns(2)
+        .min_col_width(LIGHTING_LABEL_WIDTH)
         .spacing([16.0, 8.0])
         .show(ui, |ui| {
             row(ui, "HDR values", "Maps are usually compiled with HDR, which uses these values.");
@@ -762,6 +766,7 @@ fn lighting_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
     ui.label(RichText::new("Shadows").strong());
     egui::Grid::new("lighting_shadows")
         .num_columns(2)
+        .min_col_width(LIGHTING_LABEL_WIDTH)
         .spacing([16.0, 8.0])
         .show(ui, |ui| {
             row(ui, "Sun shadows", "One shadow map covers the whole map; larger is sharper.");
@@ -850,6 +855,7 @@ fn lighting_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
     ui.label(RichText::new("Look").strong());
     egui::Grid::new("lighting_look")
         .num_columns(2)
+        .min_col_width(LIGHTING_LABEL_WIDTH)
         .spacing([16.0, 8.0])
         .show(ui, |ui| {
             lighting_look_rows(ui, "lighting_options", lighting, dirty);
@@ -872,6 +878,7 @@ fn lighting_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
     ui.label(RichText::new("Speed").strong());
     egui::Grid::new("lighting_speed")
         .num_columns(2)
+        .min_col_width(LIGHTING_LABEL_WIDTH)
         .spacing([16.0, 8.0])
         .show(ui, |ui| {
             row(
