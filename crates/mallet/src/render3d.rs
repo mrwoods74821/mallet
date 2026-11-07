@@ -552,7 +552,8 @@ impl Renderer3D {
     }
 
     /// Waits for every background texture load and uploads the results, so a screenshot
-    /// shows real textures instead of loading placeholders.
+    /// shows real textures instead of loading placeholders, and has the lighting preview
+    /// draw all its small shadow maps in its next frame.
     pub fn finish_loading(&mut self) {
         for batch in std::mem::take(&mut self.incoming) {
             if let Ok(results) = batch.recv() {
@@ -561,7 +562,13 @@ impl Renderer3D {
         }
         if let Some(lit) = &mut self.lit {
             lit.poll(&self.device, &self.queue, true);
+            lit.draw_all_shadows();
         }
+    }
+
+    /// Whether the lighting preview still has small shadow maps to draw, a few a frame.
+    pub fn shadows_waiting(&self) -> bool {
+        self.lit.as_ref().is_some_and(lit::LitState::shadows_waiting)
     }
 
     /// What the latest lighting preview frame used, once one has been drawn.

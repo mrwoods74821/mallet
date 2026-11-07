@@ -150,9 +150,12 @@ hard falloff, `_distance`, spotlight cones and focus, `pitch`, `angles` and aim 
 Sky faces show the map's skybox, and tool textures that are invisible in the game
 (nodraw, clip, trigger, hint, skip and the like) are hidden. Lights that start dark are
 left off, and flickering or pulsing appearances can play. Shadows come from the sun,
-from sky light and from the lights nearest and brightest around the camera; the rest
-shine through walls. Bounced light is not traced, so a "fake bounce" adds a little
-light around each light instead.
+from sky light and from the lights nearest and brightest around the camera, and many
+more lights past those get small shadow maps, drawn a few each frame; only lights past
+those shine through walls. Lights stop at sky faces, as VRAD stops them, while sunlight
+comes in through them. A 3D skybox gets its own sun shadows, so it and the map never
+shadow each other. Bounced light is not traced, so a "fake bounce" adds a little light
+around each light instead.
 
 The sun button beside the viewport's label holds the settings used most: exposure, tone
 mapping, fill light, fake bounce, the sky, fog, glows, light helpers and which kinds of
@@ -223,8 +226,8 @@ as you change it:
   grid of new maps, how dense the grid may get and how often grid lines are highlighted.
 - **Lighting preview**: HDR or LDR light values; the sun, sky light, dynamic lights, texture
   lights, self-illumination, lights that start dark and appearances; sun and light
-  shadows with their sizes, softness, how many lights cast them and how many directions sky
-  light is traced from; exposure, tone mapping, fill light, fake bounce, the sky, fog, glows,
+  shadows with their sizes, softness, how many lights cast them, how many more get small
+  shadow maps and their size, and how many directions sky light is traced from; exposure, tone mapping, fill light, fake bounce, the sky, fog, glows,
   tool textures, entity boxes and light helpers; and how far lights reach and how many may
   light one spot.
 - **Colours**: the background, grid, axis, selection, tool, handle and texture-face

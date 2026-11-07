@@ -336,8 +336,20 @@ cached chunks and props as the textured view with its own shaders (`lit.wgsl`):
   direction sky light is traced from (sky light is the share of those directions that see
   the sky, weighted by how much the surface faces them), and cube maps or single spot maps
   for the lights nearest and brightest around the camera, kept while they stay chosen.
-  Every layer remembers what it was drawn from, so only changed layers are drawn again.
-  Sky and tool faces, translucent faces and editor models let light through.
+  Many more lights past those get small shadow maps, tiles of a 16-bit depth atlas drawn
+  at most 96 a frame; a light uses them once all its tiles are drawn, and screenshots
+  draw every waiting tile first. Every layer and tile remembers what it was drawn from,
+  so only changed ones are drawn again.
+- Shadow maps draw from their own caster buffers, rebuilt from the cached faces when the
+  geometry or textures change: opaque faces as bare positions in 512-unit chunks, one
+  draw a chunk, alpha-tested faces with their textures, and props sorted by model so
+  neighbours draw instanced. Tool faces, translucent faces and editor models let light
+  through. Sky faces stop every light but the sun and sky light, as in VRAD.
+- The 3D skybox is the room the first sky_camera stands in: the world brushes touching the
+  one under the camera, and those touching them. Its faces and props are kept apart from
+  the map's, each sun gets a second shadow map fitted to the skybox, and sky light there
+  only goes by which way surfaces face, so the map and the skybox never shadow each other.
+  The map's own sun and sky light maps then fit just the map.
 - Sky faces show the skybox's six faces, mapped as the engine's `st_to_vec` table does,
   or Garry's Mod's painted sky; projected textures sample their texture in a texture
   array. Both load on worker threads.

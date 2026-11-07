@@ -744,6 +744,9 @@ impl MalletApp {
                     if animated {
                         ctx.request_repaint_after(Duration::from_millis(100));
                     }
+                    if editor.gpu.as_ref().is_some_and(Renderer3D::shadows_waiting) {
+                        ctx.request_repaint();
+                    }
                 }
                 if editor.config.view.net_graph && style != CameraStyle::Wireframe {
                     let extra = editor.gpu.as_ref().map(|gpu| NetGraphExtra {
@@ -1729,10 +1732,15 @@ fn lighting_button(ui: &mut egui::Ui, slot: usize, rect: Rect, label: Rect, edit
             let stats = editor.gpu.as_ref().and_then(Renderer3D::lighting_stats);
             if let Some(stats) = stats {
                 ui.separator();
+                let waiting = if stats.waiting > 0 {
+                    format!(", {} more coming", stats.waiting)
+                } else {
+                    String::new()
+                };
                 ui.label(
                     egui::RichText::new(format!(
-                        "{} lights ({} from textures), {} with shadows",
-                        stats.lights, stats.texture_lights, stats.shadowed
+                        "{} lights ({} from textures), {} with shadows and {} with small shadows{waiting}",
+                        stats.lights, stats.texture_lights, stats.shadowed, stats.small_shadowed
                     ))
                     .small()
                     .color(egui::Color32::GRAY),

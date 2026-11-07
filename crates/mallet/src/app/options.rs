@@ -778,7 +778,7 @@ fn lighting_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
             row(
                 ui,
                 "Light shadows",
-                "Point, spot, projected and texture lights. The lights nearest and brightest around the camera get shadow maps; the rest shine through walls.",
+                "Point, spot, projected and texture lights. The lights nearest and brightest around the camera get shadow maps, and many more past them small ones; lights past those shine through walls.",
             );
             ui.horizontal(|ui| {
                 *dirty |= ui.checkbox(&mut lighting.light_shadows, "On").changed();
@@ -794,6 +794,37 @@ fn lighting_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
             *dirty |= ui
                 .add(egui::Slider::new(&mut lighting.shadowed_lights, 0..=64).suffix(" lights"))
                 .changed();
+            ui.end_row();
+            row(
+                ui,
+                "More lights with shadows",
+                "Lights past those get small shadow maps, drawn a few each frame, so they do not shine through walls either.",
+            );
+            *dirty |= ui
+                .add(
+                    egui::Slider::new(&mut lighting.more_shadowed_lights, 0..=1024)
+                        .logarithmic(true)
+                        .suffix(" lights"),
+                )
+                .changed();
+            ui.end_row();
+            row(
+                ui,
+                "Small shadow size",
+                "Pixels across each small shadow map; larger is sharper but uses more video memory.",
+            );
+            ui.horizontal(|ui| {
+                *dirty |= size_choice(
+                    ui,
+                    "small_shadow_size",
+                    &mut lighting.small_shadow_size,
+                    &[64, 128, 256],
+                );
+                let side = u64::from(lighting.small_map_size());
+                let bytes = lighting.more_shadowed_count() as u64 * 6 * side * side * 2;
+                let megabytes = bytes.div_ceil(1024 * 1024);
+                ui.label(RichText::new(format!("up to {megabytes} MB of video memory")).color(MUTED));
+            });
             ui.end_row();
             row(ui, "Softness", "How soft shadow edges are, in shadow map pixels.");
             *dirty |= ui

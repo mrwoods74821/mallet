@@ -91,6 +91,11 @@ pub struct LightingOptions {
     pub shadowed_lights: u32,
     /// Pixels across each light's shadow maps.
     pub shadow_size: u32,
+    /// How many lights past those get small shadow maps, drawn a few at a time, so they
+    /// do not shine through walls either.
+    pub more_shadowed_lights: u32,
+    /// Pixels across each small shadow map.
+    pub small_shadow_size: u32,
     /// How soft shadow edges are, in shadow map pixels.
     pub shadow_softness: f64,
     /// Props cast shadows.
@@ -136,6 +141,8 @@ impl Default for LightingOptions {
             light_shadows: true,
             shadowed_lights: 16,
             shadow_size: 512,
+            more_shadowed_lights: 240,
+            small_shadow_size: 128,
             shadow_softness: 1.0,
             prop_shadows: true,
             sky: crate::lighting::SkyMode::Skybox,
@@ -184,6 +191,16 @@ impl LightingOptions {
     /// Each light's shadow map size, a power of two from 128 to 2048.
     pub fn light_map_size(&self) -> u32 {
         self.shadow_size.clamp(128, 2048).next_power_of_two().min(2048)
+    }
+
+    /// Lights with small shadow maps, from 0 to 1024.
+    pub fn more_shadowed_count(&self) -> usize {
+        self.more_shadowed_lights.min(1024) as usize
+    }
+
+    /// Each small shadow map's size, a power of two from 32 to 256.
+    pub fn small_map_size(&self) -> u32 {
+        self.small_shadow_size.clamp(32, 256).next_power_of_two().min(256)
     }
 
     /// Shadow softness in shadow map pixels, from 0 to 4.

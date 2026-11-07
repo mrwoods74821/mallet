@@ -55,6 +55,14 @@ struct Frame {
     // x: 1 / sky map size; y: sky sample normalisation; z: sun normal offset; w: sky
     // normal offset.
     sky_shadow: vec4<f32>,
+    // Small shadow maps: x pixels across one, y along a side of an atlas layer, z in a
+    // layer; w the first one's matrix.
+    atlas: vec4<u32>,
+    // The 3D skybox, which has its own sun shadow maps and no sky light shadows: its
+    // lowest corner and 1 when the map has one, then its highest corner and its sun
+    // normal offset.
+    skybox_min: vec4<f32>,
+    skybox_max: vec4<f32>,
 };
 
 struct Light {
@@ -74,7 +82,8 @@ struct Light {
     shadow: vec4<f32>,
     // x: normal offset per unit of distance; y: bounce share; z: projection matrix.
     extra: vec4<f32>,
-    // x: surfaces it lights (0 all, 1 brushes only, 2 models only).
+    // x: surfaces it lights (0 all, 1 brushes only, 2 models only); y: 1 when its shadow
+    // maps are small ones in the atlas.
     routing: vec4<f32>,
 };
 
@@ -100,6 +109,7 @@ const FLAG_EMISSIVE: u32 = 8u;
 @group(2) @binding(10) var sky_faces: texture_2d_array<f32>;
 @group(2) @binding(11) var clamp_sampler: sampler;
 @group(2) @binding(12) var<storage, read> sky_samples: array<vec4<f32>>;
+@group(2) @binding(13) var atlas_shadows: texture_depth_2d_array;
 
 struct FaceIn {
     @location(0) position: vec3<f32>,
@@ -239,18 +249,22 @@ fn local_shadow(light: Light, world: vec3<f32>, normal: vec3<f32>, distance: f32
         return 1.0;
     }
     let moved = world + normal * (light.extra.x * max(distance, 1.0));
-    var layer = first;
+    var face = 0;
     if (i32(light.shadow.y) == 6) {
         let away = moved - light.position.xyz;
         let size = abs(away);
         if (size.x >= size.y && size.x >= size.z) {
-            layer = layer + select(1, 0, away.x > 0.0);
+            face = select(1, 0, away.x > 0.0);
         } else if (size.y >= size.z) {
-            layer = layer + select(3, 2, away.y > 0.0);
+            face = select(3, 2, away.y > 0.0);
         } else {
-            layer = layer + select(5, 4, away.z > 0.0);
+            face = select(5, 4, away.z > 0.0);
         }
     }
+    if (light.routing.y > 0.5) {
+        return small_shadow(u32(first + face), moved);
+    }
+    let layer = first + face;
     let at = project(u32(layer), moved);
     if (at.w < 0.0) {
         return 1.0;
@@ -258,17 +272,51 @@ fn local_shadow(light: Light, world: vec3<f32>, normal: vec3<f32>, distance: f32
     return pcf(local_shadows, at.xy, layer, at.z, frame.shadow.x * frame.shadow.z);
 }
 
-fn sun_shadow(layer: u32, world: vec3<f32>, normal: vec3<f32>) -> f32 {
-    let at = project(frame.options.z + layer, world + normal * frame.sky_shadow.z);
+// One small shadow map of the atlas, read with the hardware's four-sample filter and kept
+// half a pixel inside its tile.
+fn small_shadow(tile: u32, world: vec3<f32>) -> f32 {
+    let at = project(frame.atlas.w + tile, world);
+    if (at.w < 0.0) {
+        return 1.0;
+    }
+    let per_row = frame.atlas.y;
+    let within = tile % frame.atlas.z;
+    let corner = vec2<f32>(f32(within % per_row), f32(within / per_row));
+    let edge = 0.5 / f32(frame.atlas.x);
+    let inside = clamp(at.xy, vec2<f32>(edge), vec2<f32>(1.0 - edge));
+    let uv = (corner + inside) / f32(per_row);
+    return textureSampleCompareLevel(atlas_shadows, shadow_sampler, uv, i32(tile / frame.atlas.z), at.z);
+}
+
+fn in_skybox(world: vec3<f32>) -> bool {
+    return frame.skybox_min.w > 0.5
+        && all(world >= frame.skybox_min.xyz)
+        && all(world <= frame.skybox_max.xyz);
+}
+
+// The sun's shadow, from the 3D skybox's own map inside the skybox.
+fn sun_shadow(sun: u32, world: vec3<f32>, normal: vec3<f32>) -> f32 {
+    var layer = sun;
+    var offset = frame.sky_shadow.z;
+    if (frame.skybox_min.w > 0.5) {
+        layer = sun * 2u;
+        if (in_skybox(world)) {
+            layer = layer + 1u;
+            offset = frame.skybox_max.w;
+        }
+    }
+    let at = project(frame.options.z + layer, world + normal * offset);
     if (at.w < 0.0) {
         return 1.0;
     }
     return pcf(sun_shadows, at.xy, i32(layer), at.z, frame.shadow.y * frame.shadow.w);
 }
 
+// How much of the sky a surface sees; the 3D skybox, which is open to its sky, only goes
+// by which way it faces.
 fn sky_visibility(world: vec3<f32>, normal: vec3<f32>) -> f32 {
     let count = frame.options.y;
-    if (count == 0u) {
+    if (count == 0u || in_skybox(world)) {
         return 0.5 + 0.5 * normal.z;
     }
     var seen = 0.0;
@@ -486,6 +534,18 @@ fn fs_lit(input: LitOut, @builtin(front_facing) front: bool) -> @location(0) vec
     color = mix(color, vec3<f32>(1.0, 0.0, 0.0), input.highlight);
     let opacity = select(1.0, texel.a * input.alpha.y, input.alpha.y > 0.0);
     return vec4<f32>(color, opacity);
+}
+
+@vertex
+fn vs_shadow_solid(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return view.view_proj * vec4<f32>(position, 1.0);
+}
+
+// A triangle covering a whole small shadow map at the far plane, to clear it.
+@vertex
+fn vs_shadow_clear(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+    return vec4<f32>(corner * 2.0 - 1.0, 1.0, 1.0);
 }
 
 struct ShadowOut {

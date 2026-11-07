@@ -773,6 +773,9 @@ pub struct Sky {
     /// linear colour and its size in degrees.
     pub sun: Option<(DVec3, DVec3, f64)>,
     pub paint: Option<SkyPaint>,
+    /// Where the first sky_camera stands: inside the 3D skybox, which the game draws
+    /// behind the sky and lights on its own.
+    pub camera: Option<DVec3>,
 }
 
 /// Everything about a map's lighting that a preview needs.
@@ -1028,6 +1031,9 @@ impl MapLighting {
                         radius: size.clamp(1.0, 4096.0),
                         fade: Some((near, far)),
                     });
+                }
+                "sky_camera" if lighting.sky.camera.is_none() => {
+                    lighting.sky.camera = Some(origin);
                 }
                 "env_sun" => {
                     let rgb = entity.get("rendercolor").and_then(rgb_color).unwrap_or(DVec3::ONE);

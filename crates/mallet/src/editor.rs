@@ -1315,7 +1315,7 @@ impl Editor {
             &self.models,
             lighting,
         );
-        if gpu.textures_loading() > 0 {
+        if gpu.textures_loading() > 0 || gpu.shadows_waiting() {
             gpu.finish_loading();
             gpu.render(
                 slot,

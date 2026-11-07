@@ -7,8 +7,10 @@
 //! of world-space cells, so each pixel only adds up the lights that reach it. Shadows
 //! come from shadow maps: one per sun covering the whole map, one per direction sky light
 //! is traced from, and cube or spot maps for the lights nearest and brightest around the
-//! camera. Lights stay where they are, so a shadow map is only drawn again when what it
-//! shows changes.
+//! camera, with small shadow maps in an atlas for many more lights past them, drawn a
+//! few a frame. Lights stay where they are, so a shadow map is only drawn again when what
+//! it shows changes. A map's 3D skybox gets its own sun shadows, so the map and the
+//! skybox never shadow each other.
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
@@ -27,7 +29,7 @@ use mallet_vmf::light::{
 };
 
 use super::{
-    box_visible, frustum_planes, material_key, pipeline, signature, Batches, Depth, FaceMesh, GpuTexture,
+    box_visible, frustum_planes, material_key, pipeline, signature, Batches, Depth, FaceMesh, FaceVertex, GpuTexture,
     ModelInstanceData, RenderStats, Renderer3D, COLOR_FORMAT, WHITE_KEY,
 };
 use crate::config::LightingOptions;
@@ -63,6 +65,19 @@ const NO_CAP: f32 = 1.0e30;
 /// How much more a light that already has shadow maps counts when choosing which lights
 /// get them, so the choice does not flicker between two lights.
 const KEEP_BONUS: f64 = 1.5;
+/// Depth format of the atlas of small shadow maps: half the memory of the others, and
+/// enough to keep light from shining through walls.
+const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth16Unorm;
+/// Pixels along each side of a layer of the small shadow map atlas.
+const ATLAS_SIDE: u32 = 2048;
+/// The most small shadow maps drawn in one frame, so a map full of lights fills them in
+/// over a few frames instead of stalling one.
+const ATLAS_TILES_PER_FRAME: usize = 96;
+/// Shadow casters are grouped into cubes this many units across, so the shadow maps of
+/// small lights only draw the few around them.
+const CASTER_CHUNK: f32 = 512.0;
+/// How shadow caster positions are laid out for the shadow map shaders.
+const POSITION_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
 /// The six faces of a cube shadow map: the way each looks and its up direction, in the
 /// order the shader picks them: +X, -X, +Y, -Y, +Z, -Z.
 const CUBE_FACES: [(Vec3, Vec3); 6] = [
@@ -92,12 +107,19 @@ pub struct LightingStats {
     pub grid_cells: usize,
     /// The most lights any grid cell holds.
     pub busiest_cell: usize,
-    /// Lights with shadow maps, suns included.
+    /// Lights with their own shadow maps, suns included.
     pub shadowed: usize,
+    /// Lights with small shadow maps.
+    pub small_shadowed: usize,
+    /// Lights still waiting for their small shadow maps to be drawn.
+    pub waiting: usize,
+    /// Shadow map layers and small shadow maps there is room for.
     pub shadow_layers: usize,
-    /// Shadow maps drawn for the latest frame.
+    /// Shadow maps drawn for the latest frame, small ones included.
     pub shadow_maps_drawn: usize,
     pub glows: usize,
+    /// Where the map's 3D skybox is, which gets its own sun shadows.
+    pub skybox: Option<Bounds>,
 }
 
 #[repr(C)]
@@ -134,6 +156,9 @@ struct GpuFrame {
     options: [u32; 4],
     shadow: [f32; 4],
     sky_shadow: [f32; 4],
+    atlas: [u32; 4],
+    skybox_min: [f32; 4],
+    skybox_max: [f32; 4],
 }
 
 /// Bytes in one glow vertex.
@@ -356,12 +381,280 @@ impl ImageArray {
     }
 }
 
-/// Props that cast shadows: one instance buffer of every prop, with each prop's model
-/// and bounds, rebuilt when the geometry changes.
+/// Small shadow maps for the lights past the nearest few: square tiles packed into the
+/// layers of one depth texture array, each drawn from its own camera.
+struct ShadowAtlas {
+    /// Pixels across one tile; 0 for an atlas with no tiles.
+    tile: u32,
+    /// Tiles along each side of a layer.
+    per_row: u32,
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    /// Each layer on its own, to draw into.
+    targets: Vec<wgpu::TextureView>,
+    tiles: Vec<AtlasTile>,
+}
+
+/// One small shadow map: its camera and what it was last drawn for.
+struct AtlasTile {
+    buffer: wgpu::Buffer,
+    group: wgpu::BindGroup,
+    content: Option<u64>,
+}
+
+impl ShadowAtlas {
+    /// An atlas of `layers` layers of tiles `tile` pixels across; with no tiles or no
+    /// layers, a tiny one that holds nothing.
+    fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, tile: u32, layers: u32) -> Self {
+        let (tile, per_row, layers) = if tile == 0 || layers == 0 {
+            (0, 1, 1)
+        } else {
+            (tile, (ATLAS_SIDE / tile).max(1), layers)
+        };
+        let side = (per_row * tile).max(1);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mallet small shadows"),
+            size: wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: layers,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: ATLAS_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let targets = (0..layers)
+            .map(|layer| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: layer,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let count = if tile == 0 { 0 } else { per_row * per_row * layers };
+        let tiles = (0..count)
+            .map(|_| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("mallet small shadow"),
+                    size: std::mem::size_of::<[f32; 16]>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mallet small shadow"),
+                    layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                });
+                AtlasTile {
+                    buffer,
+                    group,
+                    content: None,
+                }
+            })
+            .collect();
+        Self {
+            tile,
+            per_row,
+            _texture: texture,
+            view,
+            targets,
+            tiles,
+        }
+    }
+
+    /// Tiles in one layer.
+    fn per_layer(&self) -> u32 {
+        self.per_row * self.per_row
+    }
+
+    /// The tile size and layer count it was made with: zeros when it holds nothing.
+    fn shape(&self) -> (u32, u32) {
+        if self.tile == 0 {
+            (0, 0)
+        } else {
+            (self.tile, self.targets.len() as u32)
+        }
+    }
+}
+
+/// Which part of the map something is in: the map itself, or its 3D skybox, which the
+/// game draws behind the sky and lights on its own, so neither shadows the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Zone {
+    Map,
+    Skybox,
+}
+
+/// Where the 3D skybox is, and how far the rest of the map reaches.
+#[derive(Clone, Copy, Debug)]
+struct Zones {
+    skybox: Option<Bounds>,
+    map: Bounds,
+}
+
+/// The faces that block light, in their own buffers for drawing shadow maps: opaque faces
+/// as bare positions drawn a chunk at a time, and alpha-tested faces with their textures.
+/// Faces of the 3D skybox are kept apart from the map's.
+struct Casters {
+    key: u64,
+    positions: wgpu::Buffer,
+    tested: wgpu::Buffer,
+    chunks: Vec<CasterChunk>,
+}
+
+/// The casters of one zone in one cube of the world. Its sky faces follow its opaque
+/// faces, so both draw at once when sky blocks the light.
+struct CasterChunk {
+    min: Vec3,
+    max: Vec3,
+    zone: Zone,
+    solid: Range<u32>,
+    sky: Range<u32>,
+    tested: Vec<(String, Range<u32>)>,
+}
+
+/// The triangles of one [`CasterChunk`] before upload.
+struct CasterBucket {
+    min: Vec3,
+    max: Vec3,
+    solid: Vec<[f32; 3]>,
+    sky: Vec<[f32; 3]>,
+    tested: HashMap<String, Vec<FaceVertex>>,
+}
+
+/// What a shadow map is drawn for: just one zone's casters or all of them, and whether
+/// sky faces block its light. VRAD stops every light at the sky but the sun and the sky
+/// light, which come in through it.
+#[derive(Clone, Copy)]
+struct Blockers {
+    zone: Option<Zone>,
+    sky: bool,
+}
+
+impl Casters {
+    /// Sorts the map's opaque, sky and alpha-tested faces into chunks, by zone and by which
+    /// cube the middle of each triangle falls in. Tool, translucent and entity box faces
+    /// never block light, and are left out.
+    fn build(renderer: &Renderer3D, skybox: Option<&Bounds>, key: u64) -> Self {
+        let mut buckets: HashMap<(Zone, [i32; 3]), CasterBucket> = HashMap::new();
+        for cell in renderer.faces.iter().flat_map(|faces| faces.cells.values()) {
+            for (texture_key, vertices) in &cell.by_texture {
+                let texture = renderer.texture_for(texture_key);
+                let passes = texture.surface == Surface::Tool || matches!(texture.alpha, AlphaMode::Blend(_));
+                if texture_key == WHITE_KEY || passes {
+                    continue;
+                }
+                let sky = texture.surface == Surface::Sky;
+                let tested = !sky && matches!(texture.alpha, AlphaMode::Test(_));
+                for triangle in vertices.as_chunks::<3>().0 {
+                    let corners = triangle.iter().map(|vertex| Vec3::from(vertex.position));
+                    let middle = corners.clone().sum::<Vec3>() / 3.0;
+                    let zone = zone_of(skybox, middle.as_dvec3());
+                    let cube = (middle / CASTER_CHUNK).floor().as_ivec3().to_array();
+                    let bucket = buckets.entry((zone, cube)).or_insert_with(|| CasterBucket {
+                        min: Vec3::splat(f32::INFINITY),
+                        max: Vec3::splat(f32::NEG_INFINITY),
+                        solid: Vec::new(),
+                        sky: Vec::new(),
+                        tested: HashMap::new(),
+                    });
+                    for corner in corners {
+                        bucket.min = bucket.min.min(corner);
+                        bucket.max = bucket.max.max(corner);
+                    }
+                    if tested {
+                        bucket
+                            .tested
+                            .entry(texture_key.clone())
+                            .or_default()
+                            .extend_from_slice(triangle);
+                    } else if sky {
+                        bucket.sky.extend(triangle.iter().map(|vertex| vertex.position));
+                    } else {
+                        bucket.solid.extend(triangle.iter().map(|vertex| vertex.position));
+                    }
+                }
+            }
+        }
+        let mut positions: Vec<[f32; 3]> = Vec::new();
+        let mut tested_vertices: Vec<FaceVertex> = Vec::new();
+        let mut chunks = Vec::with_capacity(buckets.len());
+        for ((zone, _), bucket) in buckets {
+            let start = positions.len() as u32;
+            positions.extend_from_slice(&bucket.solid);
+            let solid = start..positions.len() as u32;
+            positions.extend_from_slice(&bucket.sky);
+            let sky = solid.end..positions.len() as u32;
+            let mut tested = Vec::with_capacity(bucket.tested.len());
+            for (texture_key, vertices) in bucket.tested {
+                let start = tested_vertices.len() as u32;
+                tested_vertices.extend_from_slice(&vertices);
+                tested.push((texture_key, start..tested_vertices.len() as u32));
+            }
+            chunks.push(CasterChunk {
+                min: bucket.min,
+                max: bucket.max,
+                zone,
+                solid,
+                sky,
+                tested,
+            });
+        }
+        let upload = |label: &str, bytes: &[u8]| {
+            renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: if bytes.is_empty() { &[0u8; 16] } else { bytes },
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        };
+        Self {
+            key,
+            positions: upload("mallet shadow casters", bytemuck::cast_slice(&positions)),
+            tested: upload(
+                "mallet alpha-tested shadow casters",
+                bytemuck::cast_slice(&tested_vertices),
+            ),
+            chunks,
+        }
+    }
+}
+
+/// The pipelines that draw shadow casters into one depth format: opaque faces as bare
+/// positions, alpha-tested faces with their textures, and props.
+struct CasterPipelines {
+    solid: wgpu::RenderPipeline,
+    tested: wgpu::RenderPipeline,
+    model: wgpu::RenderPipeline,
+}
+
+/// Props that cast shadows: one instance buffer of every prop, sorted by model and then by
+/// place so neighbouring props of a model draw together, with each prop's model, bounds
+/// and zone. Rebuilt when the geometry changes or more models have loaded.
 struct PropCasters {
     generation: u64,
+    models: usize,
     buffer: Option<wgpu::Buffer>,
-    props: Vec<(String, Vec3, Vec3)>,
+    props: Vec<PropCaster>,
+}
+
+/// One prop of [`PropCasters`].
+struct PropCaster {
+    key: String,
+    min: Vec3,
+    max: Vec3,
+    zone: Zone,
 }
 
 /// Textures loading on a worker thread for the preview.
@@ -375,8 +668,11 @@ pub(super) struct LitState {
     translucent: wgpu::RenderPipeline,
     model: wgpu::RenderPipeline,
     translucent_model: wgpu::RenderPipeline,
-    shadow_face: wgpu::RenderPipeline,
-    shadow_model: wgpu::RenderPipeline,
+    /// Draw shadow casters into full shadow maps, and into the small ones of the atlas.
+    layer_casters: CasterPipelines,
+    tile_casters: CasterPipelines,
+    /// Clears one tile of the atlas.
+    tile_clear: wgpu::RenderPipeline,
     glow: wgpu::RenderPipeline,
     frame: wgpu::Buffer,
     lights: Storage,
@@ -409,7 +705,16 @@ pub(super) struct LitState {
     surface: Vec<Light>,
     /// Shadow map layers of the lights that have them: first layer and count, by key.
     slots: HashMap<u64, (u32, u32)>,
+    atlas: ShadowAtlas,
+    /// Tiles of the atlas of the lights with small shadow maps: first tile and count, by
+    /// key.
+    atlas_slots: HashMap<u64, (u32, u32)>,
+    casters: Option<Casters>,
     props: Option<PropCasters>,
+    /// The zones, with the geometry generation they were found in.
+    zones: Option<(u64, Zones)>,
+    /// Draw every small shadow map still waiting in the next frame, as screenshots need.
+    draw_all: bool,
     started: Instant,
     /// Counts loads and settings that change what the preview shows, for cached images.
     pub version: u64,
@@ -493,6 +798,7 @@ impl LitState {
                     count: None,
                 },
                 storage(12),
+                depth_array(13),
             ],
         });
         let lit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -536,8 +842,42 @@ impl LitState {
                 false,
             )
         };
-        let shadow_face = depth_pipeline(device, &shadow_layout, &shader, "vs_shadow_face", &face_buffers);
-        let shadow_model = depth_pipeline(device, &shadow_layout, &shader, "vs_shadow_model", &model_buffers);
+        let solid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mallet shadow casters"),
+            bind_group_layouts: &[uniform_layout],
+            push_constant_ranges: &[],
+        });
+        let position_buffers = [wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 3]>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &POSITION_ATTRIBUTES,
+        }];
+        let casters = |format| CasterPipelines {
+            solid: depth_pipeline(
+                device,
+                &solid_layout,
+                &shader,
+                ("vs_shadow_solid", false),
+                &position_buffers,
+                format,
+            ),
+            tested: depth_pipeline(
+                device,
+                &shadow_layout,
+                &shader,
+                ("vs_shadow_face", true),
+                &face_buffers,
+                format,
+            ),
+            model: depth_pipeline(
+                device,
+                &shadow_layout,
+                &shader,
+                ("vs_shadow_model", true),
+                &model_buffers,
+                format,
+            ),
+        };
         let glow = glow_pipeline(device, &glow_layout, &shader);
         let frame = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mallet lighting frame"),
@@ -568,8 +908,9 @@ impl LitState {
             translucent: faces(Depth::Translucent),
             model: models(Depth::Test),
             translucent_model: models(Depth::Translucent),
-            shadow_face,
-            shadow_model,
+            layer_casters: casters(SHADOW_FORMAT),
+            tile_casters: casters(ATLAS_FORMAT),
+            tile_clear: clear_pipeline(device, &solid_layout, &shader),
             glow,
             frame,
             lights: Storage::new(device, "mallet lights"),
@@ -599,7 +940,12 @@ impl LitState {
             surface_key: None,
             surface: Vec::new(),
             slots: HashMap::new(),
+            atlas: ShadowAtlas::new(device, uniform_layout, 0, 0),
+            atlas_slots: HashMap::new(),
+            casters: None,
             props: None,
+            zones: None,
+            draw_all: false,
             started: Instant::now(),
             version: 0,
             stats: LightingStats::default(),
@@ -609,6 +955,17 @@ impl LitState {
     /// How many texture loads of the preview are still running.
     pub(super) fn loading(&self) -> usize {
         usize::from(self.cookie_loading.is_some()) + usize::from(self.sky_loading.is_some())
+    }
+
+    /// Whether lights are still waiting for their small shadow maps.
+    pub(super) fn shadows_waiting(&self) -> bool {
+        self.stats.waiting > 0
+    }
+
+    /// Draws every small shadow map still waiting in the next frame, as screenshots need.
+    pub(super) fn draw_all_shadows(&mut self) {
+        self.draw_all = true;
+        self.version += 1;
     }
 
     /// A fingerprint of what the preview shows besides the scene and camera, for cached
@@ -827,6 +1184,8 @@ impl LitState {
             }
             self.grid_key = Some(grid_key);
         }
+        self.update_zones(scene);
+        self.update_casters(renderer, scene, settled);
         self.update_props(scene, renderer, options);
         let appearance = |light: &PreviewLight| match (&light.light.pattern, options.animate) {
             (Some(pattern), true) => pattern_brightness(pattern, seconds),
@@ -839,13 +1198,27 @@ impl LitState {
             .collect();
         let mut matrices: Vec<Mat4> = Vec::new();
         let mut drawn = 0;
-        let bounds = scene.bounds;
-        let has_bounds = !bounds.is_empty();
+        let has_bounds = !scene.bounds.is_empty();
+        let zones = self.zones.map_or(
+            Zones {
+                skybox: None,
+                map: scene.bounds,
+            },
+            |(_, zones)| zones,
+        );
+        let draw_all = std::mem::take(&mut self.draw_all);
+        let casters = self.casters.as_ref();
+        let props = self.props.as_ref().filter(|_| options.prop_shadows);
 
-        let chosen = if options.light_shadows && has_bounds {
-            self.choose_shadowed(camera, planes, options.shadowed_light_count(), max_layers(device))
+        let (chosen, small) = if options.light_shadows && has_bounds {
+            self.choose_shadowed(
+                camera,
+                planes,
+                (options.shadowed_light_count(), options.more_shadowed_count()),
+                max_layers(device),
+            )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let needed: u32 = chosen.iter().map(|&index| layers_for(&self.prepared[index])).sum();
         let local_size = options.light_map_size();
@@ -878,7 +1251,8 @@ impl LitState {
             self.slots.clear();
             self.group = None;
         }
-        self.allocate(&chosen);
+        let wanted = self.runs(&chosen);
+        allocate_runs(&mut self.slots, self.local.layers.len(), &wanted);
         matrices.resize(self.local.layers.len(), Mat4::IDENTITY);
         for &index in &chosen {
             let light = &self.prepared[index];
@@ -901,13 +1275,14 @@ impl LitState {
                     self.local.size.hash(hasher);
                 });
                 if self.local.layers[layer].content != Some(content) {
-                    draw_shadow(
+                    draw_layer(
                         renderer,
                         encoder,
-                        (&self.shadow_face, &self.shadow_model),
+                        &self.layer_casters,
                         &self.local.layers[layer],
                         *matrix,
-                        self.props.as_ref().filter(|_| options.prop_shadows),
+                        (casters, props),
+                        Blockers { zone: None, sky: true },
                     );
                     self.local.layers[layer].content = Some(content);
                     drawn += 1;
@@ -921,6 +1296,100 @@ impl LitState {
             }
         }
 
+        let small_needed: u32 = small.iter().map(|&index| layers_for(&self.prepared[index])).sum();
+        let small_size = options.small_map_size();
+        let want_shape = if small_needed == 0 {
+            if options.light_shadows && options.more_shadowed_count() > 0 && has_bounds {
+                self.atlas.shape()
+            } else {
+                (0, 0)
+            }
+        } else {
+            let per_layer = (ATLAS_SIDE / small_size).max(1).pow(2);
+            let layers = small_needed.div_ceil(per_layer).min(max_layers(device));
+            let (tile, held) = self.atlas.shape();
+            if tile == small_size && held >= layers {
+                (tile, held)
+            } else if tile == small_size {
+                (small_size, layers.max(held))
+            } else {
+                (small_size, layers)
+            }
+        };
+        if self.atlas.shape() != want_shape {
+            self.atlas = ShadowAtlas::new(device, &renderer.uniform_layout, want_shape.0, want_shape.1);
+            self.atlas_slots.clear();
+            self.group = None;
+        }
+        let wanted = self.runs(&small);
+        allocate_runs(&mut self.atlas_slots, self.atlas.tiles.len(), &wanted);
+        let atlas_base = matrices.len() as u32;
+        matrices.resize(matrices.len() + self.atlas.tiles.len(), Mat4::IDENTITY);
+        let mut budget = if draw_all { usize::MAX } else { ATLAS_TILES_PER_FRAME };
+        let mut pending: Vec<(u32, Mat4, u64)> = Vec::new();
+        let (mut small_ready, mut waiting) = (0, 0);
+        for &index in &small {
+            let light = &self.prepared[index];
+            let Some(&(first, count)) = self.atlas_slots.get(&light.key) else {
+                continue;
+            };
+            let (views, offset) = local_views(light, count, self.atlas.tile);
+            let mut ready = true;
+            for (face, matrix) in views.iter().enumerate() {
+                let tile = first + face as u32;
+                matrices[(atlas_base + tile) as usize] = *matrix;
+                let content = signature(|hasher| {
+                    (
+                        light.key,
+                        face,
+                        scene.geometry_generation,
+                        options.prop_shadows,
+                        settled,
+                        self.atlas.tile,
+                    )
+                        .hash(hasher);
+                });
+                if self.atlas.tiles[tile as usize].content == Some(content) {
+                    continue;
+                }
+                if budget == 0 {
+                    ready = false;
+                    continue;
+                }
+                budget -= 1;
+                pending.push((tile, *matrix, content));
+            }
+            if !ready {
+                waiting += 1;
+                continue;
+            }
+            small_ready += 1;
+            gpu[index].shadow[0] = first as f32;
+            gpu[index].shadow[1] = count as f32;
+            gpu[index].extra[0] = offset;
+            gpu[index].routing[1] = 1.0;
+            if light.light.kind == LightKind::Projected {
+                gpu[index].extra[2] = (atlas_base + first) as f32;
+            }
+        }
+        if !pending.is_empty() {
+            draw_tiles(
+                renderer,
+                encoder,
+                (&self.tile_casters, &self.tile_clear),
+                &self.atlas,
+                &pending,
+                (casters, props),
+            );
+            for (tile, _, content) in &pending {
+                self.atlas.tiles[*tile as usize].content = Some(*content);
+            }
+            drawn += pending.len();
+        }
+        if waiting > 0 {
+            self.version += 1;
+        }
+
         let suns: Vec<usize> = if options.sun_shadows && has_bounds {
             (0..self.everywhere)
                 .filter(|&index| {
@@ -931,8 +1400,11 @@ impl LitState {
         } else {
             Vec::new()
         };
+        let places: Vec<(Zone, Bounds)> = std::iter::once((Zone::Map, zones.map))
+            .chain(zones.skybox.map(|skybox| (Zone::Skybox, skybox)))
+            .collect();
         let sun_size = if suns.is_empty() { 1 } else { options.sun_map_size() };
-        let sun_count = suns.len().max(1) as u32;
+        let sun_count = (suns.len() * places.len()).max(1) as u32;
         if self.suns.size != sun_size || self.suns.layers.len() as u32 != sun_count {
             self.suns = ShadowSet::new(
                 device,
@@ -945,35 +1417,46 @@ impl LitState {
         }
         let sun_base = matrices.len() as u32;
         matrices.resize(matrices.len() + self.suns.layers.len(), Mat4::IDENTITY);
-        let mut sun_offset = 0.0;
-        for (layer, &index) in suns.iter().enumerate() {
+        let mut sun_offsets = [0.0f32; 2];
+        for (number, &index) in suns.iter().enumerate() {
             let light = &self.prepared[index];
-            let (matrix, texel) = directional_view(light.light.direction.as_vec3(), &bounds, sun_size);
-            matrices[sun_base as usize + layer] = matrix;
-            sun_offset = texel * 1.5;
-            let content = signature(|hasher| {
-                (
-                    light.key,
-                    scene.geometry_generation,
-                    options.prop_shadows,
-                    settled,
-                    sun_size,
-                )
-                    .hash(hasher);
-            });
-            if self.suns.layers[layer].content != Some(content) {
-                draw_shadow(
-                    renderer,
-                    encoder,
-                    (&self.shadow_face, &self.shadow_model),
-                    &self.suns.layers[layer],
-                    matrix,
-                    self.props.as_ref().filter(|_| options.prop_shadows),
-                );
-                self.suns.layers[layer].content = Some(content);
-                drawn += 1;
+            for (place, (zone, bounds)) in places.iter().enumerate() {
+                let layer = number * places.len() + place;
+                let (matrix, texel) = directional_view(light.light.direction.as_vec3(), bounds, sun_size);
+                matrices[sun_base as usize + layer] = matrix;
+                sun_offsets[place] = texel * 1.5;
+                let content = signature(|hasher| {
+                    (
+                        light.key,
+                        scene.geometry_generation,
+                        options.prop_shadows,
+                        settled,
+                        sun_size,
+                        *zone,
+                    )
+                        .hash(hasher);
+                    for value in [bounds.min, bounds.max] {
+                        value.to_array().map(f64::to_bits).hash(hasher);
+                    }
+                });
+                if self.suns.layers[layer].content != Some(content) {
+                    draw_layer(
+                        renderer,
+                        encoder,
+                        &self.layer_casters,
+                        &self.suns.layers[layer],
+                        matrix,
+                        (casters, props),
+                        Blockers {
+                            zone: Some(*zone),
+                            sky: false,
+                        },
+                    );
+                    self.suns.layers[layer].content = Some(content);
+                    drawn += 1;
+                }
             }
-            gpu[index].shadow[0] = layer as f32;
+            gpu[index].shadow[0] = number as f32;
         }
 
         let ambient = scene.lighting.ambient.map(|ambient| ambient.color(options.hdr));
@@ -998,7 +1481,7 @@ impl LitState {
         matrices.resize(matrices.len() + self.sky.layers.len(), Mat4::IDENTITY);
         let mut sky_offset = 0.0;
         for (layer, toward) in directions.iter().enumerate() {
-            let (matrix, texel) = directional_view(-*toward, &bounds, sky_size);
+            let (matrix, texel) = directional_view(-*toward, &zones.map, sky_size);
             matrices[sky_base as usize + layer] = matrix;
             sky_offset = texel * 1.5;
             let content = signature(|hasher| {
@@ -1010,18 +1493,22 @@ impl LitState {
                     settled,
                 )
                     .hash(hasher);
-                for value in [bounds.min, bounds.max] {
+                for value in [zones.map.min, zones.map.max] {
                     value.to_array().map(f64::to_bits).hash(hasher);
                 }
             });
             if self.sky.layers[layer].content != Some(content) {
-                draw_shadow(
+                draw_layer(
                     renderer,
                     encoder,
-                    (&self.shadow_face, &self.shadow_model),
+                    &self.layer_casters,
                     &self.sky.layers[layer],
                     matrix,
-                    self.props.as_ref().filter(|_| options.prop_shadows),
+                    (casters, props),
+                    Blockers {
+                        zone: Some(Zone::Map),
+                        sky: false,
+                    },
                 );
                 self.sky.layers[layer].content = Some(content);
                 drawn += 1;
@@ -1053,14 +1540,24 @@ impl LitState {
             self.group = None;
         }
         let normalisation = 1.0 / directions.iter().map(|toward| toward.z).sum::<f32>().max(1e-3);
-        let frame = self.frame_data(
+        let mut frame = self.frame_data(
             scene,
             camera,
             options,
             ambient,
             [sun_base, sky_base, sky_count],
-            [sun_offset, sky_offset, normalisation],
+            [sun_offsets[0], sky_offset, normalisation],
         );
+        frame.atlas = [
+            self.atlas.tile.max(1),
+            self.atlas.per_row,
+            self.atlas.per_layer(),
+            atlas_base,
+        ];
+        if let Some(skybox) = zones.skybox {
+            frame.skybox_min = (skybox.min - DVec3::ONE).as_vec3().extend(1.0).to_array();
+            frame.skybox_max = (skybox.max + DVec3::ONE).as_vec3().extend(sun_offsets[1]).to_array();
+        }
         queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
         if self.group.is_none() {
             self.group = Some(self.bind_group(device));
@@ -1076,19 +1573,32 @@ impl LitState {
             grid_cells: self.grid.cells.len(),
             busiest_cell: self.grid.busiest,
             shadowed: chosen.len() + suns.len(),
-            shadow_layers: self.local.layers.len() + self.suns.layers.len() + self.sky.layers.len(),
+            small_shadowed: small_ready,
+            waiting,
+            shadow_layers: self.local.layers.len()
+                + self.suns.layers.len()
+                + self.sky.layers.len()
+                + self.atlas.tiles.len(),
             shadow_maps_drawn: drawn,
             glows: 0,
+            skybox: zones.skybox,
         };
     }
 
-    /// Picks the lights that get shadow maps: the brightest around the camera, those in
-    /// view first, keeping the ones that have maps unless another is clearly brighter.
-    fn choose_shadowed(&self, camera: &Camera3D, planes: &[Vec4; 6], budget: usize, max_layers: u32) -> Vec<usize> {
-        if budget == 0 {
-            return Vec::new();
+    /// Picks the lights that get shadow maps, the brightest around the camera and those in
+    /// view first: the first of `budgets` get their own maps, and the next small ones in
+    /// the atlas. Lights keep the maps they have unless another is clearly brighter.
+    fn choose_shadowed(
+        &self,
+        camera: &Camera3D,
+        planes: &[Vec4; 6],
+        (budget, more): (usize, usize),
+        max_layers: u32,
+    ) -> (Vec<usize>, Vec<usize>) {
+        if budget + more == 0 {
+            return (Vec::new(), Vec::new());
         }
-        let mut scored: Vec<(f64, usize)> = self
+        let scored: Vec<(f64, usize)> = self
             .prepared
             .iter()
             .enumerate()
@@ -1101,16 +1611,24 @@ impl LitState {
                 if !box_visible(planes, low.as_vec3(), high.as_vec3()) {
                     score *= 0.1;
                 }
-                if self.slots.contains_key(&light.key) {
-                    score *= KEEP_BONUS;
-                }
                 (score, index)
             })
             .collect();
-        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let ranked = |slots: &HashMap<u64, (u32, u32)>, skip: &HashSet<usize>| {
+            let mut order: Vec<(f64, usize)> = scored
+                .iter()
+                .filter(|(_, index)| !skip.contains(index))
+                .map(|&(score, index)| {
+                    let kept = slots.contains_key(&self.prepared[index].key);
+                    (if kept { score * KEEP_BONUS } else { score }, index)
+                })
+                .collect();
+            order.sort_by(|a, b| b.0.total_cmp(&a.0));
+            order
+        };
         let mut chosen = Vec::new();
         let mut layers = 0;
-        for (_, index) in scored {
+        for (_, index) in ranked(&self.slots, &HashSet::new()) {
             if chosen.len() >= budget {
                 break;
             }
@@ -1121,67 +1639,77 @@ impl LitState {
             layers += count;
             chosen.push(index);
         }
-        chosen
+        let taken: HashSet<usize> = chosen.iter().copied().collect();
+        let small = ranked(&self.atlas_slots, &taken)
+            .into_iter()
+            .take(more)
+            .map(|(_, index)| index)
+            .collect();
+        (chosen, small)
     }
 
-    /// Gives every chosen light its run of shadow map layers, keeping the layers of
-    /// lights that already had some, and packs them all again when the free layers are
-    /// too scattered.
-    fn allocate(&mut self, chosen: &[usize]) {
-        let wanted: Vec<(u64, u32)> = chosen
+    /// The keys of lights and how many shadow maps each needs.
+    fn runs(&self, lights: &[usize]) -> Vec<(u64, u32)> {
+        lights
             .iter()
             .map(|&index| (self.prepared[index].key, layers_for(&self.prepared[index])))
-            .collect();
-        self.slots
-            .retain(|key, (_, count)| wanted.iter().any(|(wanted, layers)| wanted == key && layers == count));
-        let capacity = self.local.layers.len();
-        let mut used = vec![false; capacity];
-        for (first, count) in self.slots.values() {
-            for layer in *first..*first + *count {
-                if let Some(slot) = used.get_mut(layer as usize) {
-                    *slot = true;
-                }
+            .collect()
+    }
+
+    /// Finds the 3D skybox, and how far the rest of the map reaches, when the geometry
+    /// changed.
+    fn update_zones(&mut self, scene: &Scene) {
+        if self
+            .zones
+            .is_some_and(|(generation, _)| generation == scene.geometry_generation)
+        {
+            return;
+        }
+        let skybox = skybox_bounds(scene);
+        let mut map = Bounds::EMPTY;
+        for mesh in scene.meshes.iter().filter(|mesh| !mesh.bounds.is_empty()) {
+            if zone_of(skybox.as_ref(), mesh.bounds.center()) == Zone::Map {
+                map.add_bounds(&mesh.bounds);
             }
         }
-        let place = |used: &mut Vec<bool>, count: u32| -> Option<u32> {
-            let count = count as usize;
-            let start = (0..=capacity.checked_sub(count)?)
-                .find(|&start| used[start..start + count].iter().all(|taken| !taken))?;
-            used[start..start + count].iter_mut().for_each(|taken| *taken = true);
-            Some(start as u32)
-        };
-        for (key, count) in &wanted {
-            if self.slots.contains_key(key) {
-                continue;
-            }
-            if let Some(first) = place(&mut used, *count) {
-                self.slots.insert(*key, (first, *count));
-                continue;
-            }
-            self.slots.clear();
-            used.iter_mut().for_each(|taken| *taken = false);
-            for (key, count) in &wanted {
-                if let Some(first) = place(&mut used, *count) {
-                    self.slots.insert(*key, (first, *count));
+        if map.is_empty() {
+            map = scene.bounds;
+        }
+        self.zones = Some((scene.geometry_generation, Zones { skybox, map }));
+    }
+
+    /// Rebuilds the shadow caster buffers when the faces, their textures or the zones
+    /// changed.
+    fn update_casters(&mut self, renderer: &Renderer3D, scene: &Scene, settled: u64) {
+        let skybox = self.zones.and_then(|(_, zones)| zones.skybox);
+        let key = signature(|hasher| {
+            (scene.geometry_generation, settled).hash(hasher);
+            if let Some(skybox) = skybox {
+                for value in [skybox.min, skybox.max] {
+                    value.to_array().map(f64::to_bits).hash(hasher);
                 }
             }
-            break;
+        });
+        if self.casters.as_ref().is_some_and(|casters| casters.key == key) {
+            return;
         }
+        self.casters = Some(Casters::build(renderer, skybox.as_ref(), key));
     }
 
     /// Rebuilds the instance buffer of every prop that blocks light when the geometry
-    /// changed.
+    /// changed or more models have loaded.
     fn update_props(&mut self, scene: &Scene, renderer: &Renderer3D, options: &LightingOptions) {
+        let models = renderer.gpu_models.values().filter(|model| model.is_some()).count();
         if !options.prop_shadows
             || self
                 .props
                 .as_ref()
-                .is_some_and(|props| props.generation == scene.geometry_generation)
+                .is_some_and(|props| props.generation == scene.geometry_generation && props.models == models)
         {
             return;
         }
-        let mut data = Vec::new();
-        let mut props = Vec::new();
+        let skybox = self.zones.and_then(|(_, zones)| zones.skybox);
+        let mut found: Vec<(PropCaster, ModelInstanceData, [i32; 3])> = Vec::new();
         for mesh in &scene.meshes {
             let Some(instance) = mesh.model.as_ref().filter(|instance| instance.casts_shadows) else {
                 continue;
@@ -1189,16 +1717,23 @@ impl LitState {
             if renderer.gpu_models.get(&instance.key).is_none_or(Option::is_none) {
                 continue;
             }
-            data.push(ModelInstanceData {
-                transform: instance.transform.as_mat4().to_cols_array(),
-                tint: [1.0, 1.0, 1.0, 0.0],
-            });
-            props.push((
-                instance.key.clone(),
-                mesh.bounds.min.as_vec3(),
-                mesh.bounds.max.as_vec3(),
+            let center = mesh.bounds.center();
+            found.push((
+                PropCaster {
+                    key: instance.key.clone(),
+                    min: mesh.bounds.min.as_vec3(),
+                    max: mesh.bounds.max.as_vec3(),
+                    zone: zone_of(skybox.as_ref(), center),
+                },
+                ModelInstanceData {
+                    transform: instance.transform.as_mat4().to_cols_array(),
+                    tint: [1.0, 1.0, 1.0, 0.0],
+                },
+                (center.as_vec3() / CASTER_CHUNK).floor().as_ivec3().to_array(),
             ));
         }
+        found.sort_by(|a, b| a.0.key.cmp(&b.0.key).then(a.2.cmp(&b.2)));
+        let data: Vec<ModelInstanceData> = found.iter().map(|(_, data, _)| *data).collect();
         let buffer = (!data.is_empty()).then(|| {
             renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("mallet shadow props"),
@@ -1208,8 +1743,9 @@ impl LitState {
         });
         self.props = Some(PropCasters {
             generation: scene.geometry_generation,
+            models,
             buffer,
-            props,
+            props: found.into_iter().map(|(prop, ..)| prop).collect(),
         });
     }
 
@@ -1327,6 +1863,7 @@ impl LitState {
                     resource: wgpu::BindingResource::Sampler(&self.clamp_sampler),
                 },
                 buffer(12, &self.sky_samples.buffer),
+                view(13, &self.atlas.view),
             ],
         })
     }
@@ -2107,16 +2644,95 @@ fn helper_edges(light: &PreviewLight) -> Vec<[DVec3; 2]> {
     edges
 }
 
-/// Draws one shadow map: every brush face and prop that blocks light, seen from the
-/// layer's camera. Sky and tool faces, translucent faces and entity boxes let light
-/// through; nodraw faces block it.
-fn draw_shadow(
+/// Draws everything that blocks light into a shadow map pass whose camera is bound:
+/// opaque faces a chunk at a time, alpha-tested faces with their textures, then props,
+/// all culled to `planes`. Tool faces, translucent faces and entity boxes let light
+/// through; nodraw faces block it, and sky faces when `blockers` says so.
+fn draw_casters(
+    pass: &mut wgpu::RenderPass<'_>,
+    renderer: &Renderer3D,
+    pipelines: &CasterPipelines,
+    (casters, props): (Option<&Casters>, Option<&PropCasters>),
+    planes: &[Vec4; 6],
+    blockers: Blockers,
+) {
+    let wanted = |of: Zone| blockers.zone.is_none_or(|zone| zone == of);
+    if let Some(casters) = casters {
+        let visible: Vec<&CasterChunk> = casters
+            .chunks
+            .iter()
+            .filter(|chunk| wanted(chunk.zone) && box_visible(planes, chunk.min, chunk.max))
+            .collect();
+        pass.set_pipeline(&pipelines.solid);
+        pass.set_vertex_buffer(0, casters.positions.slice(..));
+        for chunk in &visible {
+            let end = if blockers.sky { chunk.sky.end } else { chunk.solid.end };
+            if end > chunk.solid.start {
+                pass.draw(chunk.solid.start..end, 0..1);
+            }
+        }
+        if visible.iter().any(|chunk| !chunk.tested.is_empty()) {
+            pass.set_pipeline(&pipelines.tested);
+            pass.set_vertex_buffer(0, casters.tested.slice(..));
+            for (key, range) in visible.iter().flat_map(|chunk| &chunk.tested) {
+                pass.set_bind_group(1, &renderer.texture_for(key).bind_group, &[]);
+                pass.draw(range.clone(), 0..1);
+            }
+        }
+    }
+    let Some(PropCasters {
+        buffer: Some(buffer),
+        props,
+        ..
+    }) = props
+    else {
+        return;
+    };
+    let seen = |prop: &PropCaster| wanted(prop.zone) && box_visible(planes, prop.min, prop.max);
+    pass.set_pipeline(&pipelines.model);
+    pass.set_vertex_buffer(1, buffer.slice(..));
+    let mut first = 0;
+    while first < props.len() {
+        if !seen(&props[first]) {
+            first += 1;
+            continue;
+        }
+        let key = &props[first].key;
+        let mut end = first + 1;
+        while end < props.len() && props[end].key == *key && seen(&props[end]) {
+            end += 1;
+        }
+        if let Some(Some(model)) = renderer.gpu_models.get(key) {
+            pass.set_vertex_buffer(0, model.vertices.slice(..));
+            pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for (material, range) in &model.meshes {
+                let texture = renderer.texture_for(material);
+                if !blocks(texture) {
+                    continue;
+                }
+                pass.set_bind_group(1, &texture.bind_group, &[]);
+                pass.draw_indexed(range.clone(), 0, first as u32..end as u32);
+            }
+        }
+        first = end;
+    }
+}
+
+/// Whether a texture's faces block light: all but sky, tool and translucent ones.
+fn blocks(texture: &GpuTexture) -> bool {
+    !matches!(texture.surface, Surface::Sky | Surface::Tool) && !matches!(texture.alpha, AlphaMode::Blend(_))
+}
+
+/// Draws one whole shadow map layer from `matrix`.
+#[allow(clippy::too_many_arguments)]
+fn draw_layer(
     renderer: &Renderer3D,
     encoder: &mut wgpu::CommandEncoder,
-    (face_pipeline, model_pipeline): (&wgpu::RenderPipeline, &wgpu::RenderPipeline),
+    pipelines: &CasterPipelines,
     layer: &ShadowLayer,
     matrix: Mat4,
-    props: Option<&PropCasters>,
+    casters: (Option<&Casters>, Option<&PropCasters>),
+    blockers: Blockers,
 ) {
     renderer
         .queue
@@ -2135,69 +2751,188 @@ fn draw_shadow(
         timestamp_writes: None,
         occlusion_query_set: None,
     });
-    let planes = frustum_planes(matrix);
     pass.set_bind_group(0, &layer.group, &[]);
-    let blocks = |texture: &GpuTexture| {
-        !matches!(texture.surface, Surface::Sky | Surface::Tool) && !matches!(texture.alpha, AlphaMode::Blend(_))
-    };
-    if let Some(faces) = &renderer.faces {
-        pass.set_pipeline(face_pipeline);
-        pass.set_vertex_buffer(0, faces.opaque.buffer.slice(..));
-        for chunk in faces
-            .opaque
-            .chunks
-            .iter()
-            .filter(|chunk| box_visible(&planes, chunk.min, chunk.max))
-        {
-            for (key, range) in &chunk.batches {
-                let texture = renderer.texture_for(key);
-                if key == WHITE_KEY || !blocks(texture) {
-                    continue;
-                }
-                pass.set_bind_group(1, &texture.bind_group, &[]);
-                pass.draw(range.clone(), 0..1);
-            }
-        }
-    }
-    let Some(PropCasters {
-        buffer: Some(buffer),
-        props,
-        ..
-    }) = props
-    else {
-        return;
-    };
-    pass.set_pipeline(model_pipeline);
-    pass.set_vertex_buffer(1, buffer.slice(..));
-    for (index, (key, low, high)) in props.iter().enumerate() {
-        if !box_visible(&planes, *low, *high) {
-            continue;
-        }
-        let Some(Some(model)) = renderer.gpu_models.get(key) else {
-            continue;
-        };
-        pass.set_vertex_buffer(0, model.vertices.slice(..));
-        pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
-        let instance = index as u32..index as u32 + 1;
-        for (material, range) in &model.meshes {
-            let texture = renderer.texture_for(material);
-            if !blocks(texture) {
-                continue;
-            }
-            pass.set_bind_group(1, &texture.bind_group, &[]);
-            pass.draw_indexed(range.clone(), 0, instance.clone());
+    draw_casters(
+        &mut pass,
+        renderer,
+        pipelines,
+        casters,
+        &frustum_planes(matrix),
+        blockers,
+    );
+}
+
+/// Draws small shadow maps into their tiles of the atlas, one pass for each layer they
+/// are on: each tile is cleared to the far plane, then drawn from its camera.
+fn draw_tiles(
+    renderer: &Renderer3D,
+    encoder: &mut wgpu::CommandEncoder,
+    (pipelines, clear): (&CasterPipelines, &wgpu::RenderPipeline),
+    atlas: &ShadowAtlas,
+    tiles: &[(u32, Mat4, u64)],
+    casters: (Option<&Casters>, Option<&PropCasters>),
+) {
+    let per_layer = atlas.per_layer();
+    let mut sorted: Vec<&(u32, Mat4, u64)> = tiles.iter().collect();
+    sorted.sort_by_key(|(tile, ..)| *tile);
+    for group in sorted.chunk_by(|a, b| a.0 / per_layer == b.0 / per_layer) {
+        let layer = (group[0].0 / per_layer) as usize;
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mallet small shadow maps"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &atlas.targets[layer],
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        for (tile, matrix, _) in group {
+            let slot = &atlas.tiles[*tile as usize];
+            renderer
+                .queue
+                .write_buffer(&slot.buffer, 0, bytemuck::cast_slice(&matrix.to_cols_array()));
+            let within = tile % per_layer;
+            let x = (within % atlas.per_row) * atlas.tile;
+            let y = (within / atlas.per_row) * atlas.tile;
+            let side = atlas.tile as f32;
+            pass.set_viewport(x as f32, y as f32, side, side, 0.0, 1.0);
+            pass.set_scissor_rect(x, y, atlas.tile, atlas.tile);
+            pass.set_bind_group(0, &slot.group, &[]);
+            pass.set_pipeline(clear);
+            pass.draw(0..3, 0..1);
+            let blockers = Blockers { zone: None, sky: true };
+            draw_casters(
+                &mut pass,
+                renderer,
+                pipelines,
+                casters,
+                &frustum_planes(*matrix),
+                blockers,
+            );
         }
     }
 }
 
+/// Gives every wanted light its run of `count` layers or tiles out of `capacity`, keeping
+/// the runs of lights that already have them, and packing them all again when the free
+/// ones are too scattered.
+fn allocate_runs(slots: &mut HashMap<u64, (u32, u32)>, capacity: usize, wanted: &[(u64, u32)]) {
+    slots.retain(|key, (_, count)| wanted.iter().any(|(wanted, layers)| wanted == key && layers == count));
+    let mut used = vec![false; capacity];
+    for (first, count) in slots.values() {
+        for layer in *first..*first + *count {
+            if let Some(slot) = used.get_mut(layer as usize) {
+                *slot = true;
+            }
+        }
+    }
+    let place = |used: &mut Vec<bool>, count: u32| -> Option<u32> {
+        let count = count as usize;
+        let start =
+            (0..=capacity.checked_sub(count)?).find(|&start| used[start..start + count].iter().all(|taken| !taken))?;
+        used[start..start + count].iter_mut().for_each(|taken| *taken = true);
+        Some(start as u32)
+    };
+    for (key, count) in wanted {
+        if slots.contains_key(key) {
+            continue;
+        }
+        if let Some(first) = place(&mut used, *count) {
+            slots.insert(*key, (first, *count));
+            continue;
+        }
+        slots.clear();
+        used.iter_mut().for_each(|taken| *taken = false);
+        for (key, count) in wanted {
+            if let Some(first) = place(&mut used, *count) {
+                slots.insert(*key, (first, *count));
+            }
+        }
+        break;
+    }
+}
+
+/// Which zone a point is in, given the 3D skybox's bounds.
+fn zone_of(skybox: Option<&Bounds>, point: DVec3) -> Zone {
+    match skybox {
+        Some(skybox) if point.cmpge(skybox.min - DVec3::ONE).all() && point.cmple(skybox.max + DVec3::ONE).all() => {
+            Zone::Skybox
+        }
+        _ => Zone::Map,
+    }
+}
+
+/// The 3D skybox: the room the sky_camera stands in, found as the world brushes that touch
+/// the one under the camera, and the ones touching those. `None` without a sky_camera, or
+/// when that group reaches over half the map, as when the skybox touches the map itself.
+fn skybox_bounds(scene: &Scene) -> Option<Bounds> {
+    let camera = scene.lighting.sky.camera?;
+    let brushes: Vec<Bounds> = scene
+        .meshes
+        .iter()
+        .filter(|mesh| matches!(mesh.owner, Some(Owner::Solid(_))) && !mesh.bounds.is_empty())
+        .map(|mesh| mesh.bounds)
+        .collect();
+    let under = |bounds: &Bounds| {
+        camera.x >= bounds.min.x
+            && camera.x <= bounds.max.x
+            && camera.y >= bounds.min.y
+            && camera.y <= bounds.max.y
+            && bounds.max.z <= camera.z + 1.0
+    };
+    let seed = brushes
+        .iter()
+        .enumerate()
+        .filter(|(_, bounds)| under(bounds))
+        .max_by(|a, b| a.1.max.z.total_cmp(&b.1.max.z))?
+        .0;
+    let limit = volume(&scene.bounds) * 0.5;
+    let mut room = brushes[seed];
+    let mut found = vec![false; brushes.len()];
+    found[seed] = true;
+    let mut queue = vec![seed];
+    while let Some(at) = queue.pop() {
+        for (index, other) in brushes.iter().enumerate() {
+            if found[index] || !touching(&brushes[at], other) {
+                continue;
+            }
+            found[index] = true;
+            room.add_bounds(other);
+            if volume(&room) > limit {
+                return None;
+            }
+            queue.push(index);
+        }
+    }
+    let holds = camera.cmpge(room.min - DVec3::ONE).all() && camera.cmple(room.max + DVec3::ONE).all();
+    holds.then_some(room)
+}
+
+/// Whether two boxes touch or overlap, give or take a unit.
+fn touching(a: &Bounds, b: &Bounds) -> bool {
+    (a.min - DVec3::ONE).cmple(b.max).all() && (b.min - DVec3::ONE).cmple(a.max).all()
+}
+
+fn volume(bounds: &Bounds) -> f64 {
+    let size = bounds.size().max(DVec3::ZERO);
+    size.x * size.y * size.z
+}
+
 /// A depth-only pipeline for shadow maps, with a bias that keeps surfaces from shadowing
-/// themselves. Both sides of faces are drawn, so thin walls still block light.
+/// themselves. Both sides of faces are drawn, so thin walls still block light. Without
+/// a fragment stage nothing is alpha-tested.
 fn depth_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
-    vertex_entry: &str,
+    (vertex_entry, tested): (&str, bool),
     buffers: &[wgpu::VertexBufferLayout<'_>],
+    format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(vertex_entry),
@@ -2214,7 +2949,7 @@ fn depth_pipeline(
             ..Default::default()
         },
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: SHADOW_FORMAT,
+            format,
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
@@ -2225,12 +2960,42 @@ fn depth_pipeline(
             },
         }),
         multisample: wgpu::MultisampleState::default(),
-        fragment: Some(wgpu::FragmentState {
+        fragment: tested.then_some(wgpu::FragmentState {
             module: shader,
             entry_point: Some("fs_shadow"),
             targets: &[],
             compilation_options: Default::default(),
         }),
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// The pipeline that clears one tile of the small shadow map atlas to the far plane.
+fn clear_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("mallet small shadow clear"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_shadow_clear"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: ATLAS_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: None,
         multiview: None,
         cache: None,
     })
