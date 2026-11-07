@@ -9,7 +9,7 @@ maps through a built-in MCP server.
 | Crate | Purpose |
 | --- | --- |
 | `mallet-kv` | Reads and writes Valve KeyValues text. Keeps every key, block and duplicate in order and writes Hammer's exact layout (tabs, CRLF). |
-| `mallet-vmf` | Typed VMF model on top of `mallet-kv`, brush geometry, the edit/undo layer, and Source's lighting rules (`light`). No UI dependencies. |
+| `mallet-vmf` | Typed VMF model on top of `mallet-kv`, brush geometry, the edit/undo layer, Source's lighting rules (`light`) and where VBSP puts a face's luxels (`lightmap`). No UI dependencies. |
 | `mallet-format` | The `.mallet` map format: the `Vmf` model as compact binary, with a checksum per section and room for the editor's own state. |
 | `mallet-content` | Game content: `gameinfo.txt` search paths, VPK archives, VMT materials, VTF textures, MDL models and FGD entity classes. |
 | `mallet` | The editor application: window, viewports, key bindings and the MCP server. |
@@ -357,6 +357,18 @@ cached chunks and props as the textured view with its own shaders (`lit.wgsl`):
   light's colour, and the result is exposed, clamped or tone mapped and fogged.
 - Glows, spotlight beams and light helpers (reach spheres, cones, frusta and sun arrows)
   are built each frame around the camera.
+- With luxel detail, brush faces are lit from baked luxels. `mallet_vmf::lightmap` works
+  out each face's luxel grid as VBSP does, along its texture axes at its lightmap scale,
+  and the point each luxel lights, moved inside the face when it falls outside. A worker
+  thread lays every lightmapped face's grid out in one atlas (coarser everywhere past four
+  million luxels) with each luxel's point, and the shader finds a face's luxels from its
+  face number, which every face vertex carries. Bakes render into a second light texture
+  while the first is shown: sky light and sunlight over the whole atlas first, then each
+  frame a batch of up to 48 lights, each with small shadow maps of its own in tiles kept
+  free in the atlas, added over the faces they reach. Faces show the bake once it is
+  done for what it was baked from; until then they are lit per pixel. Baked lights are
+  marked so faces showing luxels skip them, while props and faces without luxels light
+  them as before.
 
 ## MCP server
 

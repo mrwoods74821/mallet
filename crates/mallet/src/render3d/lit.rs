@@ -11,6 +11,12 @@
 //! few a frame. Lights stay where they are, so a shadow map is only drawn again when what
 //! it shows changes. A map's 3D skybox gets its own sun shadows, so the map and the
 //! skybox never shadow each other.
+//!
+//! With luxel detail, brush faces are lit the way the game lights them: once per luxel of
+//! their lightmaps, at each face's lightmap scale. Every face's luxels sit in one atlas
+//! texture, and lights are baked into it a batch each frame, every one with its own small
+//! shadow maps, into a second texture shown once the bake is done. Moving the camera
+//! needs no new lighting; faces are lit per pixel until the first bake is ready.
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
@@ -27,14 +33,15 @@ use mallet_vmf::geometry::Bounds;
 use mallet_vmf::light::{
     pattern_brightness, texture_light_scale, Falloff, Light, LightKind, Receivers, MAX_REACH, QUADRATIC,
 };
+use mallet_vmf::lightmap::{pack_rows, LuxelGrid};
 
 use super::{
     box_visible, frustum_planes, material_key, pipeline, signature, Batches, Depth, FaceMesh, FaceVertex, GpuTexture,
     ModelInstanceData, RenderStats, Renderer3D, COLOR_FORMAT, WHITE_KEY,
 };
 use crate::config::LightingOptions;
-use crate::lighting::{HelperMode, SkyMode, TextureLights, Tonemap};
-use crate::scene::{Overlay, Owner, Scene};
+use crate::lighting::{HelperMode, LightingDetail, SkyMode, TextureLights, Tonemap};
+use crate::scene::{Overlay, Owner, Scene, SceneFace};
 use crate::view3d::Camera3D;
 
 /// Depth format of shadow maps.
@@ -78,6 +85,22 @@ const ATLAS_TILES_PER_FRAME: usize = 96;
 const CASTER_CHUNK: f32 = 512.0;
 /// How shadow caster positions are laid out for the shadow map shaders.
 const POSITION_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
+/// Format of baked luxel light.
+const LUXEL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// The most luxels along one side of a face; bigger faces get coarser luxels.
+const MAX_FACE_LUXELS: u32 = 256;
+/// The most luxels the atlas holds; maps with more get coarser luxels everywhere.
+const MAX_LUXELS: usize = 1 << 22;
+/// Texels along each side of the largest luxel atlas.
+const MAX_LUXEL_SIDE: u32 = 8192;
+/// Faces with luxels are found by the cubes of this many units they touch.
+const LUXEL_CELL: f32 = 1024.0;
+/// Small shadow map tiles kept for the lights being baked into luxels.
+const BAKE_TILES: u32 = 96;
+/// The most lights baked into luxels in one frame.
+const BAKE_LIGHTS: usize = 48;
+/// How the rectangles of luxels a bake lights are laid out for the bake shader.
+const RECT_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x4];
 /// The six faces of a cube shadow map: the way each looks and its up direction, in the
 /// order the shader picks them: +X, -X, +Y, -Y, +Z, -Z.
 const CUBE_FACES: [(Vec3, Vec3); 6] = [
@@ -120,6 +143,14 @@ pub struct LightingStats {
     pub glows: usize,
     /// Where the map's 3D skybox is, which gets its own sun shadows.
     pub skybox: Option<Bounds>,
+    /// Luxels of the faces' lightmaps, 0 when faces are lit per pixel.
+    pub luxels: usize,
+    /// How many times coarser than the faces ask the luxels are, to fit the atlas.
+    pub luxel_scale: f64,
+    /// How much of a bake of luxel lighting is done, from 0 to 1, while one runs.
+    pub baking: Option<f32>,
+    /// Whether faces show their baked luxels.
+    pub luxels_shown: bool,
 }
 
 #[repr(C)]
@@ -159,6 +190,7 @@ struct GpuFrame {
     atlas: [u32; 4],
     skybox_min: [f32; 4],
     skybox_max: [f32; 4],
+    luxels: [u32; 4],
 }
 
 /// Bytes in one glow vertex.
@@ -639,6 +671,320 @@ struct CasterPipelines {
     model: wgpu::RenderPipeline,
 }
 
+/// What the shader reads to find a face's luxels: its luxel grid directions, each with
+/// the texel position of its first luxel in w, and its normal, whose w is 1 when the face
+/// has luxels.
+#[repr(C)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuLuxelFace {
+    s: [f32; 4],
+    t: [f32; 4],
+    normal: [f32; 4],
+}
+
+/// One face's luxels, for baking lights into just the faces they reach: the space the
+/// face covers, and its luxels' left, top, right and bottom in the atlas's clip space.
+struct LuxelRect {
+    min: Vec3,
+    max: Vec3,
+    clip: [f32; 4],
+}
+
+/// Where the luxels of every face the game lightmaps sit in one atlas texture, and the
+/// point each luxel lights.
+struct LuxelLayout {
+    key: u64,
+    width: u32,
+    height: u32,
+    /// What the shader needs of each face of the scene, by face number.
+    faces: Vec<GpuLuxelFace>,
+    rects: Vec<LuxelRect>,
+    /// The rectangles touching each cube of [`LUXEL_CELL`] units.
+    cells: HashMap<[i32; 3], Vec<u32>>,
+    /// Each texel's point as float bits, and its face's number plus one, 0 for texels no
+    /// face uses. Emptied once uploaded.
+    points: Vec<[u32; 4]>,
+    luxels: usize,
+    /// How many times coarser than the faces ask the luxels had to be to fit.
+    coarser: f64,
+}
+
+/// A face to lay luxels out for, copied from the scene for the worker thread that lays
+/// them out: its number, corners, normal, texture axes and units per luxel.
+struct LuxelFace {
+    id: u32,
+    corners: Vec<DVec3>,
+    normal: DVec3,
+    axes: [DVec3; 2],
+    scale: f64,
+}
+
+impl LuxelFace {
+    /// Every face of the scene the game lightmaps: faces with a lit material that is not
+    /// sky, nodraw or a tool texture. Returns them and how many faces the scene has.
+    fn gather(scene: &Scene, renderer: &Renderer3D) -> (Vec<Self>, usize) {
+        let total = scene.meshes.iter().map(|mesh| mesh.faces.len()).sum::<usize>();
+        let mut faces = Vec::new();
+        for mesh in &scene.meshes {
+            let Some(first) = mesh.first_face else {
+                continue;
+            };
+            for (index, face) in mesh.faces.iter().enumerate() {
+                let Some(material) = &face.material else {
+                    continue;
+                };
+                let texture = renderer.texture_for(&material_key(material));
+                if texture.surface != Surface::Normal || texture.facts.unlit {
+                    continue;
+                }
+                faces.push(Self::copy(first.saturating_add(index as u32), face));
+            }
+        }
+        (faces, total)
+    }
+
+    fn copy(id: u32, face: &SceneFace) -> Self {
+        Self {
+            id,
+            corners: face.vertices.clone(),
+            normal: face.normal,
+            axes: [face.uaxis.axis, face.vaxis.axis],
+            scale: face.lightmap_scale,
+        }
+    }
+}
+
+impl LuxelLayout {
+    /// Lays out the luxels of `lit`, of a scene with `total` faces. Luxels get coarser
+    /// everywhere when the map has too many for the atlas.
+    fn build(lit: &[LuxelFace], total: usize, key: u64) -> Self {
+        let mut coarser = 1.0;
+        loop {
+            let grids: Vec<Option<LuxelGrid>> = lit
+                .iter()
+                .map(|face| {
+                    LuxelGrid::new(
+                        &face.corners,
+                        face.normal,
+                        face.axes,
+                        face.scale * coarser,
+                        MAX_FACE_LUXELS,
+                    )
+                })
+                .collect();
+            let sizes: Vec<(u32, u32)> = grids
+                .iter()
+                .map(|grid| grid.as_ref().map_or((0, 0), |grid| (grid.width, grid.height)))
+                .collect();
+            let luxels: usize = sizes.iter().map(|(w, h)| *w as usize * *h as usize).sum();
+            if luxels > MAX_LUXELS {
+                coarser *= (luxels as f64 / MAX_LUXELS as f64).sqrt().max(1.1);
+                continue;
+            }
+            let area: f64 = sizes.iter().map(|(w, h)| f64::from(w + 1) * f64::from(h + 1)).sum();
+            let strip = ((area.sqrt() * 1.1).ceil() as u32)
+                .max(MAX_FACE_LUXELS)
+                .next_power_of_two()
+                .min(MAX_LUXEL_SIDE);
+            let (places, height) = pack_rows(&sizes, strip, 1);
+            let lost = places
+                .iter()
+                .zip(&sizes)
+                .any(|(place, (w, _))| place.is_none() && *w > 0);
+            if height > MAX_LUXEL_SIDE || lost {
+                coarser *= 1.25;
+                continue;
+            }
+            let (width, height) = (strip, height.max(1));
+            let mut faces = vec![GpuLuxelFace::default(); total.max(1)];
+            let mut points = vec![[0u32; 4]; width as usize * height as usize];
+            let mut rects = Vec::new();
+            let mut cells: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
+            let clip_x = |x: u32| x as f32 / width as f32 * 2.0 - 1.0;
+            let clip_y = |y: u32| 1.0 - y as f32 / height as f32 * 2.0;
+            for ((face, grid), place) in lit.iter().zip(&grids).zip(&places) {
+                let (Some(grid), Some((x, y))) = (grid, place) else {
+                    continue;
+                };
+                let id = &face.id;
+                for j in 0..grid.height {
+                    for i in 0..grid.width {
+                        let point = grid.point(i, j).as_vec3();
+                        let at = (y + j) as usize * width as usize + (x + i) as usize;
+                        points[at] = [point.x.to_bits(), point.y.to_bits(), point.z.to_bits(), id + 1];
+                    }
+                }
+                faces[*id as usize] = GpuLuxelFace {
+                    s: grid
+                        .s
+                        .as_vec3()
+                        .extend((f64::from(*x) + 0.5 - grid.s_min) as f32)
+                        .to_array(),
+                    t: grid
+                        .t
+                        .as_vec3()
+                        .extend((f64::from(*y) + 0.5 - grid.t_min) as f32)
+                        .to_array(),
+                    normal: face.normal.as_vec3().extend(1.0).to_array(),
+                };
+                let mut bounds = Bounds::EMPTY;
+                for corner in &face.corners {
+                    bounds.add_point(*corner);
+                }
+                let (min, max) = (bounds.min.as_vec3(), bounds.max.as_vec3());
+                let (low, high) = (luxel_cell(min), luxel_cell(max));
+                for cx in low[0]..=high[0] {
+                    for cy in low[1]..=high[1] {
+                        for cz in low[2]..=high[2] {
+                            cells.entry([cx, cy, cz]).or_default().push(rects.len() as u32);
+                        }
+                    }
+                }
+                rects.push(LuxelRect {
+                    min,
+                    max,
+                    clip: [clip_x(*x), clip_y(*y), clip_x(x + grid.width), clip_y(y + grid.height)],
+                });
+            }
+            return Self {
+                key,
+                width,
+                height,
+                faces,
+                rects,
+                cells,
+                points,
+                luxels,
+                coarser,
+            };
+        }
+    }
+
+    /// The rectangles of the faces a light reaching `radius` units from `center` may
+    /// light, each once, using `seen` to remember which were taken with `stamp`.
+    fn reached(&self, center: Vec3, radius: f32, (seen, stamp): (&mut [u32], u32), out: &mut Vec<u32>) {
+        let low = luxel_cell(center - Vec3::splat(radius));
+        let high = luxel_cell(center + Vec3::splat(radius));
+        let span = (0..3)
+            .map(|axis| i64::from(high[axis] - low[axis]) + 1)
+            .product::<i64>();
+        let check = |rect: &LuxelRect| {
+            let nearest = center.clamp(rect.min, rect.max);
+            nearest.distance_squared(center) <= radius * radius
+        };
+        if span > self.cells.len() as i64 {
+            for (index, rect) in self.rects.iter().enumerate() {
+                if seen[index] != stamp && check(rect) {
+                    seen[index] = stamp;
+                    out.push(index as u32);
+                }
+            }
+            return;
+        }
+        for cx in low[0]..=high[0] {
+            for cy in low[1]..=high[1] {
+                for cz in low[2]..=high[2] {
+                    for &index in self.cells.get(&[cx, cy, cz]).into_iter().flatten() {
+                        if seen[index as usize] != stamp && check(&self.rects[index as usize]) {
+                            seen[index as usize] = stamp;
+                            out.push(index);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The cube of [`LUXEL_CELL`] units a point is in.
+fn luxel_cell(point: Vec3) -> [i32; 3] {
+    (point / LUXEL_CELL).floor().as_ivec3().to_array()
+}
+
+/// The luxel lighting of the faces: their layout, the points the luxels light, and two
+/// light textures, one shown while the other is baked.
+struct Luxels {
+    layout: LuxelLayout,
+    _points: wgpu::Texture,
+    points: wgpu::TextureView,
+    lights: [(wgpu::Texture, wgpu::TextureView); 2],
+    faces: Storage,
+    /// Which of `lights` faces show, and what it was baked from.
+    front: usize,
+    shown: Option<u64>,
+    /// The bake under way into the other texture: what it is baked from, and how many
+    /// of its lights are in.
+    bake: Option<(u64, usize)>,
+    /// Marks which rectangles a batch of lights already takes.
+    seen: Vec<u32>,
+    stamp: u32,
+}
+
+impl Luxels {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, mut layout: LuxelLayout) -> Self {
+        let size = wgpu::Extent3d {
+            width: layout.width,
+            height: layout.height,
+            depth_or_array_layers: 1,
+        };
+        let texture = |label: &str, format: wgpu::TextureFormat, usage: wgpu::TextureUsages| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (texture, view)
+        };
+        let (points_texture, points) = texture(
+            "mallet luxel points",
+            wgpu::TextureFormat::Rgba32Uint,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        );
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &points_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&layout.points),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(layout.width * 16),
+                rows_per_image: Some(layout.height),
+            },
+            size,
+        );
+        layout.points = Vec::new();
+        let light_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let lights = [
+            texture("mallet luxel light", LUXEL_FORMAT, light_usage),
+            texture("mallet luxel light", LUXEL_FORMAT, light_usage),
+        ];
+        let mut faces = Storage::new(device, "mallet luxel faces");
+        faces.write(device, queue, bytemuck::cast_slice(&layout.faces));
+        let seen = vec![0; layout.rects.len()];
+        Self {
+            layout,
+            _points: points_texture,
+            points,
+            lights,
+            faces,
+            front: 0,
+            shown: None,
+            bake: None,
+            seen,
+            stamp: 0,
+        }
+    }
+}
+
 /// Props that cast shadows: one instance buffer of every prop, sorted by model and then by
 /// place so neighbouring props of a model draw together, with each prop's model, bounds
 /// and zone. Rebuilt when the geometry changes or more models have loaded.
@@ -657,8 +1003,9 @@ struct PropCaster {
     zone: Zone,
 }
 
-/// Textures loading on a worker thread for the preview.
-type Loading<T> = Option<(T, mpsc::Receiver<Vec<Option<Vec<u8>>>>)>;
+/// Something made on a worker thread for the preview, by default textures, with what it
+/// is for.
+type Loading<T, R = Vec<Option<Vec<u8>>>> = Option<(T, mpsc::Receiver<R>)>;
 
 /// Everything the lighting preview keeps between frames.
 pub(super) struct LitState {
@@ -673,6 +1020,10 @@ pub(super) struct LitState {
     tile_casters: CasterPipelines,
     /// Clears one tile of the atlas.
     tile_clear: wgpu::RenderPipeline,
+    /// Start a bake of luxel lighting with sky light and sunlight, and add a batch of
+    /// lights to one.
+    bake_sky: wgpu::RenderPipeline,
+    bake_lights: wgpu::RenderPipeline,
     glow: wgpu::RenderPipeline,
     frame: wgpu::Buffer,
     lights: Storage,
@@ -715,6 +1066,13 @@ pub(super) struct LitState {
     zones: Option<(u64, Zones)>,
     /// Draw every small shadow map still waiting in the next frame, as screenshots need.
     draw_all: bool,
+    luxels: Option<Luxels>,
+    /// A luxel layout being made on a worker thread, and what it is for.
+    luxel_loading: Loading<u64, LuxelLayout>,
+    /// Stand-ins bound while faces are lit per pixel.
+    blank_light: (wgpu::Texture, wgpu::TextureView),
+    blank_points: (wgpu::Texture, wgpu::TextureView),
+    blank_faces: Storage,
     started: Instant,
     /// Counts loads and settings that change what the preview shows, for cached images.
     pub version: u64,
@@ -799,6 +1157,27 @@ impl LitState {
                 },
                 storage(12),
                 depth_array(13),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 14,
+                    visibility: fragment,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                storage(15),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 16,
+                    visibility: fragment,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let lit_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -879,6 +1258,53 @@ impl LitState {
             ),
         };
         let glow = glow_pipeline(device, &glow_layout, &shader);
+        let rect_buffers = [wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 4]>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &RECT_ATTRIBUTES,
+        }];
+        let add = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let bake_sky = bake_pipeline(
+            device,
+            &lit_layout,
+            &shader,
+            ("vs_bake_all", "fs_bake_sky"),
+            &[],
+            (wgpu::PrimitiveTopology::TriangleList, None),
+        );
+        let bake_lights = bake_pipeline(
+            device,
+            &lit_layout,
+            &shader,
+            ("vs_bake_rect", "fs_bake_lights"),
+            &rect_buffers,
+            (
+                wgpu::PrimitiveTopology::TriangleStrip,
+                Some(wgpu::BlendState { color: add, alpha: add }),
+            ),
+        );
+        let blank = |label: &str, format: wgpu::TextureFormat| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (texture, view)
+        };
         let frame = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mallet lighting frame"),
             size: std::mem::size_of::<GpuFrame>() as u64,
@@ -911,6 +1337,8 @@ impl LitState {
             layer_casters: casters(SHADOW_FORMAT),
             tile_casters: casters(ATLAS_FORMAT),
             tile_clear: clear_pipeline(device, &solid_layout, &shader),
+            bake_sky,
+            bake_lights,
             glow,
             frame,
             lights: Storage::new(device, "mallet lights"),
@@ -946,20 +1374,29 @@ impl LitState {
             props: None,
             zones: None,
             draw_all: false,
+            luxels: None,
+            luxel_loading: None,
+            blank_light: blank("mallet blank luxel light", LUXEL_FORMAT),
+            blank_points: blank("mallet blank luxel points", wgpu::TextureFormat::Rgba32Uint),
+            blank_faces: Storage::new(device, "mallet blank luxel faces"),
             started: Instant::now(),
             version: 0,
             stats: LightingStats::default(),
         }
     }
 
-    /// How many texture loads of the preview are still running.
+    /// How many texture loads of the preview are still running, a luxel layout being made
+    /// included.
     pub(super) fn loading(&self) -> usize {
-        usize::from(self.cookie_loading.is_some()) + usize::from(self.sky_loading.is_some())
+        usize::from(self.cookie_loading.is_some())
+            + usize::from(self.sky_loading.is_some())
+            + usize::from(self.luxel_loading.is_some())
     }
 
-    /// Whether lights are still waiting for their small shadow maps.
-    pub(super) fn shadows_waiting(&self) -> bool {
-        self.stats.waiting > 0
+    /// Whether lights are still waiting for their small shadow maps, or luxels are being
+    /// laid out or baked.
+    pub(super) fn pending(&self) -> bool {
+        self.stats.waiting > 0 || self.stats.baking.is_some() || self.luxel_loading.is_some()
     }
 
     /// Draws every small shadow map still waiting in the next frame, as screenshots need.
@@ -1187,6 +1624,8 @@ impl LitState {
         self.update_zones(scene);
         self.update_casters(renderer, scene, settled);
         self.update_props(scene, renderer, options);
+        let luxel_mode = options.detail == LightingDetail::Luxels && !scene.bounds.is_empty();
+        self.update_luxels(scene, renderer, (settled, self.draw_all), luxel_mode);
         let appearance = |light: &PreviewLight| match (&light.light.pattern, options.animate) {
             (Some(pattern), true) => pattern_brightness(pattern, seconds),
             _ => 1.0,
@@ -1207,6 +1646,26 @@ impl LitState {
             |(_, zones)| zones,
         );
         let draw_all = std::mem::take(&mut self.draw_all);
+        let bake_list = if luxel_mode {
+            self.bake_list(options)
+        } else {
+            Vec::new()
+        };
+        let bake_key = self.bake_key(&bake_list, options, settled);
+        if luxel_mode {
+            for &index in &bake_list {
+                gpu[index].routing[2] = 1.0;
+            }
+            for (index, light) in self.prepared.iter().enumerate().take(self.everywhere) {
+                if light.light.kind == LightKind::Directional {
+                    gpu[index].routing[2] = 1.0;
+                }
+            }
+        }
+        let luxels_shown = self
+            .luxels
+            .as_ref()
+            .is_some_and(|luxels| luxels.shown == Some(bake_key));
         let casters = self.casters.as_ref();
         let props = self.props.as_ref().filter(|_| options.prop_shadows);
 
@@ -1296,7 +1755,16 @@ impl LitState {
             }
         }
 
-        let small_needed: u32 = small.iter().map(|&index| layers_for(&self.prepared[index])).sum();
+        let reserve = if luxel_mode && options.light_shadows {
+            BAKE_TILES
+        } else {
+            0
+        };
+        let small_needed: u32 = small
+            .iter()
+            .map(|&index| layers_for(&self.prepared[index]))
+            .sum::<u32>()
+            + reserve;
         let small_size = options.small_map_size();
         let want_shape = if small_needed == 0 {
             if options.light_shadows && options.more_shadowed_count() > 0 && has_bounds {
@@ -1322,7 +1790,8 @@ impl LitState {
             self.group = None;
         }
         let wanted = self.runs(&small);
-        allocate_runs(&mut self.atlas_slots, self.atlas.tiles.len(), &wanted);
+        let room = self.atlas.tiles.len().saturating_sub(reserve as usize);
+        allocate_runs(&mut self.atlas_slots, room, &wanted);
         let atlas_base = matrices.len() as u32;
         matrices.resize(matrices.len() + self.atlas.tiles.len(), Mat4::IDENTITY);
         let mut budget = if draw_all { usize::MAX } else { ATLAS_TILES_PER_FRAME };
@@ -1372,19 +1841,73 @@ impl LitState {
                 gpu[index].extra[2] = (atlas_base + first) as f32;
             }
         }
-        if !pending.is_empty() {
+        let first_bake = gpu.len() as u32;
+        let mut bake_tiles: Vec<(u32, Mat4, u64)> = Vec::new();
+        let mut bake_work: Option<(bool, Vec<u32>, u32)> = None;
+        if let Some(luxels) = self.luxels.as_mut().filter(|_| luxel_mode && !luxels_shown) {
+            let start = luxels.bake.is_none_or(|(key, _)| key != bake_key);
+            if start {
+                luxels.bake = Some((bake_key, 0));
+            }
+            let mut next = luxels.bake.map_or(0, |(_, next)| next);
+            let mut tile = room as u32;
+            let mut batch = Vec::new();
+            while next < bake_list.len() && batch.len() < BAKE_LIGHTS {
+                let light = &self.prepared[bake_list[next]];
+                let count = if light.casts { layers_for(light) } else { 0 };
+                if count > 0 && tile + count > self.atlas.tiles.len() as u32 && !batch.is_empty() {
+                    break;
+                }
+                let mut packed = pack(light, 1.0);
+                if count > 0 && tile + count <= self.atlas.tiles.len() as u32 {
+                    let (views, offset) = local_views(light, count, self.atlas.tile);
+                    for (face, matrix) in views.iter().enumerate() {
+                        let at = tile + face as u32;
+                        matrices[(atlas_base + at) as usize] = *matrix;
+                        bake_tiles.push((at, *matrix, 0));
+                    }
+                    packed.shadow[0] = tile as f32;
+                    packed.shadow[1] = count as f32;
+                    packed.extra[0] = offset;
+                    packed.routing[1] = 1.0;
+                    tile += count;
+                }
+                gpu.push(packed);
+                batch.push(bake_list[next]);
+                next += 1;
+            }
+            luxels.bake = Some((bake_key, next));
+            luxels.stamp = luxels.stamp.wrapping_add(1).max(1);
+            let mut rects = Vec::new();
+            for &index in &batch {
+                let light = &self.prepared[index];
+                luxels.layout.reached(
+                    light.light.origin.as_vec3(),
+                    light.reach as f32,
+                    (&mut luxels.seen, luxels.stamp),
+                    &mut rects,
+                );
+            }
+            bake_work = Some((start, rects, batch.len() as u32));
+        }
+        if !pending.is_empty() || !bake_tiles.is_empty() {
+            let mut tiles = pending.clone();
+            tiles.extend_from_slice(&bake_tiles);
             draw_tiles(
                 renderer,
                 encoder,
                 (&self.tile_casters, &self.tile_clear),
                 &self.atlas,
-                &pending,
+                &tiles,
                 (casters, props),
             );
             for (tile, _, content) in &pending {
                 self.atlas.tiles[*tile as usize].content = Some(*content);
             }
-            drawn += pending.len();
+            for (tile, ..) in &bake_tiles {
+                self.atlas.tiles[*tile as usize].content = None;
+            }
+            drawn += tiles.len();
         }
         if waiting > 0 {
             self.version += 1;
@@ -1558,9 +2081,14 @@ impl LitState {
             frame.skybox_min = (skybox.min - DVec3::ONE).as_vec3().extend(1.0).to_array();
             frame.skybox_max = (skybox.max + DVec3::ONE).as_vec3().extend(sun_offsets[1]).to_array();
         }
+        let batch = bake_work.as_ref().map_or(0, |(_, _, count)| *count);
+        frame.luxels = [first_bake, batch, u32::from(luxels_shown), 0];
         queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
         if self.group.is_none() {
             self.group = Some(self.bind_group(device));
+        }
+        if let Some((start, rects, _)) = bake_work {
+            self.bake(renderer, encoder, start, &rects, bake_list.len());
         }
         self.stats = LightingStats {
             lights: self.prepared.len(),
@@ -1582,7 +2110,177 @@ impl LitState {
             shadow_maps_drawn: drawn,
             glows: 0,
             skybox: zones.skybox,
+            luxels: self.luxels.as_ref().map_or(0, |luxels| luxels.layout.luxels),
+            luxel_scale: self.luxels.as_ref().map_or(1.0, |luxels| luxels.layout.coarser),
+            baking: self
+                .luxels
+                .as_ref()
+                .and_then(|luxels| luxels.bake)
+                .map(|(_, next)| next as f32 / bake_list.len().max(1) as f32),
+            luxels_shown,
         };
+        if self.stats.baking.is_some() {
+            self.version += 1;
+        }
+    }
+
+    /// Records this frame's part of a bake into the luxel texture faces do not show: sky
+    /// light and sunlight first when the bake starts, then the batch of lights over the
+    /// faces they reach. Once every light of the bake is in, faces show it from the next
+    /// frame on; the bind group is made again at once, so this frame still draws.
+    fn bake(
+        &mut self,
+        renderer: &Renderer3D,
+        encoder: &mut wgpu::CommandEncoder,
+        start: bool,
+        rects: &[u32],
+        total: usize,
+    ) {
+        let (Some(luxels), Some(group)) = (self.luxels.as_mut(), self.group.as_ref()) else {
+            return;
+        };
+        let target = &luxels.lights[1 - luxels.front].1;
+        let view_group = &self.local.layers[0].group;
+        let texture_group = &renderer.texture_for(WHITE_KEY).bind_group;
+        if start {
+            let mut sky = luxel_pass(encoder, target, wgpu::LoadOp::Clear(wgpu::Color::BLACK));
+            sky.set_pipeline(&self.bake_sky);
+            sky.set_bind_group(0, view_group, &[]);
+            sky.set_bind_group(1, texture_group, &[]);
+            sky.set_bind_group(2, group, &[]);
+            sky.draw(0..3, 0..1);
+        }
+        if !rects.is_empty() {
+            let clips: Vec<[f32; 4]> = rects
+                .iter()
+                .map(|&index| luxels.layout.rects[index as usize].clip)
+                .collect();
+            let buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mallet luxel rectangles"),
+                contents: bytemuck::cast_slice(&clips),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let mut lights = luxel_pass(encoder, target, wgpu::LoadOp::Load);
+            lights.set_pipeline(&self.bake_lights);
+            lights.set_bind_group(0, view_group, &[]);
+            lights.set_bind_group(1, texture_group, &[]);
+            lights.set_bind_group(2, group, &[]);
+            lights.set_vertex_buffer(0, buffer.slice(..));
+            lights.draw(0..4, 0..clips.len() as u32);
+        }
+        if let Some((key, next)) = luxels.bake {
+            if next >= total {
+                luxels.front = 1 - luxels.front;
+                luxels.shown = Some(key);
+                luxels.bake = None;
+                self.group = Some(self.bind_group(&renderer.device));
+                self.version += 1;
+            }
+        }
+    }
+
+    /// Lays the luxels out again on a worker thread when the faces or their textures
+    /// changed, faces being lit per pixel until it is done, and takes in a finished layout;
+    /// with `wait`, waits for it, as screenshots do. Lets the luxels go when faces are lit
+    /// per pixel.
+    fn update_luxels(&mut self, scene: &Scene, renderer: &Renderer3D, (settled, wait): (u64, bool), wanted: bool) {
+        if !wanted {
+            self.luxel_loading = None;
+            if self.luxels.take().is_some() {
+                self.group = None;
+            }
+            return;
+        }
+        let key = signature(|hasher| (scene.geometry_generation, settled).hash(hasher));
+        if self.luxels.as_ref().is_some_and(|luxels| luxels.layout.key == key) {
+            return;
+        }
+        if self.luxels.take().is_some() {
+            self.group = None;
+        }
+        if self.luxel_loading.as_ref().is_none_or(|(loading, _)| *loading != key) {
+            let (faces, total) = LuxelFace::gather(scene, renderer);
+            let (sender, receiver) = mpsc::channel();
+            let spawned = std::thread::Builder::new()
+                .name("mallet luxel layout".to_owned())
+                .spawn(move || {
+                    let _ = sender.send(LuxelLayout::build(&faces, total, key));
+                });
+            self.luxel_loading = spawned.ok().map(|_| (key, receiver));
+        }
+        let Some((loading, receiver)) = self.luxel_loading.take() else {
+            return;
+        };
+        let received = if wait {
+            receiver.recv().map_err(|_| mpsc::TryRecvError::Disconnected)
+        } else {
+            receiver.try_recv()
+        };
+        match received {
+            Ok(layout) => {
+                self.luxels = Some(Luxels::new(&renderer.device, &renderer.queue, layout));
+                self.group = None;
+                self.version += 1;
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                self.luxel_loading = Some((loading, receiver));
+                self.version += 1;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {}
+        }
+    }
+
+    /// The lights baked into luxels: all but suns, which are baked with the sky light,
+    /// lights being dragged, projected textures, lights only for models and, while
+    /// appearances play, lights with one. Those stay live, lit per pixel.
+    fn bake_list(&self, options: &LightingOptions) -> Vec<usize> {
+        self.prepared
+            .iter()
+            .enumerate()
+            .filter(|(_, light)| {
+                let source = &light.light;
+                !light.everywhere
+                    && source.kind != LightKind::Projected
+                    && source.receivers != Receivers::Models
+                    && !(options.animate && source.pattern.is_some())
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// What a bake of luxel lighting comes from: the layout, what casts shadows, the
+    /// baked lights and suns, and the settings that change how they light.
+    fn bake_key(&self, list: &[usize], options: &LightingOptions, settled: u64) -> u64 {
+        signature(|hasher| {
+            self.luxels.as_ref().map(|luxels| luxels.layout.key).hash(hasher);
+            self.casters.as_ref().map(|casters| casters.key).hash(hasher);
+            self.props
+                .as_ref()
+                .filter(|_| options.prop_shadows)
+                .map(|props| (props.generation, props.models))
+                .hash(hasher);
+            let suns = self
+                .prepared
+                .iter()
+                .take(self.everywhere)
+                .filter(|light| light.light.kind == LightKind::Directional);
+            for light in list.iter().map(|&index| &self.prepared[index]).chain(suns) {
+                (light.key, light.casts).hash(hasher);
+                light.color.to_array().map(f64::to_bits).hash(hasher);
+            }
+            (
+                options.sky_light,
+                options.sky_sample_count(),
+                options.sun_shadows,
+                options.light_shadows,
+                options.prop_shadows,
+                options.bounce_share().to_bits(),
+                options.small_map_size(),
+                options.hdr,
+                settled,
+            )
+                .hash(hasher);
+        })
     }
 
     /// Picks the lights that get shadow maps, the brightest around the camera and those in
@@ -1840,6 +2538,10 @@ impl LitState {
     fn bind_group(&self, device: &wgpu::Device) -> wgpu::BindGroup {
         let buffer = buffer_entry;
         let view = view_entry;
+        let (luxel_light, luxel_faces, luxel_points) = match &self.luxels {
+            Some(luxels) => (&luxels.lights[luxels.front].1, &luxels.faces.buffer, &luxels.points),
+            None => (&self.blank_light.1, &self.blank_faces.buffer, &self.blank_points.1),
+        };
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mallet lighting"),
             layout: &self.layout,
@@ -1864,6 +2566,9 @@ impl LitState {
                 },
                 buffer(12, &self.sky_samples.buffer),
                 view(13, &self.atlas.view),
+                view(14, luxel_light),
+                buffer(15, luxel_faces),
+                view(16, luxel_points),
             ],
         })
     }
@@ -2964,6 +3669,68 @@ fn depth_pipeline(
             module: shader,
             entry_point: Some("fs_shadow"),
             targets: &[],
+            compilation_options: Default::default(),
+        }),
+        multiview: None,
+        cache: None,
+    })
+}
+
+/// A render pass into a luxel light texture.
+fn luxel_pass<'a>(
+    encoder: &'a mut wgpu::CommandEncoder,
+    target: &'a wgpu::TextureView,
+    load: wgpu::LoadOp<wgpu::Color>,
+) -> wgpu::RenderPass<'a> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("mallet luxel bake"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    })
+}
+
+/// A pipeline that bakes light into the luxel atlas, from vertices covering whole faces'
+/// luxels or the whole atlas, replacing what is there or, with a blend, adding to it.
+fn bake_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    (vertex_entry, fragment_entry): (&str, &str),
+    buffers: &[wgpu::VertexBufferLayout<'_>],
+    (topology, blend): (wgpu::PrimitiveTopology, Option<wgpu::BlendState>),
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(fragment_entry),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(vertex_entry),
+            buffers,
+            compilation_options: Default::default(),
+        },
+        primitive: wgpu::PrimitiveState {
+            topology,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(fragment_entry),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: LUXEL_FORMAT,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
             compilation_options: Default::default(),
         }),
         multiview: None,

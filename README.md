@@ -157,9 +157,18 @@ comes in through them. A 3D skybox gets its own sun shadows, so it and the map n
 shadow each other. Bounced light is not traced, so a "fake bounce" adds a little light
 around each light instead.
 
-The sun button beside the viewport's label holds the settings used most: exposure, tone
-mapping, fill light, fake bounce, the sky, fog, glows, light helpers and which kinds of
-light count. Mallet Options > Lighting preview has all of them. Selected lights show how
+Brush faces are lit per luxel by default, the way the game's lightmaps light them: once
+for every luxel of the face's lightmap scale, so a face at scale 16 gets one light value
+every 16 units, blended between neighbours as the engine blends them. Every light casts
+shadows into the luxels, which are baked in the background a batch of lights at a time
+and kept while the camera moves; after an edit, faces are lit per pixel until the new
+bake is ready, which takes a few seconds on a big map. Projected textures, lights being
+dragged and, while appearances play, flickering lights stay live, and props are always
+lit per pixel. Set Detail to Every pixel to light faces live and sharper instead.
+
+The sun button beside the viewport's label holds the settings used most: detail,
+exposure, tone mapping, fill light, fake bounce, the sky, fog, glows, light helpers and
+which kinds of light count. Mallet Options > Lighting preview has all of them. Selected lights show how
 far they reach, their cones or the sun's direction, and a light being dragged lights the
 map from where it is.
 
@@ -227,9 +236,10 @@ as you change it:
 - **Lighting preview**: HDR or LDR light values; the sun, sky light, dynamic lights, texture
   lights, self-illumination, lights that start dark and appearances; sun and light
   shadows with their sizes, softness, how many lights cast them, how many more get small
-  shadow maps and their size, and how many directions sky light is traced from; exposure, tone mapping, fill light, fake bounce, the sky, fog, glows,
-  tool textures, entity boxes and light helpers; and how far lights reach and how many may
-  light one spot.
+  shadow maps and their size, and how many directions sky light is traced from; whether
+  faces are lit per luxel or every pixel; exposure, tone mapping, fill light, fake bounce,
+  the sky, fog, glows, tool textures, entity boxes and light helpers; and how far lights
+  reach and how many may light one spot.
 - **Colours**: the background, grid, axis, selection, tool, handle and texture-face
   colours of the views, Hammer's by default.
 - **Editing**: the texture new brushes get, the Entity tool's class, how many recent

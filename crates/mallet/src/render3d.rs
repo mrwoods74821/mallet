@@ -54,10 +54,16 @@ struct FaceVertex {
     highlight: f32,
     /// Alpha-test reference (0 for none) and blend opacity (0 for opaque).
     alpha: [f32; 2],
+    /// The face's number among all the scene's faces, so the lighting preview can find
+    /// its luxels; [`NO_FACE`] when it has none, as for a face being dragged.
+    face: u32,
 }
 
+/// The face number of a face the lighting preview keeps nothing for.
+const NO_FACE: u32 = u32::MAX;
+
 /// Where each [`FaceVertex`] field goes in the shaders, in field order.
-const FACE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![0 => Float32x3, 5 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Float32, 4 => Float32x2];
+const FACE_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![0 => Float32x3, 5 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Float32, 4 => Float32x2, 6 => Uint32];
 const MODEL_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
 const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 5] =
@@ -566,9 +572,10 @@ impl Renderer3D {
         }
     }
 
-    /// Whether the lighting preview still has small shadow maps to draw, a few a frame.
-    pub fn shadows_waiting(&self) -> bool {
-        self.lit.as_ref().is_some_and(lit::LitState::shadows_waiting)
+    /// Whether the lighting preview still has work to do a little each frame: small
+    /// shadow maps to draw or luxels to bake.
+    pub fn lighting_pending(&self) -> bool {
+        self.lit.as_ref().is_some_and(lit::LitState::pending)
     }
 
     /// What the latest lighting preview frame used, once one has been drawn.
@@ -1408,7 +1415,11 @@ impl Renderer3D {
             } else {
                 [1.0, 1.0, 1.0]
             };
-            for face in &mesh.faces {
+            for (index, face) in mesh.faces.iter().enumerate() {
+                let id = match (remap, mesh.first_face) {
+                    (None, Some(first)) => first.saturating_add(index as u32),
+                    _ => NO_FACE,
+                };
                 let key = face
                     .material
                     .as_deref()
@@ -1416,7 +1427,7 @@ impl Renderer3D {
                 let texture = self.texture_for(&key);
                 if matches!(texture.alpha, AlphaMode::Blend(_)) {
                     let mut vertices = Vec::new();
-                    triangulate(face, texture, tint, highlight, remap, &mut vertices);
+                    triangulate(face, (id, texture), tint, highlight, remap, &mut vertices);
                     let center = face.vertices.iter().sum::<DVec3>() / face.vertices.len().max(1) as f64;
                     chunk.translucent.push(TranslucentFace {
                         center: center.as_vec3(),
@@ -1427,7 +1438,7 @@ impl Renderer3D {
                 } else {
                     triangulate(
                         face,
-                        texture,
+                        (id, texture),
                         tint,
                         highlight,
                         remap,
@@ -1812,10 +1823,11 @@ fn mip_chain(image: &Image) -> Vec<Image> {
 /// back-face culling hides faces seen from behind, as in Hammer. Texture coordinates follow
 /// Source:
 /// `u = (point · axis / scale + offset) / texture width`, and likewise for `v`. The normal
-/// turns with a remap, so a rotated preview is lit the way it faces.
+/// turns with a remap, so a rotated preview is lit the way it faces. Every vertex carries
+/// the face's number `id`.
 fn triangulate(
     face: &SceneFace,
-    texture: &GpuTexture,
+    (id, texture): (u32, &GpuTexture),
     tint: [f32; 3],
     highlight: f32,
     remap: Option<&Remap>,
@@ -1846,6 +1858,7 @@ fn triangulate(
             AlphaMode::Test(reference) => [reference, 0.0],
             AlphaMode::Blend(opacity) => [0.0, opacity.max(f32::EPSILON)],
         },
+        face: id,
     };
     let points = &face.vertices;
     if points.len() < 3 {
@@ -1904,6 +1917,7 @@ fn selected_face_meshes(scene: &Scene) -> Vec<WireMesh> {
                 faces,
                 edges,
                 selected: true,
+                first_face: None,
                 ..mesh.clone()
             }
         })

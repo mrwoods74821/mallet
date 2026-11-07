@@ -57,6 +57,8 @@ pub struct LightingOptions {
     pub exposure: f64,
     /// How light brighter than full white looks.
     pub tonemap: crate::lighting::Tonemap,
+    /// How finely brush faces are lit: per luxel at their lightmap scale, or per pixel.
+    pub detail: crate::lighting::LightingDetail,
     /// Light every surface gets, from 0 to 1, so unlit corners are not black.
     pub fill: f64,
     /// Fakes light bouncing off walls: each light also adds this share of its light,
@@ -126,6 +128,7 @@ impl Default for LightingOptions {
             hdr: true,
             exposure: 0.0,
             tonemap: crate::lighting::Tonemap::Clamp,
+            detail: crate::lighting::LightingDetail::Luxels,
             fill: 0.0,
             bounce: 0.15,
             sun: true,

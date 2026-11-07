@@ -91,6 +91,9 @@ pub enum SelectMode {
 pub const MIN_GRID: f64 = 1.0;
 pub const MAX_GRID: f64 = 512.0;
 const DEFAULT_GRID: f64 = 64.0;
+/// The most frames a screenshot draws to let textures load, small shadow maps draw and
+/// luxels bake, a batch of lights a frame.
+const SCREENSHOT_ROUNDS: usize = 600;
 /// Pixels between the four viewports.
 pub const VIEWPORT_GAP: f32 = 2.0;
 /// Viewport area assumed until the window has laid itself out.
@@ -1315,7 +1318,8 @@ impl Editor {
             &self.models,
             lighting,
         );
-        if gpu.textures_loading() > 0 || gpu.shadows_waiting() {
+        let mut rounds = 0;
+        while (gpu.textures_loading() > 0 || gpu.lighting_pending()) && rounds < SCREENSHOT_ROUNDS {
             gpu.finish_loading();
             gpu.render(
                 slot,
@@ -1328,6 +1332,7 @@ impl Editor {
                 &self.models,
                 lighting,
             );
+            rounds += 1;
         }
         let (width, height, rgba) = gpu.read_pixels(slot)?;
         PixmapCanvas::from_rgba(width, height, rgba)

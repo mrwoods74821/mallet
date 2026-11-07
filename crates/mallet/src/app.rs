@@ -744,7 +744,7 @@ impl MalletApp {
                     if animated {
                         ctx.request_repaint_after(Duration::from_millis(100));
                     }
-                    if editor.gpu.as_ref().is_some_and(Renderer3D::shadows_waiting) {
+                    if editor.gpu.as_ref().is_some_and(Renderer3D::lighting_pending) {
                         ctx.request_repaint();
                     }
                 }
@@ -1737,9 +1737,14 @@ fn lighting_button(ui: &mut egui::Ui, slot: usize, rect: Rect, label: Rect, edit
                 } else {
                     String::new()
                 };
+                let luxels = match (stats.baking, stats.luxels_shown) {
+                    (Some(done), _) => format!("\nBaking {} luxels: {:.0}%", stats.luxels, done * 100.0),
+                    (None, true) => format!("\nFaces lit from {} baked luxels", stats.luxels),
+                    (None, false) => String::new(),
+                };
                 ui.label(
                     egui::RichText::new(format!(
-                        "{} lights ({} from textures), {} with shadows and {} with small shadows{waiting}",
+                        "{} lights ({} from textures), {} with shadows and {} with small shadows{waiting}{luxels}",
                         stats.lights, stats.texture_lights, stats.shadowed, stats.small_shadowed
                     ))
                     .small()

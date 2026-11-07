@@ -1,7 +1,8 @@
 // Shaders for the lighting preview: every light of the map with Source's colours,
 // falloff and cones, shadow maps, sky light, projected textures, texture lights,
 // self-illumination, the skybox, fog and tone mapping. Also the depth-only shaders that
-// draw shadow maps, and the additive glows and spotlight beams.
+// draw shadow maps, the passes that bake light into faces' luxels, and the additive
+// glows and spotlight beams.
 
 struct View {
     view_proj: mat4x4<f32>,
@@ -63,6 +64,9 @@ struct Frame {
     // normal offset.
     skybox_min: vec4<f32>,
     skybox_max: vec4<f32>,
+    // Luxels: x the first light of the batch being baked, y how many there are, z 1 when
+    // faces show their baked luxels.
+    luxels: vec4<u32>,
 };
 
 struct Light {
@@ -83,9 +87,19 @@ struct Light {
     // x: normal offset per unit of distance; y: bounce share; z: projection matrix.
     extra: vec4<f32>,
     // x: surfaces it lights (0 all, 1 brushes only, 2 models only); y: 1 when its shadow
-    // maps are small ones in the atlas.
+    // maps are small ones in the atlas; z: 1 when it is baked into the luxels faces show.
     routing: vec4<f32>,
 };
+
+// Where a face's luxels are: its luxel grid directions, each with the texel position of
+// its first luxel in w, and its normal, with w 1 when it has luxels.
+struct LuxelFace {
+    s: vec4<f32>,
+    t: vec4<f32>,
+    normal: vec4<f32>,
+};
+
+const NO_FACE: u32 = 0xffffffffu;
 
 const FLAG_SELF_ILLUM: u32 = 1u;
 const FLAG_SKY: u32 = 2u;
@@ -110,6 +124,9 @@ const FLAG_EMISSIVE: u32 = 8u;
 @group(2) @binding(11) var clamp_sampler: sampler;
 @group(2) @binding(12) var<storage, read> sky_samples: array<vec4<f32>>;
 @group(2) @binding(13) var atlas_shadows: texture_depth_2d_array;
+@group(2) @binding(14) var luxel_light: texture_2d<f32>;
+@group(2) @binding(15) var<storage, read> luxel_faces: array<LuxelFace>;
+@group(2) @binding(16) var luxel_points: texture_2d<u32>;
 
 struct FaceIn {
     @location(0) position: vec3<f32>,
@@ -118,6 +135,7 @@ struct FaceIn {
     @location(3) highlight: f32,
     @location(4) alpha: vec2<f32>,
     @location(5) normal: vec3<f32>,
+    @location(6) face: u32,
 };
 
 struct ModelIn {
@@ -141,6 +159,7 @@ struct LitOut {
     @location(5) normal: vec3<f32>,
     // 1 for models, 0 for brushes.
     @location(6) model: f32,
+    @location(7) @interpolate(flat) face: u32,
 };
 
 @vertex
@@ -154,6 +173,7 @@ fn vs_lit_face(input: FaceIn) -> LitOut {
     out.world = input.position;
     out.normal = input.normal;
     out.model = 0.0;
+    out.face = input.face;
     return out;
 }
 
@@ -170,6 +190,7 @@ fn vs_lit_model(input: ModelIn) -> LitOut {
     out.world = world.xyz;
     out.normal = (model * vec4<f32>(input.normal, 0.0)).xyz;
     out.model = 1.0;
+    out.face = NO_FACE;
     return out;
 }
 
@@ -397,20 +418,45 @@ fn cell_index(world: vec3<f32>) -> u32 {
     return u32(cell.x + size.x * (cell.y + size.y * cell.z));
 }
 
-fn gather(world: vec3<f32>, normal: vec3<f32>, model: bool) -> vec3<f32> {
+// Adds up the light reaching a point. A face that takes its light from its luxels only
+// adds the fill light and the lights that are not baked into them.
+fn gather(world: vec3<f32>, normal: vec3<f32>, model: bool, lightmapped: bool) -> vec3<f32> {
     var total = frame.fill.rgb;
-    if (any(frame.sky_light.rgb > vec3<f32>(0.0))) {
+    if (!lightmapped && any(frame.sky_light.rgb > vec3<f32>(0.0))) {
         total = total + frame.sky_light.rgb * sky_visibility(world, normal);
     }
     let everywhere = frame.grid_size.w;
     for (var index = 0u; index < everywhere; index = index + 1u) {
-        total = total + shine(lights[index], world, normal, model);
+        let light = lights[index];
+        if (lightmapped && light.routing.z > 0.5) {
+            continue;
+        }
+        total = total + shine(light, world, normal, model);
     }
     let range = cells[cell_index(world)];
     for (var index = 0u; index < range.y; index = index + 1u) {
-        total = total + shine(lights[indices[range.x + index]], world, normal, model);
+        let light = lights[indices[range.x + index]];
+        if (lightmapped && light.routing.z > 0.5) {
+            continue;
+        }
+        total = total + shine(light, world, normal, model);
     }
     return total;
+}
+
+// The light baked into a face's luxels at a point on it, filtered between the four
+// nearest luxels as the engine filters lightmaps; w is 0 when the face shows none.
+fn baked(face: u32, world: vec3<f32>) -> vec4<f32> {
+    if (frame.luxels.z == 0u || face >= arrayLength(&luxel_faces)) {
+        return vec4<f32>(0.0);
+    }
+    let entry = luxel_faces[face];
+    if (entry.normal.w < 0.5) {
+        return vec4<f32>(0.0);
+    }
+    let texel = vec2<f32>(dot(world, entry.s.xyz) + entry.s.w, dot(world, entry.t.xyz) + entry.t.w);
+    let uv = texel / vec2<f32>(textureDimensions(luxel_light));
+    return vec4<f32>(textureSampleLevel(luxel_light, clamp_sampler, uv, 0.0).rgb, 1.0);
 }
 
 fn skybox(direction: vec3<f32>) -> vec3<f32> {
@@ -520,7 +566,8 @@ fn fs_lit(input: LitOut, @builtin(front_facing) front: bool) -> @location(0) vec
             if (!front) {
                 normal = -normal;
             }
-            color = base * gather(input.world, normal, input.model > 0.5);
+            let lightmap = baked(input.face, input.world);
+            color = base * (gather(input.world, normal, input.model > 0.5, lightmap.w > 0.5) + lightmap.rgb);
             if ((flags & FLAG_SELF_ILLUM) != 0u && (frame.options.x & 2u) != 0u) {
                 color = mix(color, base * material.self_illum.rgb, texel.a);
             }
@@ -546,6 +593,71 @@ fn vs_shadow_solid(@location(0) position: vec3<f32>) -> @builtin(position) vec4<
 fn vs_shadow_clear(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
     let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
     return vec4<f32>(corner * 2.0 - 1.0, 1.0, 1.0);
+}
+
+// A triangle covering the whole luxel atlas.
+@vertex
+fn vs_bake_all(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+    let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+    return vec4<f32>(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// One face's luxels, a corner of the strip at a time; `rect` holds the left, top, right
+// and bottom of them in clip space.
+@vertex
+fn vs_bake_rect(@builtin(vertex_index) index: u32, @location(0) rect: vec4<f32>) -> @builtin(position) vec4<f32> {
+    let x = select(rect.x, rect.z, (index & 1u) != 0u);
+    let y = select(rect.y, rect.w, (index & 2u) != 0u);
+    return vec4<f32>(x, y, 0.0, 1.0);
+}
+
+// The point a luxel of the atlas lights, and its face's normal in w of the second; the
+// normal is zero for texels no face uses.
+fn luxel_point(position: vec4<f32>) -> array<vec3<f32>, 2> {
+    let data = textureLoad(luxel_points, vec2<i32>(position.xy), 0);
+    if (data.w == 0u) {
+        return array<vec3<f32>, 2>(vec3<f32>(0.0), vec3<f32>(0.0));
+    }
+    return array<vec3<f32>, 2>(bitcast<vec3<f32>>(data.xyz), luxel_faces[data.w - 1u].normal.xyz);
+}
+
+// Bakes sky light and sunlight into every luxel, starting a bake afresh.
+@fragment
+fn fs_bake_sky(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let point = luxel_point(position);
+    let world = point[0];
+    let normal = point[1];
+    if (all(normal == vec3<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+    var total = vec3<f32>(0.0);
+    if (any(frame.sky_light.rgb > vec3<f32>(0.0))) {
+        total = total + frame.sky_light.rgb * sky_visibility(world, normal);
+    }
+    let everywhere = frame.grid_size.w;
+    for (var index = 0u; index < everywhere; index = index + 1u) {
+        let light = lights[index];
+        if (u32(light.position.w) == 2u && light.routing.z > 0.5) {
+            total = total + shine(light, world, normal, false);
+        }
+    }
+    return vec4<f32>(total, 1.0);
+}
+
+// Adds this frame's batch of lights to the luxels of the faces they reach.
+@fragment
+fn fs_bake_lights(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let point = luxel_point(position);
+    let world = point[0];
+    let normal = point[1];
+    if (all(normal == vec3<f32>(0.0))) {
+        return vec4<f32>(0.0);
+    }
+    var total = vec3<f32>(0.0);
+    for (var index = 0u; index < frame.luxels.y; index = index + 1u) {
+        total = total + shine(lights[frame.luxels.x + index], world, normal, false);
+    }
+    return vec4<f32>(total, 0.0);
 }
 
 struct ShadowOut {

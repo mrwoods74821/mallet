@@ -12,7 +12,7 @@ use crate::compile::default_presets;
 use crate::config::{self, ToolKind};
 use crate::editor::Editor;
 use crate::keymap::KeyMap;
-use crate::lighting::{HelperMode, SkyMode, Tonemap};
+use crate::lighting::{HelperMode, LightingDetail, SkyMode, Tonemap};
 use crate::shell;
 use crate::view3d::MAX_LOOK_FRAMES;
 
@@ -921,6 +921,19 @@ fn lighting_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
 /// The settings for how the lighting preview looks, shared by Mallet Options and the
 /// viewport's sun button. Each is a grid row.
 fn lighting_look_rows(ui: &mut egui::Ui, id: &str, lighting: &mut config::LightingOptions, dirty: &mut bool) {
+    ui.label("Detail").on_hover_text(
+        "Luxels light brush faces once per luxel at each face's lightmap scale, as the game's lightmaps do, with every light casting shadows. They bake in the background after each change and are quick to draw. Every pixel lights faces live and sharper, with shadows from the lights around the camera, but is slower on big maps.",
+    );
+    egui::ComboBox::from_id_salt((id, "detail"))
+        .selected_text(lighting.detail.label())
+        .show_ui(ui, |ui| {
+            for detail in LightingDetail::ALL {
+                *dirty |= ui
+                    .selectable_value(&mut lighting.detail, detail, detail.label())
+                    .changed();
+            }
+        });
+    ui.end_row();
     ui.label("Exposure")
         .on_hover_text("Brightness of the picture in stops: +1 doubles it.");
     *dirty |= ui

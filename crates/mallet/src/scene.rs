@@ -196,6 +196,8 @@ pub struct SceneFace {
     pub solid: Option<u32>,
     /// Whether the texture tool has this face selected.
     pub selected: bool,
+    /// Units per luxel of the face's lightmap (the side's `lightmapscale`).
+    pub lightmap_scale: f64,
 }
 
 /// A face hit by a ray, for the texture tool.
@@ -246,6 +248,10 @@ pub struct WireMesh {
     pub selected: bool,
     /// The prop model drawn for this entity in the 3D view, instead of `faces`.
     pub model: Option<ModelInstance>,
+    /// The number of the first of `faces` among all the scene's faces, counting mesh by
+    /// mesh, so a renderer can keep data for each face; `None` for meshes made outside
+    /// [`Scene::build`].
+    pub first_face: Option<u32>,
 }
 
 /// Everything the viewports draw.
@@ -353,6 +359,7 @@ impl Scene {
                         casts_shadows: own_model && !shadows_off,
                         helper: !own_model,
                     }),
+                    first_face: None,
                 };
                 scene.bounds.add_bounds(&mesh.bounds);
                 scene.meshes.push(mesh);
@@ -374,10 +381,16 @@ impl Scene {
                     owner: entity_owner,
                     selected: false,
                     model: None,
+                    first_face: None,
                 };
                 scene.bounds.add_bounds(&mesh.bounds);
                 scene.meshes.push(mesh);
             }
+        }
+        let mut faces = 0u32;
+        for mesh in &mut scene.meshes {
+            mesh.first_face = Some(faces);
+            faces = faces.saturating_add(mesh.faces.len() as u32);
         }
         scene
     }
@@ -503,6 +516,7 @@ impl Scene {
                 return false;
             };
             mesh.selected = old.selected;
+            mesh.first_face = old.first_face.filter(|_| mesh.faces.len() == old.faces.len());
             self.meshes[at] = mesh;
             changed.push(at);
         }
@@ -739,6 +753,7 @@ fn brush_mesh(solid: &Solid, color: Color32, owner: Option<Owner>) -> Option<Wir
                 side: Some(side.id),
                 solid: solid.id(),
                 selected: false,
+                lightmap_scale: f64::from(side.lightmap_scale.unwrap_or(16).max(1)),
             };
             Some((scene_face, face.plane))
         })
@@ -752,6 +767,7 @@ fn brush_mesh(solid: &Solid, color: Color32, owner: Option<Owner>) -> Option<Wir
         owner,
         selected: false,
         model: None,
+        first_face: None,
     })
 }
 
@@ -808,6 +824,7 @@ fn box_faces(bounds: &Bounds) -> Vec<SceneFace> {
                 side: None,
                 solid: None,
                 selected: false,
+                lightmap_scale: 16.0,
             }
         })
         .collect()
@@ -870,6 +887,7 @@ mod tests {
             owner: Some(owner),
             selected: false,
             model: None,
+            first_face: None,
         }
     }
 

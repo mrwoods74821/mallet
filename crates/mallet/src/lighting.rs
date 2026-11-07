@@ -58,6 +58,29 @@ impl SkyMode {
     }
 }
 
+/// How finely brush faces are lit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightingDetail {
+    /// Once per luxel at each face's lightmap scale, baked in the background as VRAD
+    /// bakes lightmaps, with every light casting shadows.
+    #[default]
+    Luxels,
+    /// Every pixel, live, with shadows from the lights around the camera.
+    Pixels,
+}
+
+impl LightingDetail {
+    pub const ALL: [Self; 2] = [Self::Luxels, Self::Pixels];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Luxels => "Luxels, like the game",
+            Self::Pixels => "Every pixel",
+        }
+    }
+}
+
 /// Which lights show their range, cone or direction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
