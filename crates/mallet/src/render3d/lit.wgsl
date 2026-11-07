@@ -238,9 +238,10 @@ fn local_shadow(light: Light, world: vec3<f32>, normal: vec3<f32>, distance: f32
     if (first < 0) {
         return 1.0;
     }
+    let moved = world + normal * (light.extra.x * max(distance, 1.0));
     var layer = first;
     if (i32(light.shadow.y) == 6) {
-        let away = world - light.position.xyz;
+        let away = moved - light.position.xyz;
         let size = abs(away);
         if (size.x >= size.y && size.x >= size.z) {
             layer = layer + select(1, 0, away.x > 0.0);
@@ -250,7 +251,6 @@ fn local_shadow(light: Light, world: vec3<f32>, normal: vec3<f32>, distance: f32
             layer = layer + select(5, 4, away.z > 0.0);
         }
     }
-    let moved = world + normal * (light.extra.x * max(distance, 1.0));
     let at = project(u32(layer), moved);
     if (at.w < 0.0) {
         return 1.0;
