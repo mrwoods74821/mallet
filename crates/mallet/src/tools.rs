@@ -180,6 +180,43 @@ pub fn definitions() -> Value {
             &["shape"],
         ),
         tool(
+            "copy_selection",
+            "Copy the selected brushes and entities to Mallet's clipboard, like Ctrl+C in Hammer. The clipboard \
+             belongs to no tab, so the objects paste into any open map; they also go on the system clipboard as \
+             VMF text.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "cut_selection",
+            "Copy the selection to the clipboard, then delete it, like Ctrl+X in Hammer. Undoable.",
+            json!({}),
+            &[],
+        ),
+        tool(
+            "paste",
+            "Paste the clipboard into the open map with fresh ids and select the copies, as one undoable step. \
+             With no options this is Hammer's Paste: one copy. The other options are Hammer's Paste Special: \
+             copies, each moved by offset and turned by rotation (degrees about X, Y, Z) more than the one \
+             before, around the copies' centre or, with around_pivot, the pivot placed when they were copied; \
+             prefix and suffix for entity names; unique_names numbers names no other entity has, with outputs \
+             between pasted entities following; group puts each copy in a group of its own.",
+            json!({
+                "at": { "description": "\"original\" (default): where the objects were copied from; \"cursor\": \
+                    under the mouse in a 2D view, or the middle of the 2D view used last, snapped to the grid; or \
+                    [x, y, z] to centre the first copy's start there." },
+                "copies": { "type": "integer", "minimum": 1, "maximum": crate::editor::MAX_COPIES },
+                "offset": vec3,
+                "rotation": vec3,
+                "around_pivot": { "type": "boolean" },
+                "prefix": { "type": "string" },
+                "suffix": { "type": "string" },
+                "unique_names": { "type": "boolean" },
+                "group": { "type": "boolean" }
+            }),
+            &[],
+        ),
+        tool(
             "resize_selection",
             "Stretch the selection so its bounding box becomes min..max, like dragging Hammer's selection \
              handles. Brushes scale along each axis; entity origins move proportionally; textures follow the \
@@ -1164,6 +1201,18 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
                 "selection": selection_json(editor),
             })))
         }
+        "copy_selection" => {
+            editor.copy_selection()?;
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
+        "cut_selection" => {
+            editor.cut_selection()?;
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
+        "paste" => {
+            paste(editor, args)?;
+            Ok(ToolResult::json(&selection_json(editor)))
+        }
         "resize_selection" => {
             let to = Bounds {
                 min: required_vec3(args, "min")?,
@@ -1525,6 +1574,47 @@ fn transform_selection(editor: &mut Editor, args: &Value) -> Result<(), String> 
 }
 
 /// A world axis named `x`, `y` or `z`, as an index.
+/// The `paste` tool: where to paste and the Paste Special options.
+fn paste(editor: &mut Editor, args: &Value) -> Result<(), String> {
+    use crate::editor::{PasteAt, PasteOptions};
+    let at = match args.get("at") {
+        None | Some(Value::Null) => PasteAt::Original,
+        Some(Value::String(name)) => match name.as_str() {
+            "original" => PasteAt::Original,
+            "cursor" => editor.paste_point(),
+            other => return Err(format!("unknown paste point \"{other}\"")),
+        },
+        Some(_) => PasteAt::Center(required_vec3(args, "at")?),
+    };
+    let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
+    let flag = |key: &str| args.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let copies = match args.get("copies") {
+        None | Some(Value::Null) => 1,
+        Some(value) => value
+            .as_u64()
+            .and_then(|copies| u32::try_from(copies).ok())
+            .ok_or("copies must be a whole number")?,
+    };
+    let options = PasteOptions {
+        copies,
+        start_at_original: false,
+        offset: optional_numbers::<3>(args, "offset")?.map_or(DVec3::ZERO, DVec3::from_array),
+        rotation: optional_numbers::<3>(args, "rotation")?.map_or(DVec3::ZERO, DVec3::from_array),
+        around_pivot: flag("around_pivot"),
+        prefix: text("prefix"),
+        suffix: text("suffix"),
+        unique_names: flag("unique_names"),
+        group: flag("group"),
+    };
+    if options.around_pivot && editor.clipboard.pivot.is_none() {
+        return Err(
+            "no pivot was placed when the objects were copied; set one with set_pivot and copy again".to_owned(),
+        );
+    }
+    editor.paste(at, &options)?;
+    Ok(())
+}
+
 fn axis_arg(args: &Value, key: &str) -> Result<usize, String> {
     match string_arg(args, key)?.to_ascii_lowercase().as_str() {
         "x" => Ok(0),

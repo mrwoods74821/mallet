@@ -6,6 +6,7 @@ mod compile_window;
 mod context_menu;
 pub(crate) use compile_window::count;
 mod options;
+mod paste_special;
 mod properties;
 mod texture_browser;
 mod texture_tool;
@@ -29,7 +30,7 @@ use crate::config::{self, Config};
 use crate::document::MapFormat;
 use crate::editor::{self, Editor, SelectMode, Tool, ViewMode, WindowShot, VIEWPORT_GAP};
 use crate::gizmo::{Change as GizmoChange, Gizmo, GizmoDrag, Part as GizmoPart};
-use crate::keymap::{Action, KeyMap};
+use crate::keymap::{self, Action, KeyMap};
 use crate::netgraph::{NetGraph, NetGraphExtra};
 use crate::render3d::{CameraStyle, LightingInput, Renderer3D};
 use crate::scene::Remap;
@@ -46,7 +47,7 @@ const PIVOT_REACH_PIXELS: f32 = 7.0;
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 33] = [
+const KEY_ACTIONS: [Action; 37] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -55,6 +56,10 @@ const KEY_ACTIONS: [Action; 33] = [
     Action::SaveFile,
     Action::Undo,
     Action::Redo,
+    Action::Cut,
+    Action::Copy,
+    Action::Paste,
+    Action::PasteSpecial,
     Action::GridSmaller,
     Action::GridLarger,
     Action::SelectionTool,
@@ -188,6 +193,8 @@ pub struct MalletApp {
     context_menu: context_menu::ContextMenuState,
     /// The vertex tool's drag in progress, if any.
     vertex_drag: Option<vertex_tool::VertexPointer>,
+    /// The Paste Special dialog's settings, kept between pastes as Hammer does.
+    paste_options: editor::PasteOptions,
 }
 
 impl MalletApp {
@@ -222,6 +229,7 @@ impl MalletApp {
             gizmo_drag: None,
             context_menu: context_menu::ContextMenuState::default(),
             vertex_drag: None,
+            paste_options: editor::PasteOptions::default(),
         };
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
@@ -308,6 +316,26 @@ impl MalletApp {
         if ctx.wants_keyboard_input() {
             return;
         }
+        let clipboard = ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .filter_map(|event| {
+                    let action = keymap::clipboard_action(event, &input.modifiers)?;
+                    let text = match event {
+                        egui::Event::Paste(text) => Some(text.clone()),
+                        _ => None,
+                    };
+                    Some((action, text))
+                })
+                .collect::<Vec<_>>()
+        });
+        for (action, text) in clipboard {
+            if let Some(text) = text {
+                editor.read_system_clipboard(&text);
+            }
+            self.dispatch(action, editor);
+        }
         for action in triggered {
             if editor.camera.mouse_look() && (action == Action::ClearSelection || self.keymap.is_crouch_chord(action)) {
                 continue;
@@ -377,6 +405,10 @@ impl MalletApp {
                     menu_item(ui, &self.keymap, "Undo", Action::Undo, &mut chosen);
                     menu_item(ui, &self.keymap, "Redo", Action::Redo, &mut chosen);
                     ui.separator();
+                    menu_item(ui, &self.keymap, "Cut", Action::Cut, &mut chosen);
+                    menu_item(ui, &self.keymap, "Copy", Action::Copy, &mut chosen);
+                    menu_item(ui, &self.keymap, "Paste", Action::Paste, &mut chosen);
+                    menu_item(ui, &self.keymap, "Paste Special...", Action::PasteSpecial, &mut chosen);
                     menu_item(ui, &self.keymap, "Delete", Action::DeleteSelection, &mut chosen);
                     menu_item(ui, &self.keymap, "Select All", Action::SelectAll, &mut chosen);
                     menu_item(ui, &self.keymap, "Select None", Action::ClearSelection, &mut chosen);
@@ -617,6 +649,7 @@ impl MalletApp {
         let mut camera_updated = false;
         let (mut camera_ms, mut views_ms) = (0.0, 0.0);
         self.cursor = None;
+        editor.paste_cursor = None;
         for (slot, rect) in rects.into_iter().enumerate() {
             let started = Instant::now();
             let response = ui.interact(rect, Id::new(("viewport", slot)), Sense::click_and_drag());
@@ -993,7 +1026,9 @@ impl MalletApp {
             None => view.draw(canvas, rect, &editor.scene, editor.grid, response.hovered(), &overlay),
         }
         if let Some(position) = response.hover_pos() {
-            self.cursor = Some(snap(view.to_world(rect, position), editor.grid));
+            let point = snap(view.to_world(rect, position), editor.grid);
+            self.cursor = Some(point);
+            editor.paste_cursor = Some((view.axis, point));
         }
     }
 
@@ -1434,6 +1469,10 @@ impl eframe::App for MalletApp {
         self.options_window(ctx, &mut editor);
         self.about_window(ctx, &mut editor);
         self.transform_window(ctx, &mut editor);
+        self.paste_special_window(ctx, &mut editor);
+        if let Some(text) = editor.system_clipboard.take() {
+            ctx.copy_text(text);
+        }
         self.finish_compile(ctx, &mut editor);
         apply_view_options(&mut editor);
         self.apply_interface_options(ctx, &editor);
@@ -1967,6 +2006,13 @@ fn run(action: Action, editor: &mut Editor) {
         Action::Redo => {
             let _ = editor.step_history(true);
         }
+        Action::Cut => report(editor.cut_selection().map(drop), editor),
+        Action::Copy => report(editor.copy_selection().map(drop), editor),
+        Action::Paste => {
+            let at = editor.paste_point();
+            report(editor.paste(at, &editor::PasteOptions::default()).map(drop), editor)
+        }
+        Action::PasteSpecial => report(editor.open_paste_special(), editor),
         Action::GridSmaller => editor.change_grid(0.5),
         Action::GridLarger => editor.change_grid(2.0),
         Action::SelectionTool => editor.set_tool(Tool::Select),

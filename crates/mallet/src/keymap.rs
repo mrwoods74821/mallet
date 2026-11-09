@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use eframe::egui::{InputState, Key, Modifiers};
+use eframe::egui::{Event, InputState, Key, Modifiers};
 
 /// Something the user can trigger from the keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -18,6 +18,14 @@ pub enum Action {
     SaveFile,
     Undo,
     Redo,
+    /// Copy the selection to the clipboard, then delete it.
+    Cut,
+    /// Copy the selection to the clipboard.
+    Copy,
+    /// Paste the clipboard under the cursor.
+    Paste,
+    /// Open the Paste Special dialog.
+    PasteSpecial,
     GridSmaller,
     GridLarger,
     SelectionTool,
@@ -188,6 +196,13 @@ impl KeyMap {
                 (Action::SaveFile, Chord::ctrl(Key::S)),
                 (Action::Undo, Chord::ctrl(Key::Z)),
                 (Action::Redo, Chord::ctrl(Key::Y)),
+                (Action::Cut, Chord::ctrl(Key::X)),
+                (Action::Cut, Chord::shift(Key::Delete)),
+                (Action::Copy, Chord::ctrl(Key::C)),
+                (Action::Copy, Chord::ctrl(Key::Insert)),
+                (Action::Paste, Chord::ctrl(Key::V)),
+                (Action::Paste, Chord::shift(Key::Insert)),
+                (Action::PasteSpecial, Chord::ctrl_shift(Key::V)),
                 (Action::GridSmaller, Chord::key(Key::Minus)),
                 (Action::GridLarger, Chord::key(Key::Plus)),
                 (Action::SelectionTool, Chord::shift(Key::S)),
@@ -246,6 +261,9 @@ impl KeyMap {
     }
 
     /// Whether the action was triggered this frame, with exactly its modifiers held.
+    ///
+    /// The window turns the clipboard actions' keys into copy, cut and paste events, which
+    /// [`clipboard_action`] reads, so this only sees those keys in synthetic input.
     pub fn pressed(&self, input: &InputState, action: Action) -> bool {
         self.bindings.iter().any(|(bound, chord)| {
             *bound == action && input.key_pressed(chord.key) && chord.modifiers_match(&input.modifiers)
@@ -276,5 +294,17 @@ impl KeyMap {
         self.bindings
             .iter()
             .any(|(action, chord)| chord.key == key && MOVEMENT_ACTIONS.contains(action))
+    }
+}
+
+/// The clipboard action a copy, cut or paste event from the window stands for, given the
+/// modifiers held with it. Ctrl+Shift+C is left alone, as Hammer uses it for Carve.
+pub fn clipboard_action(event: &Event, modifiers: &Modifiers) -> Option<Action> {
+    match event {
+        Event::Cut => Some(Action::Cut),
+        Event::Copy if !modifiers.shift => Some(Action::Copy),
+        Event::Paste(_) if modifiers.ctrl && modifiers.shift => Some(Action::PasteSpecial),
+        Event::Paste(_) => Some(Action::Paste),
+        _ => None,
     }
 }

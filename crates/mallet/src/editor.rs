@@ -30,6 +30,10 @@ use crate::scene::{entity_model, model_key, ModelCache, Overlay, Owner, Scene};
 use crate::view2d::{Axis2D, View2D};
 use crate::view3d::Camera3D;
 
+mod clipboard;
+
+pub use clipboard::{Clipboard, PasteAt, PasteOptions, MAX_COPIES};
+
 /// Material given to new brushes until a texture browser exists.
 pub const DEFAULT_MATERIAL: &str = "DEV/DEV_MEASUREGENERIC01B";
 /// Depth range used for the first block before any block has been created.
@@ -320,6 +324,17 @@ pub struct Editor {
     pub about_open: bool,
     /// Whether the Transform dialog is showing.
     pub transform_open: bool,
+    /// Objects copied with Cut or Copy. It belongs to no tab, so it pastes into any map.
+    pub clipboard: Clipboard,
+    /// Text to put on the system clipboard, which only the window can do.
+    pub system_clipboard: Option<String>,
+    /// The 2D view under the cursor and the grid-snapped point there, where Paste puts
+    /// objects.
+    pub paste_cursor: Option<(Axis2D, DVec2)>,
+    /// Whether the Paste Special dialog is showing, and where it pastes unless told to
+    /// start at the original.
+    pub paste_special_open: bool,
+    pub paste_special_at: PasteAt,
     /// The 2D view (0 top, 1 front, 2 side) the mouse was over last, which Flip and Align
     /// work in.
     pub active_view: usize,
@@ -394,6 +409,11 @@ impl Default for Editor {
             options_section: None,
             about_open: false,
             transform_open: false,
+            clipboard: Clipboard::default(),
+            system_clipboard: None,
+            paste_cursor: None,
+            paste_special_open: false,
+            paste_special_at: PasteAt::Original,
             active_view: 0,
             pointfile: None,
             face_selection: BTreeSet::new(),
