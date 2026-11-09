@@ -339,8 +339,8 @@ fn paste_shift(at: PasteAt, bounds: &Bounds, grid: f64) -> DVec3 {
     }
 }
 
-/// Moves and turns a pasted entity: its brushes, its origin, and its angles when the
-/// copy is rotated, as the Transform dialog does.
+/// Moves and turns a pasted entity: its brushes, its origin, an overlay's plane and
+/// corners, and its angles when the copy is rotated, as the Transform dialog does.
 fn transform_entity(entity: &mut Entity, matrix: &DMat4, lock: TextureLock, turned: bool) {
     let point = entity.solids().next().is_none();
     for solid in entity.solids_mut() {
@@ -349,6 +349,7 @@ fn transform_entity(entity: &mut Entity, matrix: &DMat4, lock: TextureLock, turn
     if let Some(origin) = entity.origin() {
         entity.set("origin", format_vec3(clean_vec3(matrix.transform_point3(origin))));
     }
+    mallet_vmf::overlay::transform_entity(entity, matrix);
     if !turned {
         return;
     }

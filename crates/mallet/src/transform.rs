@@ -13,7 +13,7 @@ use mallet_vmf::transform::{self, around, clean, clean_vec3, TextureLock};
 use mallet_vmf::{format_vec3, parse_vec3, Solid};
 use serde::{Deserialize, Serialize};
 
-use crate::editor::{find_entity, Editor};
+use crate::editor::{find_entity, overlay_edits, Editor};
 use crate::scene::Owner;
 
 /// What the handles on a selection do in the 2D views. Clicking a selected object again
@@ -239,6 +239,7 @@ impl Editor {
                 }
             }
         }
+        edits.extend(self.selected_overlay_edits(&matrix));
         self.apply_edit(&Edit::Batch(edits))?;
         if let Some(pivot) = self.overlay.pivot {
             self.overlay.pivot = Some(clean_vec3(matrix.transform_point3(pivot)));
@@ -389,6 +390,7 @@ impl Editor {
                             value: format_vec3(clean_vec3(origin + *offset)),
                         });
                     }
+                    edits.extend(overlay_edits(entity, &DMat4::from_translation(*offset)));
                 }
             }
         }

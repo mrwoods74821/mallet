@@ -870,6 +870,7 @@ impl Editor {
             }
         }];
         edits.extend(origin_edits(origins, |origin| origin + offset));
+        edits.extend(self.selected_overlay_edits(&glam::DMat4::from_translation(offset)));
         self.apply_edit(&Edit::Batch(edits))?;
         if let Some(pivot) = self.overlay.pivot {
             self.overlay.pivot = Some(pivot + offset);
@@ -892,6 +893,22 @@ impl Editor {
         let size = to.size();
         self.message = format!("Resized selection to {}w {}l {}h", size.x, size.y, size.z);
         Ok(())
+    }
+
+    /// Key edits that carry every selected overlay's plane and corners through a
+    /// transform, to apply after the edits that move entity origins.
+    pub(crate) fn selected_overlay_edits(&self, matrix: &glam::DMat4) -> Vec<Edit> {
+        let Some(document) = &self.document else {
+            return Vec::new();
+        };
+        self.selection
+            .iter()
+            .filter_map(|owner| match owner {
+                Owner::Entity(id) => find_entity(&document.vmf, *id).ok(),
+                Owner::Solid(_) => None,
+            })
+            .flat_map(|entity| overlay_edits(entity, matrix))
+            .collect()
     }
 
     /// The brush ids and entity origins that moving or resizing the selection affects.
@@ -1456,6 +1473,22 @@ fn origin_edits(origins: EntityOrigins, map: impl Fn(DVec3) -> DVec3) -> impl It
         key: "origin".to_owned(),
         value: format_vec3(map(origin)),
     })
+}
+
+/// Key edits that carry one entity's overlay through a transform. Entities that are not
+/// placed overlays give none.
+pub(crate) fn overlay_edits(entity: &Entity, matrix: &glam::DMat4) -> Vec<Edit> {
+    let Some(id) = entity.id() else {
+        return Vec::new();
+    };
+    mallet_vmf::overlay::transform_keys(entity, matrix)
+        .into_iter()
+        .map(|(key, value)| Edit::SetKey {
+            entity: id,
+            key: key.to_owned(),
+            value,
+        })
+        .collect()
 }
 
 pub(crate) fn find_entity(vmf: &Vmf, id: u32) -> Result<&Entity, String> {
