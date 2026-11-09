@@ -15,14 +15,14 @@ use std::collections::BTreeSet;
 use std::mem::swap;
 use std::path::Path;
 
-use glam::DVec2;
+use glam::{DVec2, DVec3};
 use mallet_vmf::geometry::Bounds;
 
 use super::clipboard::Clipboard;
 use super::{Editor, Tool, ViewMode, DEFAULT_BLOCK};
 use crate::clipper::Clipper;
 use crate::faces::TextureMode;
-use crate::scene::{Overlay, Owner};
+use crate::scene::{camera_marker_edges, Overlay, Owner};
 use crate::vertex_tool::VertexState;
 use crate::view2d::{Axis2D, View2D};
 use crate::view3d::Camera3D;
@@ -80,6 +80,22 @@ impl Editor {
             .as_ref()
             .and_then(|agent| self.tab_index(agent.tab))
             .unwrap_or(self.active_tab)
+    }
+
+    /// Edges that show where the agent's camera is, for the window's views: only while
+    /// agents work in their own view and the agent's tab is the one the window shows.
+    pub fn agent_camera_marker(&self) -> Vec<[DVec3; 2]> {
+        if self.in_agent_view() || !self.config.agents.own_view {
+            return Vec::new();
+        }
+        let Some(agent) = &self.agent else {
+            return Vec::new();
+        };
+        if self.tab_index(agent.tab) != Some(self.active_tab) {
+            return Vec::new();
+        }
+        let camera = &agent.map.camera;
+        camera_marker_edges(camera.position, camera.forward(), camera.fov)
     }
 
     fn tab_index(&self, id: u64) -> Option<usize> {
@@ -254,8 +270,6 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
-    use glam::DVec3;
-
     use super::*;
     use crate::editor::SelectMode;
 
@@ -294,6 +308,23 @@ mod tests {
         assert_eq!(agent.1, DVec3::new(1000.0, 0.0, 0.0));
         assert_eq!(agent.2, 8.0);
         assert_eq!(agent.3, Tool::Block);
+    }
+
+    #[test]
+    fn the_window_shows_the_agent_camera_only_in_the_agent_tab() {
+        let (mut editor, _) = editor_with_block();
+        assert!(editor.display_overlay().agent_camera.is_empty());
+        editor.with_agent_view(|editor| {
+            editor.camera.position = DVec3::new(500.0, 0.0, 0.0);
+            assert!(editor.display_overlay().agent_camera.is_empty());
+        });
+        let marker = editor.display_overlay().agent_camera;
+        assert!(marker.iter().flatten().any(|point| point.x > 500.0));
+        editor.agent_new_tab();
+        assert!(editor.display_overlay().agent_camera.is_empty());
+        editor.config.agents.own_view = false;
+        editor.agent_switch_tab(0).unwrap();
+        assert!(editor.display_overlay().agent_camera.is_empty());
     }
 
     #[test]

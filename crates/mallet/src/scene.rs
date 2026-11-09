@@ -158,6 +158,9 @@ pub struct Overlay {
     pub pivot: Option<DVec3>,
     /// The clipping tool's points, plane and the pieces it would keep.
     pub clip: Option<crate::clipper::ClipOverlay>,
+    /// Edges of the camera an MCP agent looks through, drawn in the window's views while
+    /// the agent works in the same tab in its own view. Empty when there is none.
+    pub agent_camera: Vec<[DVec3; 2]>,
 }
 
 impl Overlay {
@@ -170,6 +173,41 @@ impl Overlay {
 
 /// Half-size of the marker the entity tool draws where a new entity will go.
 const ENTITY_MARKER_HALF_SIZE: f64 = 8.0;
+/// Colour of the marker that shows where an MCP agent's camera is.
+pub const AGENT_CAMERA_COLOR: Color32 = Color32::from_rgb(230, 110, 255);
+/// How far in front of a camera marker its view pyramid reaches, in world units.
+const CAMERA_MARKER_DEPTH: f64 = 64.0;
+/// Half-size of the box drawn where a camera marker stands.
+const CAMERA_MARKER_HALF_SIZE: f64 = 6.0;
+/// Height of a camera marker's view pyramid as a share of its width.
+const CAMERA_MARKER_ASPECT: f64 = 0.6;
+
+/// The edges of a camera drawn into the views: a small box where it stands, a pyramid
+/// as wide as its field of view towards where it looks, and a tick on the pyramid's top
+/// edge that shows which way is up.
+pub fn camera_marker_edges(position: DVec3, forward: DVec3, fov_degrees: f64) -> Vec<[DVec3; 2]> {
+    let half = DVec3::splat(CAMERA_MARKER_HALF_SIZE);
+    let mut edges = box_edges(&Bounds {
+        min: position - half,
+        max: position + half,
+    });
+    let forward = forward.normalize_or(DVec3::X);
+    let right = forward.cross(DVec3::Z).normalize_or(DVec3::Y);
+    let up = right.cross(forward);
+    let half_width = CAMERA_MARKER_DEPTH * (fov_degrees.clamp(1.0, 170.0).to_radians() * 0.5).tan();
+    let half_height = half_width * CAMERA_MARKER_ASPECT;
+    let centre = position + forward * CAMERA_MARKER_DEPTH;
+    let corners = [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)]
+        .map(|(x, y)| centre + right * (half_width * x) + up * (half_height * y));
+    for (index, corner) in corners.iter().enumerate() {
+        edges.push([position, *corner]);
+        edges.push([*corner, corners[(index + 1) % 4]]);
+    }
+    let peak = centre + up * (half_height + half_width * 0.4);
+    edges.push([corners[0], peak]);
+    edges.push([peak, corners[1]]);
+    edges
+}
 
 /// The edges of the entity tool's marker: a small box around the point with a cross
 /// through it, so it is visible from any side.

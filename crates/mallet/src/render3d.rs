@@ -23,7 +23,9 @@ use glam::{DVec3, Mat4, Vec3, Vec4};
 use mallet_content::{parallel_map, AlphaMode, MaterialLoader, Materials, Surface};
 
 use crate::lighting::TextureLights;
-use crate::scene::{box_edges, entity_marker_edges, ModelCache, Overlay, Owner, Remap, Scene, SceneFace, WireMesh};
+use crate::scene::{
+    box_edges, entity_marker_edges, ModelCache, Overlay, Owner, Remap, Scene, SceneFace, WireMesh, AGENT_CAMERA_COLOR,
+};
 use crate::style::{self as view_style, ViewStyle};
 use crate::view2d::View2D;
 use crate::view3d::Camera3D;
@@ -784,6 +786,7 @@ impl Renderer3D {
         if let Some(point) = overlay.entity {
             push_edges(&mut outline, &entity_marker_edges(point), None, look.tool);
         }
+        push_edges(&mut outline, &overlay.agent_camera, None, AGENT_CAMERA_COLOR);
         if let Some(clip) = &overlay.clip {
             for (edge, color) in clip.edges_3d() {
                 push_edges(&mut outline, &[edge], None, color);
@@ -1211,6 +1214,7 @@ impl Renderer3D {
         if let Some(point) = overlay.entity {
             push_edges(&mut over, &entity_marker_edges(point), None, look.tool);
         }
+        push_edges(&mut over, &overlay.agent_camera, None, AGENT_CAMERA_COLOR);
         if let Some(clip) = &overlay.clip {
             for (edge, color) in clip.edges_2d() {
                 push_edges(&mut over, &[edge], None, color);

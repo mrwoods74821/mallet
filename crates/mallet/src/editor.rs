@@ -937,6 +937,7 @@ impl Editor {
         Overlay {
             handles: self.handle_box(),
             handle_mode,
+            agent_camera: self.agent_camera_marker(),
             ..self.overlay.clone()
         }
     }

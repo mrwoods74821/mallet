@@ -8,7 +8,7 @@ use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::Canvas;
 use crate::keymap::{Action, KeyMap};
-use crate::scene::{box_edges, Overlay, Remap, Scene};
+use crate::scene::{box_edges, Overlay, Remap, Scene, AGENT_CAMERA_COLOR};
 use crate::style;
 
 /// World units per second, matching Hammer's default forward speed.
@@ -420,6 +420,7 @@ impl Camera3D {
         if let Some(block) = &overlay.block {
             draw_edges(canvas, &box_edges(block), None, style.tool);
         }
+        draw_edges(canvas, &overlay.agent_camera, None, AGENT_CAMERA_COLOR);
         if let Some(clip) = &overlay.clip {
             for (edge, color) in clip.edges_3d() {
                 draw_edges(canvas, &[edge], None, color);

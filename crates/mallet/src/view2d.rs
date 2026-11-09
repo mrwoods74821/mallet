@@ -6,7 +6,7 @@ use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::Canvas;
 use crate::clipper::{ClipOverlay, CLIP_PLANE_COLOR};
-use crate::scene::{box_edges, entity_marker_edges, Overlay, Remap, Scene, HANDLE_HALF_SIZE};
+use crate::scene::{box_edges, entity_marker_edges, Overlay, Remap, Scene, AGENT_CAMERA_COLOR, HANDLE_HALF_SIZE};
 use crate::style;
 use crate::transform::HandleMode;
 
@@ -292,6 +292,7 @@ impl View2D {
         if let Some(point) = overlay.entity {
             self.draw_edges(canvas, rect, &entity_marker_edges(point), None, style.tool);
         }
+        self.draw_edges(canvas, rect, &overlay.agent_camera, None, AGENT_CAMERA_COLOR);
         if let Some(clip) = &overlay.clip {
             for (edge, color) in clip.edges_2d() {
                 self.draw_edges(canvas, rect, &[edge], None, color);
