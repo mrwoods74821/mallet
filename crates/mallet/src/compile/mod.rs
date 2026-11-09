@@ -99,9 +99,60 @@ impl StepKind {
             StepKind::Vbsp => VBSP_OPTIONS,
             StepKind::Vvis => VVIS_OPTIONS,
             StepKind::Vrad => VRAD_OPTIONS,
+            StepKind::Vbspinfo => VBSPINFO_OPTIONS,
             StepKind::SourceCubemap => SOURCECUBEMAP_OPTIONS,
+            StepKind::Repack => REPACK_OPTIONS,
             StepKind::RunGame => GAME_OPTIONS,
-            _ => &[],
+            StepKind::CopyToGame | StepKind::Custom => &[],
+        }
+    }
+}
+
+/// Which builds of a compile tool understand an option. The Hammer++ tools
+/// (`vbspplusplus.exe` and friends) add many options and drop a few of the game's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Build {
+    /// Every build.
+    Any,
+    /// Only the Hammer++ builds.
+    PlusPlus,
+    /// Only the game's own builds, not Hammer++.
+    Stock,
+}
+
+impl Build {
+    /// The build a program is, judged by its file name.
+    pub fn of(program: &Path) -> Build {
+        let is_plusplus = program
+            .file_stem()
+            .is_some_and(|stem| stem.to_string_lossy().to_ascii_lowercase().ends_with("plusplus"));
+        if is_plusplus {
+            Build::PlusPlus
+        } else {
+            Build::Stock
+        }
+    }
+
+    /// Whether a program of this build understands an option made for `option`.
+    pub fn supports(self, option: Build) -> bool {
+        option == Build::Any || option == self
+    }
+
+    /// A short tag for options that only some builds understand.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Build::Any => "",
+            Build::PlusPlus => "Hammer++",
+            Build::Stock => "Game tools",
+        }
+    }
+
+    /// Why an option is missing from a build.
+    pub fn requirement(self) -> &'static str {
+        match self {
+            Build::Any => "",
+            Build::PlusPlus => "Only the Hammer++ build of this tool understands this option.",
+            Build::Stock => "Only the game's own build of this tool understands this option, not Hammer++.",
         }
     }
 }
@@ -116,6 +167,10 @@ pub struct OptionSpec {
     pub value: Option<&'static str>,
     /// Shown in amber when the option is risky or slow.
     pub warning: &'static str,
+    /// Which builds of the tool understand the option.
+    pub build: Build,
+    /// The value is several arguments separated by spaces, such as `0 0 0`.
+    pub split: bool,
 }
 
 const fn option(flag: &'static str, name: &'static str, description: &'static str) -> OptionSpec {
@@ -125,21 +180,41 @@ const fn option(flag: &'static str, name: &'static str, description: &'static st
         description,
         value: None,
         warning: "",
+        build: Build::Any,
+        split: false,
     }
 }
 
 const fn valued(flag: &'static str, name: &'static str, value: &'static str, description: &'static str) -> OptionSpec {
     OptionSpec {
-        flag,
-        name,
-        description,
         value: Some(value),
-        warning: "",
+        ..option(flag, name, description)
     }
 }
 
 const fn warned(spec: OptionSpec, warning: &'static str) -> OptionSpec {
     OptionSpec { warning, ..spec }
+}
+
+/// Marks an option that only the Hammer++ build understands.
+const fn pp(spec: OptionSpec) -> OptionSpec {
+    OptionSpec {
+        build: Build::PlusPlus,
+        ..spec
+    }
+}
+
+/// Marks an option that only the game's own build understands.
+const fn stock(spec: OptionSpec) -> OptionSpec {
+    OptionSpec {
+        build: Build::Stock,
+        ..spec
+    }
+}
+
+/// Marks an option whose value is several arguments.
+const fn split(spec: OptionSpec) -> OptionSpec {
+    OptionSpec { split: true, ..spec }
 }
 
 const VBSP_OPTIONS: &[OptionSpec] = &[
@@ -151,69 +226,393 @@ const VBSP_OPTIONS: &[OptionSpec] = &[
     option(
         "-onlyprops",
         "Only static props",
-        "Only updates the static props of an existing BSP.",
+        "Only updates the static and detail props of an existing BSP.",
     ),
+    option(
+        "-leaktest",
+        "Stop on leaks",
+        "Stops the compile when the map leaks. Hammer++ does this already.",
+    ),
+    pp(option(
+        "-noleaktest",
+        "Keep going on leaks",
+        "Carries on compiling when the map leaks.",
+    )),
     option(
         "-nodetail",
         "No detail brushes",
         "Leaves out func_detail brushes, to see how they affect visibility.",
-    ),
-    option("-nowater", "No water", "Leaves out water brushes."),
-    option(
-        "-noweld",
-        "No welding",
-        "Does not merge vertices that are very close together.",
-    ),
-    option("-nocsg", "No CSG", "Does not cut overlapping brushes apart."),
-    option(
-        "-noshare",
-        "No shared edges",
-        "Does not share edges, which can leave cracks between faces.",
-    ),
-    option(
-        "-notjunc",
-        "No T-junction fixes",
-        "Does not fix T-junctions, which can leave sparkles between faces.",
-    ),
-    option(
-        "-noopt",
-        "No face merging",
-        "Does not merge faces, so there are more of them.",
-    ),
-    option(
-        "-nodrawtriggers",
-        "Hide triggers",
-        "Does not draw trigger brushes in the game.",
-    ),
-    option(
-        "-alldetail",
-        "Everything is detail",
-        "Turns every brush that is not an entity into detail. For testing only.",
     ),
     option(
         "-fulldetail",
         "Detail blocks visibility",
         "Makes func_detail brushes take part in visibility.",
     ),
-    valued(
-        "-micro",
-        "Smallest brush",
-        "1.0",
-        "Warns about brushes smaller than this many units.",
-    ),
-    option("-leaktest", "Stop on leaks", "Stops the compile when the map leaks."),
+    option("-nowater", "No water", "Leaves out water brushes."),
     option(
-        "-staticpropcombine",
-        "Combine static props",
-        "Merges static props as the game's combine rules say. Needs a game that supports it.",
+        "-nodrawtriggers",
+        "Hide triggers",
+        "Compiles every trigger as if it used the nodraw texture.",
     ),
     option(
         "-allowdynamicpropsasstatic",
         "Dynamic props as static",
-        "Allows prop_static with models made for prop_dynamic.",
+        "Allows prop_static with models that are not marked as allowed to be static.",
     ),
+    valued(
+        "-embed",
+        "Embed folder",
+        "",
+        "Searches this folder for content and packs everything in it into the BSP.",
+    ),
+    pp(valued(
+        "-missingmaterial",
+        "Missing material",
+        "",
+        "Replaces missing brush materials with this material.",
+    )),
+    option(
+        "-replacematerials",
+        "Replace materials",
+        "Swaps materials as the game's material substitution file says.",
+    ),
+    pp(option(
+        "-warnmissinginstances",
+        "Warn on missing instances",
+        "Warns about missing func_instance files instead of stopping.",
+    )),
+    pp(option(
+        "-nonamefixup",
+        "No instance name prefixes",
+        "Does not prefix entity names when collapsing instances.",
+    )),
+    option(
+        "-keepstalezip",
+        "Keep packed files",
+        "Keeps the files packed into the BSP and rebuilds everything else.",
+    ),
+    valued(
+        "-micro",
+        "Smallest brush",
+        "1.0",
+        "Warns about brushes smaller than this many cubic units.",
+    ),
+    option(
+        "-noweld",
+        "No welding",
+        "Does not join face vertices together.",
+    ),
+    option("-nocsg", "No CSG", "Does not cut overlapping brushes apart."),
+    option(
+        "-noshare",
+        "No shared edges",
+        "Gives every face its own edges instead of sharing them.",
+    ),
+    option(
+        "-notjunc",
+        "No T-junction fixes",
+        "Does not fix T-junctions, which can leave sparkles between faces.",
+    ),
+    stock(option(
+        "-noTJuncsDetail",
+        "No detail T-junction fixes",
+        "Does not fix T-junctions on func_detail faces. Helps maps that fail the T-junction pass.",
+    )),
+    pp(option(
+        "-allowdetailcracks",
+        "No detail T-junction fixes",
+        "Does not fix T-junctions on func_detail faces.",
+    )),
+    pp(option(
+        "-nodetailclip",
+        "No detail clipping",
+        "Does not clip detail brush faces against each other.",
+    )),
+    option(
+        "-noopt",
+        "Keep outer faces",
+        "Keeps the faces on the outside of the map that can never be seen.",
+    ),
+    option(
+        "-noprune",
+        "No pruning",
+        "Does not prune neighbouring solid nodes.",
+    ),
+    option(
+        "-nomerge",
+        "No face merging",
+        "Does not merge chopped faces back together.",
+    ),
+    option(
+        "-nomergewater",
+        "No water merging",
+        "Does not merge chopped water faces back together.",
+    ),
+    option(
+        "-nosubdiv",
+        "No subdividing",
+        "Does not split faces up for lightmaps.",
+    ),
+    option("-bumpall", "Bump map everything", "Makes every surface bump mapped."),
+    pp(option("-nobump", "No bump maps", "Turns off bump mapped lightmaps on every surface.")),
+    option(
+        "-snapaxial",
+        "Snap axial planes",
+        "Snaps planes that face along an axis to whole units.",
+    ),
+    option(
+        "-forceskyvis",
+        "Visibility in 3D skybox",
+        "Computes visibility in the 3D skybox's leaves too.",
+    ),
+    valued(
+        "-luxelscale",
+        "Luxel scale",
+        "1.0",
+        "Scales the lightmaps of every face by this amount.",
+    ),
+    valued(
+        "-minluxelscale",
+        "Smallest luxel scale",
+        "1.0",
+        "No face gets a lightmap scale below this.",
+    ),
+    pp(valued(
+        "-maxluxelscale",
+        "Largest luxel scale",
+        "999999",
+        "No face gets a lightmap scale above this.",
+    )),
+    valued(
+        "-defaultluxelsize",
+        "Default luxel size",
+        "16",
+        "The lightmap scale of faces that have none set.",
+    ),
+    valued(
+        "-maxlightmapdim",
+        "Largest lightmap",
+        "32",
+        "Faces with a bigger lightmap than this are split.",
+    ),
+    option(
+        "-lightifmissing",
+        "Lightmaps everywhere",
+        "Gives every surface a lightmap, even those that do not need one.",
+    ),
+    option(
+        "-novirtualmesh",
+        "No displacement compression",
+        "Does not compress the collision of displacements.",
+    ),
+    pp(option(
+        "-nodisp4virtualmesh",
+        "Compress power 4 displacements",
+        "Compresses the collision of power 4 displacements too.",
+    )),
+    pp(option("-nophysics", "No collision", "Does not build collision for the map.")),
+    pp(option("-nobevel", "No bevels", "Does not bevel brushes for collision.")),
+    pp(option(
+        "-nodefaultcubemap",
+        "No default cubemaps",
+        "Does not build the default LDR and HDR cubemaps.",
+    )),
+    pp(option(
+        "-noldrcubemap",
+        "No default LDR cubemap",
+        "Does not build the default LDR cubemap, for maps that are only HDR.",
+    )),
+    pp(option(
+        "-nohdrcubemap",
+        "No default HDR cubemap",
+        "Does not build the default HDR cubemap, for maps that are only LDR.",
+    )),
+    pp(option(
+        "-nocull",
+        "No culling",
+        "Does not reduce brushes, brush sides, vertices or planes.",
+    )),
+    pp(option("-cullall", "Cull everything", "Always uses every kind of culling.")),
+    pp(option(
+        "-cullbrushes",
+        "Cull brushes",
+        "Always culls brushes, even below the limit.",
+    )),
+    pp(option(
+        "-cullbrushsides",
+        "Cull brush sides",
+        "Always culls brush sides, even below the limit.",
+    )),
+    pp(option(
+        "-cullplanes",
+        "Cull planes",
+        "Always culls planes, even below the limit.",
+    )),
+    pp(option(
+        "-cullplanesaggressive",
+        "Cull planes harder",
+        "Culls planes aggressively.",
+    )),
+    pp(option(
+        "-cullverts",
+        "Cull vertices",
+        "Always culls vertices, even below the limit.",
+    )),
+    pp(warned(
+        valued("-maxbrushes", "Brush limit", "8192", "The most brushes the map may have."),
+        "Raising limits makes a map the game may not load.",
+    )),
+    pp(warned(
+        valued(
+            "-maxbrushsides",
+            "Brush side limit",
+            "65536",
+            "The most brush sides the map may have.",
+        ),
+        "Raising limits makes a map the game may not load.",
+    )),
+    pp(warned(
+        valued(
+            "-maxdispinfo",
+            "Displacement limit",
+            "2048",
+            "The most displacements the map may have.",
+        ),
+        "Raising limits makes a map the game may not load.",
+    )),
+    pp(warned(
+        valued(
+            "-maxtexinfo",
+            "Texture info limit",
+            "12288",
+            "The most texture infos the map may have.",
+        ),
+        "Raising limits makes a map the game may not load.",
+    )),
+    valued(
+        "-blocksize",
+        "Block size",
+        "1024",
+        "The size of the grid squares the map is chopped into.",
+    ),
+    split(valued(
+        "-block",
+        "Block",
+        "0 0",
+        "Only compiles this one grid square: X and Y.",
+    )),
+    split(valued(
+        "-blocks",
+        "Blocks",
+        "0 0 0 0",
+        "Only compiles these grid squares: smallest X and Y, then largest X and Y.",
+    )),
+    pp(valued(
+        "-bspformat",
+        "BSP version",
+        "20",
+        "19 for HL2, 20 for TF2 and Garry's Mod, 21 for Alien Swarm, L4D2, Portal 2 and CS:GO.",
+    )),
+    pp(valued(
+        "-staticpropformat",
+        "Static prop version",
+        "10_TF2",
+        "6 for HL2, 7 or 8 for L4D, 9 for L4D2, 10_TF2 for TF2, 10 for Insurgency, 11 or 12 for CS:GO, 13 for Strata.",
+    )),
+    pp(valued(
+        "-lightformat",
+        "World light version",
+        "0",
+        "0 for HL2 and TF2, 1 for Alien Swarm, L4D2, Portal 2 and CS:GO.",
+    )),
+    pp(option(
+        "-singleplayer",
+        "SDK 2013 singleplayer",
+        "Writes a BSP for Source SDK 2013 singleplayer games.",
+    )),
+    pp(option("-csgo", "CS:GO format", "Writes a BSP for CS:GO.")),
+    pp(option(
+        "-csgoclipcontents",
+        "CS:GO clip brushes",
+        "Compiles CS:GO grenade clip and drone clip brushes.",
+    )),
+    pp(option("-l4d2", "L4D2 format", "Writes a BSP for Left 4 Dead 2.")),
+    pp(option("-portal2", "Portal 2 format", "Writes a BSP for Portal 2.")),
+    pp(option("-asw", "Alien Swarm format", "Writes a BSP for Alien Swarm.")),
+    pp(option("-insurgency", "Insurgency format", "Writes a BSP for Insurgency.")),
+    pp(option(
+        "-simpleladders",
+        "Simple ladders",
+        "Writes ladders as func_simpleladder, like L4D.",
+    )),
+    pp(option(
+        "-matsyscompat",
+        "Material compatibility",
+        "Loads materials in compatibility mode. On by default outside Garry's Mod and TF2.",
+    )),
+    pp(valued(
+        "-dxlevel",
+        "DirectX level",
+        "0",
+        "Leaves out entities whose DirectX levels rule out this level.",
+    )),
+    pp(option(
+        "-noineligiblevertexlitprops",
+        "Keep vertex lighting on bumped props",
+        "Does not mark bump mapped or phong props as unable to take vertex lighting.",
+    )),
+    pp(option(
+        "-showineligiblevertexlitprops",
+        "List props without vertex lighting",
+        "Lists the props marked as unable to take vertex lighting.",
+    )),
+    option(
+        "-glview",
+        "Write GL view files",
+        "Writes .gl files that glview can show.",
+    ),
+    stock(option(
+        "-dumpstaticprops",
+        "Dump static props",
+        "Writes the static props to staticprop text files.",
+    )),
+    pp(option(
+        "-dumpstaticprop",
+        "Dump static props",
+        "Writes the static props to staticprop text files.",
+    )),
+    option(
+        "-dumpcollide",
+        "Dump collision",
+        "Writes files with collision information.",
+    ),
+    pp(option(
+        "-materialdebug",
+        "Material debugging",
+        "Prints debugging information about materials.",
+    )),
+    pp(option(
+        "-report_search_paths",
+        "List search paths",
+        "Prints the folders searched for content.",
+    )),
+    stock(option(
+        "-tmpout",
+        "Write to tmp",
+        "Writes the output into the \\tmp folder.",
+    )),
+    stock(option(
+        "-FullMinidumps",
+        "Full crash dumps",
+        "Writes large crash dumps.",
+    )),
     option("-low", "Low priority", "Runs VBSP below normal priority."),
     option("-verbose", "Verbose", "Prints more information."),
+    option(
+        "-verboseentities",
+        "Quiet brush entities",
+        "With Verbose on, leaves out the details of brush entities.",
+    ),
     valued("-threads", "Threads", "8", "How many threads to use."),
 ];
 
@@ -230,9 +629,25 @@ const VVIS_OPTIONS: &[OptionSpec] = &[
         "-radius_override",
         "Visibility radius",
         "2500",
-        "Treats anything farther away than this many units as never visible.",
+        "Treats anything farther away than this many units as never visible, overriding the fog.",
     ),
     option("-nosort", "No sorting", "Does not sort portals."),
+    split(valued(
+        "-trace",
+        "Trace clusters",
+        "0 1",
+        "Writes a line file that traces visibility from one cluster to another.",
+    )),
+    stock(option(
+        "-tmpin",
+        "Read from tmp",
+        "Reads the portals from the \\tmp folder.",
+    )),
+    stock(option(
+        "-FullMinidumps",
+        "Full crash dumps",
+        "Writes large crash dumps.",
+    )),
     option("-low", "Low priority", "Runs VVIS below normal priority."),
     option("-verbose", "Verbose", "Prints more information."),
     valued("-threads", "Threads", "8", "How many threads to use."),
@@ -250,9 +665,14 @@ const VRAD_OPTIONS: &[OptionSpec] = &[
         option(
             "-final",
             "Final quality",
-            "Takes more samples of the sky and area lights for smoother shadows.",
+            "Takes more samples of the sky, area lights and props for smoother shadows.",
         ),
         "Much slower.",
+    ),
+    option(
+        "-fastambient",
+        "Fast ambient",
+        "Takes fewer ambient lighting samples per leaf, to save time.",
     ),
     option(
         "-StaticPropLighting",
@@ -269,48 +689,436 @@ const VRAD_OPTIONS: &[OptionSpec] = &[
         "Texture shadows",
         "Translucent textures on props cast matching shadows. Needs the models listed in lights.rad.",
     ),
-    option(
+    pp(option(
+        "-forcetextureshadows",
+        "Texture shadows on every prop",
+        "Lets every prop cast texture shadows.",
+    )),
+    pp(option(
+        "-worldtextureshadows",
+        "World texture shadows",
+        "Translucent textures on brushes cast matching shadows.",
+    )),
+    pp(option(
+        "-translucentshadows",
+        "Translucent shadows",
+        "Texture shadows also come from $translucent surfaces.",
+    )),
+    valued(
         "-StaticPropSampleScale",
         "Prop sample scale",
-        "Changes how many samples props take. Some VRAD builds only.",
+        "4",
+        "Scales how many lighting samples props take. -final uses 4 in Hammer++ and 16 in the game's VRAD.",
     ),
-    valued("-bounce", "Light bounces", "100", "How many times light bounces."),
+    pp(valued(
+        "-StaticPropIndirectMode",
+        "Prop bounce lighting",
+        "1",
+        "How props get bounced light: 0 default, 1 TF2, 2 Orange Box.",
+    )),
+    stock(option(
+        "-StaticPropBounce",
+        "Props bounce light",
+        "Static props bounce light onto their surroundings. Experimental.",
+    )),
+    pp(option(
+        "-propambient",
+        "Prop ambient tracing",
+        "Traces props for ambient lighting.",
+    )),
+    option(
+        "-nossprops",
+        "No prop self-shadowing",
+        "Turns off self-shadowing on every static prop.",
+    ),
+    option(
+        "-noskyboxrecurse",
+        "Ignore 3D skybox",
+        "Does not let the 3D skybox cast shadows on the world.",
+    ),
+    valued("-bounce", "Light bounces", "100", "How many times light bounces. 0 turns bouncing off."),
     valued(
         "-smooth",
         "Smoothing angle",
         "45",
-        "Faces meeting at less than this angle get smoothed lighting.",
+        "Faces meeting at less than this many degrees get smoothed lighting.",
     ),
     valued(
         "-luxeldensity",
         "Luxel density",
         "1.0",
-        "Scales the lightmap resolution of every face.",
+        "Scales the lightmap resolution of every face. The game's VRAD only takes values below 1.",
     ),
     valued(
         "-extrasky",
         "Extra sky samples",
         "16",
-        "Takes more samples of the sky. -final uses 16.",
+        "Traces this many times more rays for sky and bounced light.",
     ),
-    valued("-chop", "Chop", "4", "Smallest patch size for bounced light."),
-    valued("-maxchop", "Max chop", "4", "Largest patch size for bounced light."),
-    option(
+    pp(valued(
+        "-extrasoft",
+        "Extra soft light samples",
+        "4",
+        "Traces this many times more rays for soft lights.",
+    )),
+    valued(
         "-softsun",
         "Soft sun",
-        "Softens the sun's shadows. Needs a value in some VRAD builds.",
+        "2",
+        "Treats the sun as an area light this many degrees wide, for soft shadows.",
     ),
+    stock(valued(
+        "-SunSamplesAreaLight",
+        "Sun area samples",
+        "5",
+        "How many samples to take of the light_environment. 0 to 5 is recommended.",
+    )),
+    valued("-chop", "Chop", "4", "Smallest patch size for bounced light, in luxels."),
+    valued("-maxchop", "Max chop", "4", "Largest patch size for bounced light, in luxels."),
+    pp(valued(
+        "-patchlightmapsize",
+        "Patch lightmap size",
+        "16",
+        "The smallest lightmap scale used for chopping patches.",
+    )),
     option(
         "-noextra",
         "No supersampling",
         "Turns off supersampling: faster, with blockier shadows.",
     ),
-    option("-noskyboxrecurse", "Ignore 3D skybox", "Does not light the 3D skybox."),
+    option("-centersamples", "Centre samples", "Moves the sample centres."),
+    option(
+        "-dlightmap",
+        "Separate direct lightmap",
+        "Puts direct light in a different lightmap from bounced light.",
+    ),
+    pp(option(
+        "-indirectonly",
+        "Only bounced light",
+        "Bakes only bounced light into the map.",
+    )),
+    option(
+        "-ambientocclusion",
+        "Ambient occlusion",
+        "Bakes ambient occlusion into the lightmaps.",
+    ),
+    valued(
+        "-aoscale",
+        "Occlusion strength",
+        "1.0",
+        "How dark ambient occlusion is. The Hammer++ default is 0.5.",
+    ),
+    pp(valued(
+        "-aoradius",
+        "Occlusion radius",
+        "40",
+        "How far ambient occlusion reaches, in units.",
+    )),
+    valued(
+        "-aofacesamples",
+        "Occlusion samples on brushes",
+        "32",
+        "Ambient occlusion samples per brush face. -final uses 128.",
+    ),
+    valued(
+        "-aopropsamples",
+        "Occlusion samples on props",
+        "16",
+        "Ambient occlusion samples per prop. -final uses 32.",
+    ),
+    stock(option(
+        "-aoNoSquare",
+        "Softer occlusion",
+        "Does not square ambient occlusion, so it looks less harsh.",
+    )),
+    pp(option(
+        "-aodebug",
+        "Show only occlusion",
+        "Bakes only ambient occlusion, with every light off.",
+    )),
+    stock(option(
+        "-softenCosine",
+        "Softer lighting",
+        "Makes lighting falloff softer.",
+    )),
+    stock(option(
+        "-bounceFromNamed",
+        "Bounce named lights",
+        "Named lights also give bounced light.",
+    )),
+    stock(option(
+        "-AmbientFromLeafCenters",
+        "Ambient from leaf centres",
+        "Samples ambient lighting from the centre of each leaf instead of random points.",
+    )),
+    stock(valued(
+        "-LeafAmbientSampleReduction",
+        "Fewer ambient samples",
+        "0.5",
+        "Reduces the ambient samples in each leaf by this fraction, from 0 to 1.",
+    )),
+    pp(split(valued(
+        "-ambient",
+        "Minimum ambient",
+        "0 0 0",
+        "The least light any part of the map gets: red, green and blue.",
+    ))),
+    pp(valued(
+        "-scale",
+        "Light scale",
+        "1",
+        "Multiplies the brightness of every light.",
+    )),
+    pp(valued(
+        "-reflectivityscale",
+        "Reflectivity scale",
+        "1",
+        "Multiplies the $reflectivity of every texture.",
+    )),
+    pp(valued(
+        "-coring",
+        "Coring",
+        "1",
+        "Light below this is made black, which shrinks the lightmaps.",
+    )),
+    pp(valued(
+        "-dlight",
+        "Texture light threshold",
+        "0.1",
+        "The least light a texture must give to become a texture light.",
+    )),
+    pp(option(
+        "-choptexlights",
+        "Chop texture lights",
+        "Chops up texture lights that come from a lights file.",
+    )),
+    pp(option(
+        "-notexscale",
+        "No texture light scaling",
+        "Does not scale texture lights by the texture's scale.",
+    )),
+    pp(option(
+        "-nolightcull",
+        "No light culling",
+        "Does not cut lights off by distance.",
+    )),
+    pp(valued(
+        "-minlightcullintensity",
+        "Light cut-off",
+        "1",
+        "How faint a light gets before it is cut off.",
+    )),
+    pp(option("-skipSunLights", "Skip sun", "Leaves out sun lights.")),
+    pp(option(
+        "-skipAmbientLights",
+        "Skip ambient lights",
+        "Leaves out ambient lights.",
+    )),
+    pp(option(
+        "-skipLocalLights",
+        "Skip point and spot lights",
+        "Leaves out point lights and spotlights.",
+    )),
+    pp(option(
+        "-skipPVS",
+        "Skip PVS optimisation",
+        "Does not use visibility to speed up lights.",
+    )),
+    pp(option(
+        "-fastradial",
+        "Fast radial accumulation",
+        "Uses a faster way to gather light onto faces.",
+    )),
+    pp(option(
+        "-nopairedges",
+        "No edge pairing",
+        "Does not pair brush edges when gathering light.",
+    )),
+    pp(option(
+        "-nopairgeometricedges",
+        "No geometric edge pairing",
+        "Does not pair edges by shape, which prevents seams against brush entities.",
+    )),
+    option(
+        "-nodetaillight",
+        "No detail prop lighting",
+        "Does not light detail props.",
+    ),
+    option(
+        "-onlydetail",
+        "Only detail props",
+        "Only lights detail props and the per-leaf lighting.",
+    ),
+    option(
+        "-OnlyStaticProps",
+        "Only static props",
+        "Only does direct lighting of static props. For debugging.",
+    ),
+    option(
+        "-StaticPropNormals",
+        "Show prop normals",
+        "Lights static props with their normals instead. For debugging.",
+    ),
+    valued(
+        "-maxdispsamplesize",
+        "Displacement sample size",
+        "512",
+        "The largest lighting sample size on displacements.",
+    ),
+    option(
+        "-LargeDispSampleRadius",
+        "Wide displacement sampling",
+        "Gathers light over a wider area on displacements, which fixes splotches on terrain.",
+    ),
+    pp(option(
+        "-DisplacementLightingOld",
+        "Old displacement lighting",
+        "Lights displacements the old way.",
+    )),
+    pp(valued(
+        "-dispchop",
+        "Displacement chop",
+        "8",
+        "Smallest patch size on displacements, in luxels.",
+    )),
+    pp(valued(
+        "-disppatchradius",
+        "Displacement patch radius",
+        "1500",
+        "The largest radius of a displacement patch.",
+    )),
+    pp(valued(
+        "-dispsamplefactor",
+        "Displacement light radius",
+        "1",
+        "Multiplies how far light reaches on displacements.",
+    )),
+    pp(valued(
+        "-disppatchsamplefactor",
+        "Displacement bounce radius",
+        "1",
+        "Multiplies how far bounced light reaches on displacements.",
+    )),
+    valued(
+        "-lights",
+        "Extra lights file",
+        "",
+        "Loads this lights file as well as lights.rad and the map's own.",
+    ),
+    pp(option(
+        "-supportslightdirectional",
+        "Keep light_directional",
+        "Does not rename light_directional entities.",
+    )),
+    pp(option(
+        "-supportslightprojected",
+        "Keep light_projected",
+        "Does not rename light_projected entities.",
+    )),
+    pp(warned(
+        option(
+            "-extendedsoftlimits",
+            "No soft limit warnings",
+            "Does not warn about going over soft limits.",
+        ),
+        "The game may not load a map over its limits.",
+    )),
+    pp(valued("-maxbrushes", "Brush limit", "8192", "The most brushes the map may have.")),
+    pp(valued(
+        "-maxbrushsides",
+        "Brush side limit",
+        "65536",
+        "The most brush sides the map may have.",
+    )),
+    pp(valued(
+        "-maxdispinfo",
+        "Displacement limit",
+        "2048",
+        "The most displacements the map may have.",
+    )),
+    pp(valued(
+        "-maxtexinfo",
+        "Texture info limit",
+        "12288",
+        "The most texture infos the map may have.",
+    )),
     option("-dump", "Dump patches", "Writes patch data for debugging."),
+    option("-dumpnormals", "Dump normals", "Writes normals for debugging."),
+    option(
+        "-dumptrace",
+        "Dump ray tracing",
+        "Writes the ray-tracing scene for debugging.",
+    ),
+    pp(option(
+        "-dumppropmaps",
+        "Dump prop lightmaps",
+        "Writes prop lightmaps to the game's sp_lightmaps folder.",
+    )),
+    option(
+        "-debugextra",
+        "Show supersampling",
+        "Marks supersampling in the lightmaps, for debugging.",
+    ),
+    option(
+        "-loghash",
+        "Log sample hash",
+        "Writes the sample hash table to samplehash.txt.",
+    ),
+    pp(option(
+        "-propdebug",
+        "List props",
+        "Lists the props being lit, for debugging.",
+    )),
+    pp(option(
+        "-rederrors",
+        "Black errors",
+        "Shows lighting errors as black instead of red.",
+    )),
+    pp(option(
+        "-report_search_paths",
+        "List search paths",
+        "Prints the folders searched for content.",
+    )),
+    stock(option(
+        "-FullMinidumps",
+        "Full crash dumps",
+        "Writes large crash dumps.",
+    )),
     option("-low", "Low priority", "Runs VRAD below normal priority."),
     option("-verbose", "Verbose", "Prints more information."),
     valued("-threads", "Threads", "8", "How many threads to use."),
 ];
+
+const VBSPINFO_OPTIONS: &[OptionSpec] = &[
+    option(
+        "-treeinfo",
+        "Tree information",
+        "Prints how the BSP tree is laid out.",
+    ),
+    option(
+        "-worldtexturestats",
+        "World texture statistics",
+        "Lists the textures the world uses.",
+    ),
+    option(
+        "-modelstats",
+        "Model statistics",
+        "Prints statistics for each brush model.",
+    ),
+    option(
+        "-liststaticprops",
+        "List static props",
+        "Lists every static prop in the map.",
+    ),
+    option("-size", "World bounds", "Prints the bounds of the world."),
+];
+
+const REPACK_OPTIONS: &[OptionSpec] = &[pp(valued(
+    "-threads",
+    "Threads",
+    "8",
+    "How many threads to use. Uses every thread when this is off.",
+))];
 
 const SOURCECUBEMAP_OPTIONS: &[OptionSpec] = &[
     valued(
@@ -343,7 +1151,13 @@ const SOURCECUBEMAP_OPTIONS: &[OptionSpec] = &[
         "--water",
         "Water",
         "planar",
-        "planar renders water reflections. Needs Experimental.",
+        "strict or planar. Planar renders water reflections and refraction, and needs Experimental.",
+    ),
+    valued(
+        "--capture-time",
+        "Capture time",
+        "0",
+        "The game time, in seconds, at which animated textures and the sky are captured.",
     ),
     option(
         "--incremental",
@@ -362,10 +1176,34 @@ const SOURCECUBEMAP_OPTIONS: &[OptionSpec] = &[
         "",
         "Uses the graphics card whose name contains this text, such as 3050.",
     ),
+    valued(
+        "--cache",
+        "Cache folder",
+        "",
+        "Keeps SourceCubemap's cache in this folder.",
+    ),
+    valued(
+        "--cache-limit-mb",
+        "Cache limit",
+        "2048",
+        "The most the cache may grow to, in megabytes. 0 stops cache writes.",
+    ),
     option(
         "--no-cache",
         "No cache",
         "Does not read or write SourceCubemap's cache.",
+    ),
+    valued(
+        "--previews",
+        "Previews folder",
+        "{mapdir}/{map}_cubemaps",
+        "Writes six PNG previews of every cubemap into this folder.",
+    ),
+    valued(
+        "--json",
+        "Report",
+        "{mapdir}/{map}_cubemaps.json",
+        "Saves the full build report as JSON.",
     ),
     option("--verbose", "Verbose", "Prints more information."),
 ];
@@ -374,10 +1212,31 @@ const GAME_OPTIONS: &[OptionSpec] = &[
     option("-novid", "Skip intro video", "Starts without the intro video."),
     option("-console", "Console", "Opens the console on start."),
     option("-dev", "Developer mode", "Turns on developer messages."),
+    option("-condebug", "Log the console", "Writes the console to console.log."),
     option("-windowed", "Windowed", "Runs in a window."),
     option("-noborder", "No border", "Runs in a window without a border."),
+    option("-fullscreen", "Fullscreen", "Runs fullscreen."),
     valued("-w", "Width", "1600", "Window width in pixels."),
     valued("-h", "Height", "900", "Window height in pixels."),
+    valued(
+        "-dxlevel",
+        "DirectX level",
+        "95",
+        "Starts with this DirectX level, such as 90 or 95.",
+    ),
+    option("-high", "High priority", "Runs the game above normal priority."),
+    option("-nojoy", "No joystick", "Skips joystick support for a faster start."),
+    option(
+        "-multirun",
+        "Allow more than one",
+        "Lets this game run beside another copy of itself. Garry's Mod only.",
+    ),
+    valued(
+        "+maxplayers",
+        "Player slots",
+        "2",
+        "Starts a listen server with this many slots, to test multiplayer.",
+    ),
     option("-tools", "Tools mode", "Starts the engine's tools mode."),
     option("+sv_cheats 1", "Cheats", "Turns cheats on."),
     option("-insecure", "Insecure", "Disables Valve Anti-Cheat so local mods load."),
@@ -741,22 +1600,21 @@ pub fn split_args(text: &str) -> Vec<String> {
 }
 
 /// The arguments of a step's turned-on options, with variables expanded. Options such as
-/// `+sv_cheats 1` that contain a space become two arguments.
+/// `+sv_cheats 1` that contain a space become two arguments, and so do the values of
+/// options that take several numbers, such as `-ambient 0 0 0`.
 fn option_args(step: &Step, context: &Context) -> Vec<String> {
     let mut args = Vec::new();
     for option in &step.options {
         args.extend(option.flag.split_whitespace().map(str::to_owned));
-        let takes_value = step
-            .kind
-            .options()
-            .iter()
-            .find(|spec| spec.flag == option.flag)
-            .is_some_and(|spec| spec.value.is_some());
-        if takes_value {
-            let value = context.expand(option.value.trim());
-            if !value.is_empty() {
-                args.push(value);
-            }
+        let spec = step.kind.options().iter().find(|spec| spec.flag == option.flag);
+        let Some(spec) = spec.filter(|spec| spec.value.is_some()) else {
+            continue;
+        };
+        let value = context.expand(option.value.trim());
+        if spec.split {
+            args.extend(split_args(&value));
+        } else if !value.is_empty() {
+            args.push(value);
         }
     }
     args.extend(split_args(&context.expand(&step.extra_args)));
@@ -983,6 +1841,40 @@ mod tests {
             "+map".to_owned(),
             "my map".to_owned()
         ]));
+    }
+
+    #[test]
+    fn several_number_values_become_separate_arguments() {
+        let mut step = Step::new(StepKind::Vrad).with(&["-ambient", "-lights"]);
+        step.options[1].value = "{mapdir}/extra lights.rad".to_owned();
+        let planned = plan_step(&step, &context(), &tools).unwrap();
+        let Action::Run(command) = planned.action else {
+            panic!("VRAD runs")
+        };
+        assert_eq!(
+            command.args[2..8],
+            ["-ambient", "0", "0", "0", "-lights", "D:/maps/extra lights.rad"]
+        );
+    }
+
+    #[test]
+    fn option_flags_are_unique_per_step() {
+        for kind in StepKind::ALL {
+            let mut seen = std::collections::HashSet::new();
+            for spec in kind.options() {
+                assert!(seen.insert(spec.flag), "{} lists {} twice", kind.label(), spec.flag);
+            }
+        }
+    }
+
+    #[test]
+    fn hammer_plusplus_builds_are_recognised() {
+        let plusplus = Build::of(Path::new("C:/GarrysMod/bin/win64/vradplusplus.exe"));
+        let stock = Build::of(Path::new("C:/GarrysMod/bin/win64/vrad.exe"));
+        assert_eq!(plusplus, Build::PlusPlus);
+        assert_eq!(stock, Build::Stock);
+        assert!(plusplus.supports(Build::Any) && plusplus.supports(Build::PlusPlus));
+        assert!(!stock.supports(Build::PlusPlus));
     }
 
     #[test]
