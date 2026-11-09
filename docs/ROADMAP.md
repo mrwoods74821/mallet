@@ -14,7 +14,7 @@ its milestone is done. Last compared against both sources on 2026-11-09.
 ## Milestone 1: everyday brush editing
 
 The tools a mapper reaches for every few minutes. The tool palette already shows the
-clipping and vertex tools greyed out.
+vertex tool greyed out.
 
 ### Clipboard
 
@@ -25,11 +25,11 @@ clipping and vertex tools greyed out.
 
 ### Clipping tool (Shift+X)
 
-- [ ] Two-point clipping in the 2D views, keeping the front, the back or both halves (Shift+X cycles). Hammer
-- [ ] Three-point clipping, switched with C. H++
-- [ ] Clip plane, handles and red highlight of the brushes it cuts in the 3D view. H++
-- [ ] Clipping brushes that belong to entities. H++
-- [ ] Overlays on clipped faces keep their faces. H++
+- [x] Two-point clipping in the 2D views, keeping the front, the back or both halves (Shift+X cycles). Hammer
+- [x] Three-point clipping, switched with C. H++
+- [x] Clip plane, handles and red highlight of the brushes it cuts in the 3D view. H++
+- [x] Clipping brushes that belong to entities. H++
+- [x] Overlays on clipped faces keep their faces. H++
 
 ### Vertex tool (Shift+V)
 

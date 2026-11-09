@@ -212,6 +212,21 @@ The texture browser lists materials with their sources on a thread, describes ev
 the background for the kind filters (`MaterialInfo`), and loads thumbnails on four worker
 threads, newest request first, so what is on screen loads before what scrolled past.
 
+## Clipping
+
+`mallet_vmf::clip::split_solid` cuts a brush along a plane the way Hammer does: each half
+is the brush plus one new side on the cut (the current material, aligned to the world),
+minus the sides left without area. Both halves keep the brush's id and side ids; when both
+are kept, the front one is renumbered and added next to the back one in the same entity, so
+brush entities stay whole. Entities that list faces in `sides` (overlays, cube maps) are
+pointed at the faces the cut ones became. The whole clip is one `Edit::Batch`.
+
+`crates/mallet/src/clipper.rs` holds the tool. Two-point clipping drags a line in a 2D view
+and runs the plane along that view's depth; three-point clipping (C) takes three points from
+the 2D views or from faces in the 3D view. Shift+X cycles the halves kept and Enter clips.
+The preview (kept pieces and the plane's outline) is recomputed only when the points, the
+selection or the map change, and travels in `Overlay::clip`, so every view draws it.
+
 ## Compiling
 
 `compile` turns a `Preset` (a list of `Step`s with options from a per-tool catalog,
@@ -401,6 +416,7 @@ Tools:
 | `flip_selection`, `snap_selection_to_grid`, `align_selection` | Hammer's Flip Objects, Snap Selected to Grid and Align Objects |
 | `set_pivot` | Place or reset the pivot rotations turn around |
 | `create_block` | Box brush between two corners, like the Block tool |
+| `clip_selection` | Cut the selected brushes along the plane through three points, keeping both halves, the front or the back, like the Clipping tool |
 | `create_entity` | Point entity of any class at a position, with extra keyvalues, like the Entity tool |
 | `undo`, `redo` | Step the shared history |
 | `set_grid`, `center_views` | Grid size and framing |
