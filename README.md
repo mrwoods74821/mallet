@@ -9,7 +9,8 @@
 Mallet opens and saves VMF files without losing anything, has its own faster `.mallet`
 map format, and shows maps in Hammer's four-viewport layout, with textured brushes and prop models in 3D. It has Hammer's
 Selection, Block and Entity tools with scale, rotate and skew handles and a Hammer++-style
-3D transform gizmo, Object Properties driven by the game's FGD, map tabs,
+3D transform gizmo, Overlay and Decal tools that show posters, stains and graffiti where the
+game will, Object Properties driven by the game's FGD, map tabs,
 a CompilePal-style compile window with presets, SourceCubemap and leak lines,
 Hammer's texture tool with a texture browser that loads every mounted game's materials, and
 a Hammer++-style 3D Lighting Preview that lights the map with every Source light entity. A
@@ -93,6 +94,8 @@ These follow Hammer++'s default keybindings.
 | Drag with the Block tool, then Enter | Create a box brush; drag inside it to move it, drag handles in any view to resize it (its depth starts from the last block) |
 | Shift+V | Vertex tool for the selected brushes: drag a white corner or yellow edge midpoint in any view to move it on the grid (in 3D across the floor, or up and down when Shift is held as the drag starts). Click or drag a rectangle to select corners, Ctrl to add; every selected corner moves together. The brush changes as you drag and each drag is one undo step |
 | Ctrl+F | With the Vertex tool, split a face between two selected corners; the halves bend apart once a corner on the split moves |
+| Shift+O | Overlay tool: click a brush face in the 3D view to place an overlay with the current texture there, at the texture's own shape. Click an overlay to select it, then drag one of its four corner handles to resize it on the grid (hold Shift as the drag starts to move just that corner). Ctrl+click a face to add it to the selected overlay, or take it off |
+| Shift+D | Decal tool: click a brush face in the 3D view to place a decal with the current texture there; click a decal to select it |
 | Delete / Shift+Q or Escape / Ctrl+Shift+A | Delete selection / deselect or cancel the block / select all |
 | Numpad `-` / Numpad `+` | Smaller / larger grid |
 | Ctrl+E / Ctrl+R | Centre 2D views / 3D view on the map |
@@ -108,6 +111,27 @@ frame rate, CPU time per frame, how many chunks and props culling left to draw, 
 reused their last image, and how many textures are still loading. View > 3D draw distance
 sets how far the 3D view draws, like Hammer's back clipping plane. For the best
 speed on large maps, run the release build (`cargo build --release -p mallet`).
+
+## Overlays and decals
+
+Overlays (`info_overlay`) and decals (`infodecal`) are drawn in the 3D views the way the
+game shows them. An overlay's picture lies on the brush faces it lists and is cut to their
+shape; a decal's lies on the wall, floor or ceiling it sits against, at the size its
+texture gives it. Both blend by the texture's alpha, show as an outline in the 2D and
+wireframe views, and can be clicked like any other object, while the texture tool looks
+through them to the face behind.
+
+The Overlay tool (Shift+O) places an overlay on the face you click, upright on walls and
+with its top to the north on floors, and lists that face and the faces beside it in the
+same wall that the picture reaches. Pick the picture first as the current texture, from
+the texture browser. Moving, rotating, flipping, resizing, cloning and pasting an overlay
+all carry its picture along. An overlay only shows on the faces it lists, as in Hammer, so
+after moving one onto another brush, Ctrl+click that face with the Overlay tool to add it.
+Copying an overlay together with its wall keeps it on the copied wall.
+
+The Decal tool (Shift+D) places a decal on the face you click. The game decides a decal's
+size from its texture and always draws it upright, so a decal has no handles; use an
+overlay when you need a set size or angle.
 
 ## Transforming
 

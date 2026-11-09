@@ -133,8 +133,8 @@ or edit it yet.
 - [ ] Find Entities (Ctrl+Shift+F) and Replace (Ctrl+Shift+R) for keyvalues. Hammer
 - [ ] Entity Report: filter by class, name, keyvalue or VisGroup; go to, delete and mark. Hammer
 - [ ] Show Connections: lines between entities that send each other outputs. Hammer
-- [ ] Decal tool (Shift+D): place `infodecal` on faces with the current texture. Hammer
-- [ ] Overlay tool (Shift+O): place and edit `info_overlay` with handles, drawn in 2D and 3D. Hammer
+- [ ] Overlays on displacements following the displaced surface. Hammer
+- [ ] Overlay handles in the 2D views, and rotating an overlay from a handle. Hammer
 - [ ] Path tool: place and chain path entities such as `path_track` and `path_corner`. Hammer
 - [ ] Sprinkle tool with presets. Hammer (CS:GO), H++
 - [ ] Physics tool: drag, explode and shoot props, ragdolls and brushes, keeping their poses. H++
@@ -199,6 +199,7 @@ left. See the [README](../README.md) for how each one works.
 - Lossless VMF loading and saving, the `.mallet` format, map tabs, recent maps and Windows file types.
 - Hammer's four-viewport layout with 3D Textured, 3D Wireframe, 3D Lighting Preview and 2D Top, Front and Side views.
 - Selection, Block, Entity and Texture Application tools; scale, rotate and skew handles; the Hammer++ 3D gizmo and pivot.
+- Overlay (Shift+O) and Decal (Shift+D) tools, with overlays and decals drawn on their faces in 3D and outlined in 2D.
 - Transform dialog, Snap Selected to Grid (and individually), Flip Objects, Align Objects, texture lock and texture scale lock, arrow-key nudging.
 - Object Properties from the FGD: keyvalues with typed editors, Raw keys (SmartEdit off), outputs, inputs and flags, for several entities at once.
 - Face Edit sheet with Hammer++'s UV vector editing and hotspot texturing, Apply Nodraw, random shift, justify, smoothing groups and Replace Textures.

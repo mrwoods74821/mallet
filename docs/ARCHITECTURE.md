@@ -238,6 +238,58 @@ the 2D views or from faces in the 3D view. Shift+X cycles the halves kept and En
 The preview (kept pieces and the plane's outline) is recomputed only when the points, the
 selection or the map change, and travels in `Overlay::clip`, so every view draws it.
 
+## Overlays and decals
+
+`mallet_vmf::overlay` holds what an `info_overlay` stores and what the compilers make of
+it. `Overlay` is the quad: `BasisOrigin`, the axes `BasisU` and `BasisV` its picture runs
+along, `BasisNormal`, and the corners `uv0` to `uv3` measured along the axes. The first
+two corners are the picture's left edge and the first and last its top edge, so with the
+usual texture coordinates V points down the picture and `V = U x normal`, which is what
+`surface_axes` builds for a new overlay or a decal, the way the game's
+`R_DecalComputeBasis` does: upright on walls, top to the north on floors.
+
+`Overlay::pieces_on` cuts the quad to one brush face. The quad is two triangles; each is
+pushed along the normal onto the face, clipped by the face's polygon, and given texture
+axes that are affine in world space, so a `Piece` is drawn like any face whose
+coordinates run from 0 to 1. `Overlay::transformed` carries an overlay through any affine
+matrix: the normal goes through the inverse transpose, the axes are squared up again, and
+the corners are measured anew from the moved quad, so resizing stretches the picture and
+a mirror flips it. Every path that moves entities calls it: `Entity::translate` for
+clones, the clipboard's paste, and `Editor::selected_overlay_edits` for moves and
+`Edit::Transform`, as `Edit::SetKey` edits beside the one that moves `origin`.
+
+`mallet_vmf::sides` keeps face lists right across copies. `CopiedSides` records each
+copied face's new id as brushes are renumbered, and `remap_entity` rewrites `sides` (and
+`sides2` of `info_overlay_transition`) through it. A paste drops listed faces that were
+not copied, since the map pasted into may use those ids for other faces; a clone keeps
+them, since they are still the same faces.
+
+`Scene::build` ends with `add_decals`, which gives every overlay and decal a second mesh
+beside its helper model: the pieces as `SceneFace`s marked `decal`, their outline as
+edges, and a thin slab around the quad for picking. An overlay is cut to the faces its
+`sides` list, found through an index of side ids built only when the map has overlays. A
+decal lands on the nearest brush face within eight units that is not a tool face, takes
+its size from `Editor::decal_sizes` (the texture's size times `$decalscale`, looked up
+once per material) and runs on over faces in the same plane. Meshes marked `decal` are
+skipped by `pick_face` and `surface_hit`, so the texture tool and the tools that place
+things on surfaces look through them.
+
+The renderer treats `decal` faces as blended whatever their material says: they join the
+translucent faces, sorted back to front, with texture coordinates taken as they are
+instead of divided by the texture's size, lifted a sixteenth of a unit off their face.
+The blended pipelines also carry a small depth bias, which scales with depth precision,
+so decals do not flicker far away. They take no luxels and cast no shadows in the
+lighting preview. Materials with the `DecalModulate` shader multiply what is under them
+in the game; `modulate_to_blend` rewrites their pixels into a dark tint or white haze of
+matching alpha, which a plain blend can show.
+
+`crates/mallet/src/decals.rs` holds the tools. `create_overlay` builds the quad on the
+clicked face at the texture's size and lists the faces in that plane which a piece
+actually lands on. `move_overlay_corner` is the corner drag: the mouse ray's hit on the
+overlay's plane, snapped to the grid along the overlay's own axes, with the neighbouring
+corners following unless Shift asked for a free corner; each step goes through
+`History::apply_grouped`, so a drag is one undo step.
+
 ## Vertex editing
 
 `mallet_vmf::vertex::BrushMesh` holds a brush as welded corners and faces that list them,
@@ -467,6 +519,7 @@ Tools:
 | `create_block` | Box brush between two corners, like the Block tool |
 | `clip_selection` | Cut the selected brushes along the plane through three points, keeping both halves, the front or the back, like the Clipping tool |
 | `create_entity` | Point entity of any class at a position, with extra keyvalues, like the Entity tool |
+| `create_overlay`, `create_decal` | Place an overlay or decal on a brush face, like the Overlay and Decal tools; overlays get their basis and the faces they reach filled in |
 | `undo`, `redo` | Step the shared history |
 | `set_grid`, `center_views` | Grid size and framing |
 | `set_viewport_type` | Switch a viewport slot between 3D (textured, wireframe, lighting preview) and 2D types |
