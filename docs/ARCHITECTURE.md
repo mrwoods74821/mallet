@@ -428,6 +428,24 @@ Security:
   attacks from web pages.
 - There is no authentication, so any program on this machine can use it while Mallet runs.
 
+Agents' own view: while Mallet Options > AI agents > "Agents work in their own view" is on
+(the default), `tools::run` runs each call through `Editor::with_agent_view`
+(`editor/agent.rs`). It swaps an `AgentView` into the editor for the call: the agent's
+tab, camera, 2D views, viewport layout, grid, selection, face selection, overlay, tool,
+clipper, vertex tool state and clipboard. Afterwards the user's state is swapped back,
+selections are trimmed of objects the agent deleted, and the agent's status line and
+system clipboard text are dropped. The maps and their undo history are shared, so the
+agent's edits show in the window at once and Ctrl+Z can undo them.
+
+Tabs carry lasting ids, so the agent keeps its tab while the user opens, closes or
+switches tabs. In this mode `new_map` and `open_map` open a tab behind the window's,
+`switch_tab` moves only the agent, `close_tab` refuses the tab the window shows,
+`set_settings` refuses the `agents` section, and the tools that drive the window
+(`send_input` and the `show_` tools) are refused. `get_status` reports `own_view`, the
+agent's `tab` and the window's `window_tab`; `list_tabs` reports `active` (the window's)
+and `agent`. A map handed over by a second copy of Mallet (`open_map` with `focus`) always
+opens in the window.
+
 Tools:
 
 | Tool | What it does |
@@ -471,7 +489,7 @@ Tools:
 | `set_faces` | Material, scale, shift, rotation, lightmap scale, alignment and justify, as one undo step |
 | `replace_material` | Replace a material in the map or the selected faces |
 | `show_texture_browser` | Open the texture browser with a search |
-| `send_input` | Key presses, clicks and drags fed into the window as if a user made them, in a viewport or anywhere in the window (`window`, in screenshot pixels) |
+| `send_input` | Key presses, clicks and drags fed into the window as if a user made them, in a viewport or anywhere in the window (`window`, in screenshot pixels); refused while agents work in their own view |
 
 `send_input` queues synthetic egui events that `MalletApp::raw_input_hook` feeds into the
 window one frame at a time, so they take the same path as real input. The tool returns

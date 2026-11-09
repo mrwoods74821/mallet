@@ -294,3 +294,10 @@ While Mallet runs, its MCP server listens on `http://127.0.0.1:7414/mcp`; Mallet
 AI agents can change the port or turn it off. The included
 `.mcp.json` registers it for clients such as Claude Code. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the tool list and design notes.
+
+Agents work in their own view by default, so you can keep looking around while one edits.
+An agent has its own tab, camera, 2D views, grid, selection and tools; its changes to the
+map show in your viewports straight away, but your camera, selection and tab stay where you
+left them. It cannot click or type into the window or open panels there. Turn off "Agents
+work in their own view" in Mallet Options > AI agents to let agents drive the window
+itself, for example to test tools with `send_input`.
