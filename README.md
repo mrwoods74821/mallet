@@ -298,6 +298,7 @@ AI agents can change the port or turn it off. The included
 Agents work in their own view by default, so you can keep looking around while one edits.
 An agent has its own tab, camera, 2D views, grid, selection and tools; its changes to the
 map show in your viewports straight away, but your camera, selection and tab stay where you
-left them. It cannot click or type into the window or open panels there. Turn off "Agents
+left them. A pink camera marker in your viewports shows where it is looking while it
+works on the map you have open. It cannot click or type into the window or open panels there. Turn off "Agents
 work in their own view" in Mallet Options > AI agents to let agents drive the window
 itself, for example to test tools with `send_input`.
