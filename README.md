@@ -38,10 +38,12 @@ Windows and `~/.config/Mallet/config.json` on Linux.
 
 Compiling uses the game's own tools: on Windows the usual `bin/win64` exes (and the
 Hammer++ builds). On Linux, Source games ship few or none of these (GMod and the
-Source SDK bases have none; CSS only `bspzip`), so the usual route there is running
-the game's own Windows tools under Wine: make small `vbsp`, `vvis` and `vrad`
-scripts that call `wine64 path/to/vbsp.exe "$@"` and point Mallet Options >
-Compile tools at their folder.
+Source SDK bases have none; CSS only `bspzip`), so install the Tools++ compilers that
+accompany Hammer++: their Linux builds are native binaries, and Mallet finds
+`vbsp++`, `vvis++` and `vrad++` on PATH (typically `~/.local/bin`) or in the game's
+`bin` folders automatically. GMod's entity definitions (`*.fgd`) are not loose on
+disk; fetch `base.fgd`, `halflife2.fgd` and `garrysmod.fgd` from the Facepunch/garrysmod
+repository into the `garrysmod` folder, or list them in Mallet Options.
 
 Prop entities with a `model` key show their model in the 3D view, textured with the
 default skin and placed by `origin`, `angles` and `modelscale`. Models the game does not

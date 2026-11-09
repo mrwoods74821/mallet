@@ -958,6 +958,15 @@ impl ToolKind {
                 for folder in ["bin/linux64", "bin"] {
                     add(root.join(folder).join(format!("{name}")));
                 }
+                // Tools++ (the Hammer++ compilers) installs {name}++ binaries,
+                // into the game's bin folders or onto PATH, usually
+                // ~/.local/bin. They run natively on Linux.
+                for folder in ["bin/linux64", "bin", "bin/win64"] {
+                    add(root.join(folder).join(format!("{name}++")));
+                }
+                for folder in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+                    add(folder.join(format!("{name}++")));
+                }
             }
         }
         found
