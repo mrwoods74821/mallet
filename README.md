@@ -37,10 +37,11 @@ its `libraryfolders.vdf`. The choice is saved in `%APPDATA%\Mallet\config.json` 
 Windows and `~/.config/Mallet/config.json` on Linux.
 
 Compiling uses the game's own tools: on Windows the usual `bin/win64` exes (and the
-Hammer++ builds), on Linux the extensionless `vbsp`/`vvis`/`vrad` binaries under the
-game's `bin` or `bin/linux64` folders — the Source SDK ships these; GMod's Linux install
-does not, so point Mallet Options > Compile tools at a copy, or install the
-Source SDK Base 2013 tools for free.
+Hammer++ builds). On Linux, Source games ship few or none of these (GMod and the
+Source SDK bases have none; CSS only `bspzip`), so the usual route there is running
+the game's own Windows tools under Wine: make small `vbsp`, `vvis` and `vrad`
+scripts that call `wine64 path/to/vbsp.exe "$@"` and point Mallet Options >
+Compile tools at their folder.
 
 Prop entities with a `model` key show their model in the 3D view, textured with the
 default skin and placed by `origin`, `angles` and `modelscale`. Models the game does not
