@@ -11,7 +11,7 @@ use std::hash::{Hash, Hasher};
 use glam::DVec3;
 use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::solid_faces;
-use mallet_vmf::texture::Justify;
+use mallet_vmf::texture::{Hotspot, Justify};
 use mallet_vmf::{Side, Solid};
 
 use eframe::egui;
@@ -120,6 +120,8 @@ pub struct FaceChange {
     pub values: FaceValues,
     pub justify: Option<Justify>,
     pub as_one: bool,
+    /// With [`Justify::Fit`] on hotspot textures, use only the alternate rectangles.
+    pub alternates: bool,
 }
 
 /// One face, with what the face panel and MCP tools show about it.
@@ -202,12 +204,10 @@ impl Editor {
         }
     }
 
-    /// Selects every face of the selected brushes, as switching to the texture tool does
-    /// in Hammer.
-    pub fn select_faces_of_selection(&mut self) {
-        let solids: Vec<u32> = self
-            .selection
-            .iter()
+    /// Every face of these brushes and of the brushes these entities own.
+    pub fn owner_sides<'a>(&self, owners: impl IntoIterator<Item = &'a Owner>) -> Vec<u32> {
+        let solids: Vec<u32> = owners
+            .into_iter()
             .flat_map(|owner| match owner {
                 Owner::Solid(id) => vec![*id],
                 Owner::Entity(id) => self
@@ -216,12 +216,45 @@ impl Editor {
                     .unwrap_or_default(),
             })
             .collect();
-        let sides: Vec<u32> = self.brush_faces(&solids).iter().map(|face| face.side.id).collect();
-        self.select_faces(sides, SelectMode::Replace);
+        if solids.is_empty() {
+            return Vec::new();
+        }
+        self.brush_faces(&solids).iter().map(|face| face.side.id).collect()
     }
 
-    /// Switches tools. Like Hammer, the texture tool starts with the faces of the selected
-    /// brushes, and leaving it lets go of the faces; other tools drop pending previews.
+    /// The faces texture changes go to: the faces the texture tool selected, or else every
+    /// face of the selected brushes, so a texture picked with brushes selected covers them.
+    pub fn texture_targets(&self) -> BTreeSet<u32> {
+        if !self.face_selection.is_empty() {
+            return self.face_selection.clone();
+        }
+        self.owner_sides(&self.selection).into_iter().collect()
+    }
+
+    /// The texture tool's take on selecting brushes: every face of each brush or entity is
+    /// selected, added or removed instead. Toggling takes a brush's faces away when all of
+    /// them are selected and selects them all otherwise.
+    pub(crate) fn select_owner_faces(&mut self, owners: &[Owner], mode: SelectMode) {
+        if mode != SelectMode::Toggle {
+            let sides = self.owner_sides(owners);
+            return self.select_faces(sides, mode);
+        }
+        for owner in owners {
+            let sides = self.owner_sides([owner]);
+            let all = sides.iter().all(|side| self.face_selection.contains(side));
+            for side in sides {
+                if all {
+                    self.face_selection.remove(&side);
+                } else {
+                    self.face_selection.insert(side);
+                }
+            }
+        }
+        self.scene.mark_faces(&self.face_selection);
+    }
+
+    /// Switches tools. Like Hammer, the texture tool trades the selected brushes for all of
+    /// their faces, and leaving it lets go of the faces; other tools drop pending previews.
     pub fn set_tool(&mut self, tool: Tool) {
         if self.tool == tool {
             return;
@@ -229,11 +262,15 @@ impl Editor {
         if self.tool == Tool::Texture {
             self.clear_face_selection();
         }
+        let sides = (tool == Tool::Texture).then(|| self.owner_sides(&self.selection));
+        if sides.is_some() {
+            self.clear_selection();
+        }
         self.tool = tool;
         self.overlay.block = None;
         self.overlay.entity = None;
-        if tool == Tool::Texture {
-            self.select_faces_of_selection();
+        if let Some(sides) = sides {
+            self.select_faces(sides, SelectMode::Replace);
         }
         self.clear_clip_points();
     }
@@ -430,6 +467,11 @@ impl Editor {
             }
         }
         let all_points: Vec<DVec3> = faces.iter().flat_map(|face| face.polygon.iter().copied()).collect();
+        let hotspots = match change.justify {
+            Some(Justify::Fit) => self.hotspots_of(size_of.keys().cloned().collect::<Vec<_>>()),
+            _ => HashMap::new(),
+        };
+        let seed = random_seed();
         let values = change.values;
         let count = self.edit_sides(sides, None, |side, polygon| {
             if let Some(material) = &change.material {
@@ -445,7 +487,13 @@ impl Editor {
                     .copied()
                     .unwrap_or([DEFAULT_TEXTURE_SIZE; 2]);
                 let points = if change.as_one { all_points.as_slice() } else { polygon };
-                side.justify(how, points, size);
+                let rects = hotspots.get(&side.material).map(Vec::as_slice).unwrap_or(&[]);
+                if how != Justify::Fit
+                    || rects.is_empty()
+                    || !side.hotspot(polygon, rects, change.alternates, face_random(seed, side.id))
+                {
+                    side.justify(how, points, size);
+                }
             }
         })?;
         if let Some(material) = &change.material {
@@ -481,15 +529,12 @@ impl Editor {
                 sizes.insert(face.side.material.clone(), size);
             }
         }
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |time| time.as_nanos() as u64);
+        let seed = random_seed();
         self.edit_sides(sides, None, |side, _| {
             let [width, height] = sizes.get(&side.material).copied().unwrap_or([DEFAULT_TEXTURE_SIZE; 2]);
             let range = if horizontal { width } else { height };
-            let mut hasher = DefaultHasher::new();
-            (seed, side.id, horizontal).hash(&mut hasher);
-            let shift = (hasher.finish() % range.max(1.0) as u64) as f64;
+            let random = face_random(seed ^ u64::from(horizontal), side.id);
+            let shift = (random % range.max(1.0) as u64) as f64;
             if horizontal {
                 side.uaxis.offset = shift;
             } else {
@@ -525,7 +570,18 @@ impl Editor {
 
     /// Lines textures up on their faces. With `as_one`, the faces share one extent, so a
     /// texture runs across them as if they were one face.
-    pub fn justify_faces(&mut self, sides: &BTreeSet<u32>, how: Justify, as_one: bool) -> Result<usize, String> {
+    ///
+    /// Fit on a hotspot texture works as in Hammer++: each face gets the rectangle of the
+    /// texture that suits its size best, picked at random among equally good ones, so
+    /// pressing Fit again can give another result. `alternates` limits the choice to the
+    /// rectangles marked as alternates, as holding Alt does in Hammer++.
+    pub fn justify_faces(
+        &mut self,
+        sides: &BTreeSet<u32>,
+        how: Justify,
+        as_one: bool,
+        alternates: bool,
+    ) -> Result<usize, String> {
         let faces = self.faces(sides);
         let mut sizes = HashMap::new();
         for face in &faces {
@@ -534,12 +590,53 @@ impl Editor {
                 sizes.insert(face.side.material.clone(), size);
             }
         }
+        let hotspots = if how == Justify::Fit {
+            self.hotspots_of(sizes.keys().cloned().collect::<Vec<_>>())
+        } else {
+            HashMap::new()
+        };
+        let seed = random_seed();
+        let mut hotspotted = 0;
         let all_points: Vec<DVec3> = faces.iter().flat_map(|face| face.polygon.iter().copied()).collect();
-        self.edit_sides(sides, None, |side, polygon| {
+        let count = self.edit_sides(sides, None, |side, polygon| {
+            if let Some(rects) = hotspots.get(&side.material) {
+                if side.hotspot(polygon, rects, alternates, face_random(seed, side.id)) {
+                    hotspotted += 1;
+                    return;
+                }
+            }
             let size = sizes.get(&side.material).copied().unwrap_or([DEFAULT_TEXTURE_SIZE; 2]);
             let points = if as_one { all_points.as_slice() } else { polygon };
             side.justify(how, points, size);
-        })
+        })?;
+        if hotspotted > 0 {
+            self.message = format!("Hotspotted {hotspotted} of {count} faces");
+        }
+        Ok(count)
+    }
+
+    /// The hotspot rectangles of a material, from the `.rect` file its `%rectanglemap`
+    /// names; empty for ordinary materials.
+    pub fn hotspots(&mut self, material: &str) -> Vec<Hotspot> {
+        let Some(text) = self
+            .materials
+            .as_mut()
+            .and_then(|materials| materials.rectangle_file(material))
+        else {
+            return Vec::new();
+        };
+        Hotspot::parse_rect_file(&text).unwrap_or_default()
+    }
+
+    /// The hotspot rectangles of every material in `materials` that has any.
+    fn hotspots_of(&mut self, materials: Vec<String>) -> HashMap<String, Vec<Hotspot>> {
+        materials
+            .into_iter()
+            .filter_map(|material| {
+                let rects = self.hotspots(&material);
+                (!rects.is_empty()).then_some((material, rects))
+            })
+            .collect()
     }
 
     /// Aligns textures to the world or to their faces.
@@ -667,6 +764,20 @@ impl Editor {
         used.sort();
         used
     }
+}
+
+/// A seed that differs every time, for random shifts and hotspot picks.
+fn random_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |time| time.as_nanos() as u64)
+}
+
+/// A random number for one face, from a seed and the face's side id.
+fn face_random(seed: u64, side: u32) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (seed, side).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Replaces every occurrence of `find` (lower case) in `text`, ignoring case.

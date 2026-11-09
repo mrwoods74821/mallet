@@ -493,8 +493,10 @@ pub fn definitions() -> Value {
         tool(
             "set_faces",
             "Change brush faces like Face Edit: material, scale, shift, rotation, lightmap scale, alignment to \
-             world or face, and justify (left, right, top, bottom, center, fit). Applies to the given sides or the \
-             selected faces. Undoable.",
+             world or face, and justify (left, right, top, bottom, center, fit). Fit on a hotspot texture (one \
+             whose VMT names a .rect file with %rectanglemap) fits each face into its best matching rectangle, \
+             as in Hammer++. Applies to the given sides, the selected faces, or every face of the selected \
+             brushes. Undoable.",
             json!({
                 "sides": { "type": "array", "items": { "type": "integer" } },
                 "material": { "type": "string" },
@@ -504,7 +506,8 @@ pub fn definitions() -> Value {
                 "lightmap_scale": { "type": "integer", "minimum": 1 },
                 "align": { "type": "string", "enum": ["world", "face"] },
                 "justify": { "type": "string", "enum": ["left", "right", "top", "bottom", "center", "fit", "fit_width", "fit_height"] },
-                "treat_as_one": { "type": "boolean", "description": "Justify the faces together." }
+                "treat_as_one": { "type": "boolean", "description": "Justify the faces together." },
+                "alternates": { "type": "boolean", "description": "With justify fit on a hotspot texture, use only its alternate rectangles." }
             }),
             &[],
         ),
@@ -1035,10 +1038,10 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
         "set_faces" => {
             let mut sides: std::collections::BTreeSet<u32> = id_list(args, "sides")?.into_iter().collect();
             if sides.is_empty() {
-                sides = editor.face_selection.clone();
+                sides = editor.texture_targets();
             }
             if sides.is_empty() {
-                return Err("pass sides, or select faces first".to_owned());
+                return Err("pass sides, or select faces or brushes first".to_owned());
             }
             let align = match optional_string(args, "align")? {
                 None => None,
@@ -1072,6 +1075,7 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
                 },
                 justify,
                 as_one: args.get("treat_as_one").and_then(Value::as_bool).unwrap_or(false),
+                alternates: args.get("alternates").and_then(Value::as_bool).unwrap_or(false),
             };
             if change.material.is_none()
                 && change.align.is_none()

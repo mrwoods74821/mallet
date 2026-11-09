@@ -97,6 +97,7 @@ impl Material {
 pub struct Materials {
     loader: MaterialLoader,
     cache: HashMap<String, Material>,
+    rectangles: HashMap<String, Option<Arc<str>>>,
 }
 
 /// Loads materials without caching. Cheap to clone and safe to send to worker threads,
@@ -122,6 +123,9 @@ struct Properties {
     surface: Option<Surface>,
     /// The shader the material uses, lower case, such as `lightmappedgeneric`.
     shader: Option<String>,
+    /// The hotspot `.rect` file (`%rectanglemap`), relative to `materials/` and without
+    /// its extension.
+    rectangle_map: Option<String>,
 }
 
 /// What the texture browser's filters need to know about a material.
@@ -157,6 +161,10 @@ impl Properties {
             keywords: block.get("%keywords").map(str::to_owned),
             surface: Self::surface(block),
             shader: (!block.name.eq_ignore_ascii_case("patch")).then(|| block.name.to_ascii_lowercase()),
+            rectangle_map: block
+                .get("%rectanglemap")
+                .map(|name| normalize(name).trim_end_matches(".rect").to_owned())
+                .filter(|name| !name.is_empty()),
         }
     }
 
@@ -193,6 +201,7 @@ impl Properties {
             keywords: other.keywords.or(self.keywords),
             surface: other.surface.or(self.surface),
             shader: other.shader.or(self.shader),
+            rectangle_map: other.rectangle_map.or(self.rectangle_map),
         }
     }
 
@@ -215,6 +224,7 @@ impl Materials {
                 filesystem: Arc::new(filesystem),
             },
             cache: HashMap::new(),
+            rectangles: HashMap::new(),
         }
     }
 
@@ -231,6 +241,18 @@ impl Materials {
     /// when the material or its texture cannot be found or decoded. Results are cached.
     pub fn texture(&mut self, material: &str) -> Option<Texture> {
         self.materials(&[material]).pop().and_then(|material| material.texture)
+    }
+
+    /// The text of a hotspot material's `.rect` file, named by its `%rectanglemap`, or
+    /// `None` when the material has none or the file is missing. Results are cached.
+    pub fn rectangle_file(&mut self, material: &str) -> Option<Arc<str>> {
+        let key = material_key(material);
+        if let Some(cached) = self.rectangles.get(&key) {
+            return cached.clone();
+        }
+        let text = self.loader.rectangle_file(&key).map(Arc::from);
+        self.rectangles.insert(key, text.clone());
+        text
     }
 
     /// Loads several materials at once, spread over every CPU core, and returns them in
@@ -337,6 +359,14 @@ impl MaterialLoader {
         let data = self
             .filesystem
             .read(&format!("materials/{}.vmt", material_key(material)))?;
+        Some(String::from_utf8_lossy(&data).into_owned())
+    }
+
+    /// The text of a hotspot material's `.rect` file, as [`Materials::rectangle_file`]
+    /// reads it, without caching.
+    pub fn rectangle_file(&self, material: &str) -> Option<String> {
+        let name = self.properties(&material_key(material), 0)?.rectangle_map?;
+        let data = self.filesystem.read(&format!("materials/{name}.rect"))?;
         Some(String::from_utf8_lossy(&data).into_owned())
     }
 

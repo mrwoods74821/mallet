@@ -193,7 +193,18 @@ undoable edit, so there is no Apply button.
 
 `mallet_vmf::texture` holds the Face Edit math, tested on its own: Hammer's world axes
 (Quake's base axes, floors first), face axes that follow slopes, rotation about the face
-normal, and justify and fit, all on `u = point · axis / scale + offset`.
+normal, and justify and fit, all on `u = point · axis / scale + offset`. Hotspot fit
+(`Side::hotspot`) reads `.rect` rectangles (`Hotspot::parse_rect_file`) and scores each one,
+and its quarter turn when allowed, by `|ln(width ratio)| + |ln(height ratio)|` against the
+face at 0.25 units per texel; scores within 0.05 of the best tie and are picked between at
+random. `Materials::rectangle_file` finds the file through the VMT's `%rectanglemap`,
+following `patch` includes, and caches it.
+
+The texture tool works on faces only: switching to it trades the selected brushes for their
+faces, and while it is active `Editor::select` selects, adds or removes the owners' faces
+(`select_owner_faces`) and leaves the brush selection empty. Outside it,
+`Editor::texture_targets` falls back to every face of the selected brushes when no face is
+selected, for the texture browser and MCP.
 
 The texture tool keeps a set of selected side ids per tab; scene faces carry their side and
 brush ids, so a ray picks one face through the plane it enters. Every face change replaces

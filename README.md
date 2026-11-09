@@ -199,13 +199,25 @@ lighting entities get Source's default settings even without the game's FGD.
 Shift+A opens the Face Edit Sheet, laid out like Hammer++'s. In the 3D view, click a face
 to select it and pick up its texture (Lift+Select, as in Hammer; the Mode menu has Lift,
 Select, Apply and Align to View too), Ctrl+click to add faces and Shift+click for the whole
-brush. Right-click puts the current texture on a face; Alt+right-click also puts the picked
+brush. Switching to the texture tool with brushes selected lets go of the brushes and
+selects all of their faces instead. Selecting brushes while the sheet is open, by clicking in
+a 2D view, dragging a box or Select All, selects all of their faces, and Ctrl adds or removes a
+brush's faces. With brushes
+selected in any tool, picking a texture in the texture browser puts it on all their faces. Right-click puts the current texture on a face; Alt+right-click also puts the picked
 up alignment on it. Scale, shift, luxel scale, rotation and the UV vectors apply as you drag,
 type, scroll or click their arrows, and a drag is one undo step. The ½ and ×2 buttons halve
 or double the scale of one axis while keeping the texture pinned at the face's corner, and
 the dice buttons shift each face randomly, for stairs. Justify (Fit, L, R, T, B, C, and
 Fit width and Fit height, which keep the texture's proportions, with Treat as one), World and Face alignment, Apply Nodraw, smoothing groups, Hide mask and
 Replace Textures work as in Hammer.
+
+Hotspot textures work as in Hammer++. A hotspot texture is a trim sheet whose VMT names a
+`.rect` file of rectangles with `%rectanglemap`; the sheet says so under the current texture.
+Apply it, select the faces and press Fit: each face gets the rectangle that suits its size
+best, turned a quarter turn where the rectangle allows it (`rotate`), and flipped at random
+where it allows that (`reflect`). Among equally good rectangles one is picked at random, so
+pressing Fit again gives another look. Hold Alt while pressing Fit to use only the rectangles
+marked `alt`.
 
 The texture browser lists every material the game mounts, including the games in Garry's
 Mod's `cfg/mount.cfg` and every addon. The sidebar narrows it to particular games, addons

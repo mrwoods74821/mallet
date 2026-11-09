@@ -15,7 +15,6 @@ use super::texture_browser::Pick;
 use super::MalletApp;
 use crate::editor::{Editor, Tool};
 use crate::faces::{FaceInfo, FaceValues, ReplaceAction, ReplaceOptions, TextureMode};
-use crate::scene::Owner;
 
 const MUTED: Color32 = Color32::from_gray(140);
 const MIXED: Color32 = Color32::from_rgb(230, 170, 60);
@@ -65,6 +64,7 @@ impl MalletApp {
             .unwrap_or_default();
         let current = editor.material.clone();
         let preview = material_preview(ctx, &mut self.texture_previews, editor, &current);
+        let hotspots = editor.hotspots(&current).len();
         let mut open = true;
         let mut browse = false;
         egui::Window::new(format!("{} Face Edit Sheet", icon::PAINT_BRUSH))
@@ -89,6 +89,15 @@ impl MalletApp {
                         browse = actions_section(ui, editor, state, &faces, preview.as_ref());
                         ui.add_space(4.0);
                         current_texture_row(ui, editor, preview.as_ref());
+                        if hotspots > 0 {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} Hotspot texture with {hotspots} rectangles: apply it, then press Fit.",
+                                    icon::SQUARES_FOUR
+                                ))
+                                .small(),
+                            );
+                        }
                         ui.add_space(2.0);
                         ui.label(
                             RichText::new(
@@ -183,7 +192,7 @@ impl MalletApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui.button(RichText::new("OK").strong()).clicked() {
-                        let within = state.marked_only.then(|| marked_faces(editor));
+                        let within = state.marked_only.then(|| editor.texture_targets());
                         let options = ReplaceOptions {
                             action: state.action,
                             within,
@@ -220,26 +229,6 @@ impl MalletApp {
             self.face_edit.find = find.to_owned();
         }
     }
-}
-
-/// The faces Replace Textures works on when it is limited to the selection: the faces the
-/// texture tool picked, or else every face of the selected brushes.
-fn marked_faces(editor: &Editor) -> BTreeSet<u32> {
-    if !editor.face_selection.is_empty() {
-        return editor.face_selection.clone();
-    }
-    let solids: Vec<u32> = editor
-        .selection
-        .iter()
-        .flat_map(|owner| match owner {
-            Owner::Solid(id) => vec![*id],
-            Owner::Entity(id) => editor
-                .entity(*id)
-                .map(|entity| entity.solids().filter_map(mallet_vmf::Solid::id).collect())
-                .unwrap_or_default(),
-        })
-        .collect();
-    editor.brush_faces(&solids).iter().map(|face| face.side.id).collect()
 }
 
 /// A square texture preview.
@@ -486,7 +475,13 @@ fn actions_section(
                 ui.label("Justify");
                 let mut justify = None;
                 ui.horizontal(|ui| {
-                    if small(ui, "Fit", "Fit the texture once across the face") {
+                    if small(
+                        ui,
+                        "Fit",
+                        "Fit the texture once across the face. On a hotspot texture, each face gets the \
+                         rectangle that suits it best; press again for another pick, or hold Alt for the \
+                         alternate rectangles",
+                    ) {
                         justify = Some(Justify::Fit);
                     }
                     if small(ui, "T", "Top") {
@@ -527,7 +522,8 @@ fn actions_section(
                     }
                 });
                 if let Some(how) = justify {
-                    if let Err(error) = editor.justify_faces(&selected, how, state.treat_as_one) {
+                    let alternates = ui.input(|input| input.modifiers.alt);
+                    if let Err(error) = editor.justify_faces(&selected, how, state.treat_as_one, alternates) {
                         editor.message = error;
                     }
                 }

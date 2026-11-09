@@ -201,7 +201,7 @@ left. See the [README](../README.md) for how each one works.
 - Selection, Block, Entity and Texture Application tools; scale, rotate and skew handles; the Hammer++ 3D gizmo and pivot.
 - Transform dialog, Snap Selected to Grid (and individually), Flip Objects, Align Objects, texture lock and texture scale lock, arrow-key nudging.
 - Object Properties from the FGD: keyvalues with typed editors, Raw keys (SmartEdit off), outputs, inputs and flags, for several entities at once.
-- Face Edit sheet with Hammer++'s UV vector editing, Apply Nodraw, random shift, justify, smoothing groups and Replace Textures.
+- Face Edit sheet with Hammer++'s UV vector editing and hotspot texturing, Apply Nodraw, random shift, justify, smoothing groups and Replace Textures.
 - Texture browser over every mounted game and addon, with Hammer's filters, keywords, Mark and Replace.
 - Prop models in 3D and 2D, placed by `origin`, `angles` and `modelscale`.
 - Hammer++'s 3D Lighting Preview, with per-luxel lighting, shadows, the 2D and 3D skybox, fog, glows and light helpers.

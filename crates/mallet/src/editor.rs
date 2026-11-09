@@ -766,9 +766,13 @@ impl Editor {
         Ok(list)
     }
 
-    /// Changes the selection. Owners that are not in the map are ignored.
+    /// Changes the selection. Owners that are not in the map are ignored. The texture
+    /// tool selects faces rather than brushes, so there it selects the owners' faces.
     pub fn select(&mut self, owners: impl IntoIterator<Item = Owner>, mode: SelectMode) {
         let owners: Vec<Owner> = owners.into_iter().filter(|owner| self.scene.contains(*owner)).collect();
+        if self.tool == Tool::Texture {
+            return self.select_owner_faces(&owners, mode);
+        }
         let before = self.selection.clone();
         match mode {
             SelectMode::Replace => self.selection = owners.into_iter().collect(),
