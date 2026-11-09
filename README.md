@@ -209,6 +209,14 @@ the dice buttons shift each face randomly, for stairs. Justify (Fit, L, R, T, B,
 Fit width and Fit height, which keep the texture's proportions, with Treat as one), World and Face alignment, Apply Nodraw, smoothing groups, Hide mask and
 Replace Textures work as in Hammer.
 
+Hotspot textures work as in Hammer++. A hotspot texture is a trim sheet whose VMT names a
+`.rect` file of rectangles with `%rectanglemap`; the sheet says so under the current texture.
+Apply it, select the faces and press Fit: each face gets the rectangle that suits its size
+best, turned a quarter turn where the rectangle allows it (`rotate`), and flipped at random
+where it allows that (`reflect`). Among equally good rectangles one is picked at random, so
+pressing Fit again gives another look. Hold Alt while pressing Fit to use only the rectangles
+marked `alt`.
+
 The texture browser lists every material the game mounts, including the games in Garry's
 Mod's `cfg/mount.cfg` and every addon. The sidebar narrows it to particular games, addons
 or folders, each with a count; the bar below has Hammer's filter, keywords, "only used
