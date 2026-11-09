@@ -1,5 +1,7 @@
 //! Texture alignment on brush faces, as Hammer's Face Edit sheet does it: world and face
-//! alignment, rotation about the face, and justifying or fitting a texture to a face.
+//! alignment, rotation about the face, justifying or fitting a texture to a face, and
+//! Hammer++'s hotspot texturing, which fits each face into the best matching rectangle of
+//! a trim sheet.
 //!
 //! Source maps texture coordinates as `u = point · uaxis / scale + offset` (in texels), and
 //! the same for `v`. Rotations turn both axes about the face normal; justify and fit
@@ -23,6 +25,83 @@ pub enum Justify {
     FitWidth,
     /// Fit the texture once down the face's height, keeping its proportions.
     FitHeight,
+}
+
+/// World units per texel that hotspot rectangles are matched at, Hammer's default scale.
+pub const HOTSPOT_SCALE: f64 = 0.25;
+
+/// How much two rectangles' fit to a face may differ, as the sum of the logarithms of
+/// their width and height ratios, and still count as equally good, so one is picked at
+/// random.
+const HOTSPOT_TIE: f64 = 0.05;
+
+/// One rectangle of a hotspot texture, in texels from the texture's top left corner, as
+/// a `.rect` file lists them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hotspot {
+    pub min: [f64; 2],
+    pub max: [f64; 2],
+    /// The rectangle may be turned a quarter turn to suit a face.
+    pub rotate: bool,
+    /// The rectangle may be flipped horizontally at random.
+    pub reflect: bool,
+    /// An alternate, used only when alternates are asked for.
+    pub alt: bool,
+}
+
+impl Hotspot {
+    /// The rectangle's width and height in texels.
+    pub fn size(&self) -> [f64; 2] {
+        [(self.max[0] - self.min[0]).abs(), (self.max[1] - self.min[1]).abs()]
+    }
+
+    /// Reads the rectangles of a `.rect` file:
+    ///
+    /// ```text
+    /// Rectangles
+    /// {
+    ///     rectangle { min "0 0" max "512 32" }
+    ///     rectangle { min "512 0" max "768 32" reflect 1 }
+    /// }
+    /// ```
+    ///
+    /// Rectangles with no area or unreadable corners are skipped.
+    pub fn parse_rect_file(text: &str) -> Result<Vec<Hotspot>, String> {
+        let items = mallet_kv::parse(text).map_err(|error| error.to_string())?;
+        let rectangles = items
+            .iter()
+            .filter_map(|item| match item {
+                mallet_kv::Item::Block(block) => Some(block),
+                mallet_kv::Item::Pair(_) => None,
+            })
+            .flat_map(|root| root.blocks_named("rectangle"));
+        let corner = |value: Option<&str>| -> Option<[f64; 2]> {
+            let mut numbers = value?.split_whitespace().map(|number| number.parse::<f64>().ok());
+            Some([numbers.next()??, numbers.next()??])
+        };
+        let flag = |block: &mallet_kv::Block, key: &str| {
+            block
+                .get(key)
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .is_some_and(|value| value != 0.0)
+        };
+        Ok(rectangles
+            .filter_map(|block| {
+                let (Some(a), Some(b)) = (corner(block.get("min")), corner(block.get("max"))) else {
+                    return None;
+                };
+                let hotspot = Hotspot {
+                    min: [a[0].min(b[0]), a[1].min(b[1])],
+                    max: [a[0].max(b[0]), a[1].max(b[1])],
+                    rotate: flag(block, "rotate"),
+                    reflect: flag(block, "reflect"),
+                    alt: flag(block, "alt"),
+                };
+                let [width, height] = hotspot.size();
+                (width > 0.0 && height > 0.0).then_some(hotspot)
+            })
+            .collect())
+    }
 }
 
 /// The axes Hammer and the compilers pick for a face aligned to the world: the major axis
@@ -172,6 +251,67 @@ impl Side {
         u.offset = wrap(u.offset, width);
         v.offset = wrap(v.offset, height);
     }
+
+    /// Hammer++'s hotspot fit: picks the rectangle whose size at [`HOTSPOT_SCALE`] best
+    /// matches the face `points`, turned a quarter turn if the rectangle allows it, and
+    /// stretches the texture so the face covers exactly that rectangle. Equally good
+    /// rectangles are chosen between with `random`, which also decides whether a
+    /// reflectable rectangle is flipped. Rectangles marked `alt` are used only with
+    /// `alternates`, and then they are the only ones used, unless the texture has none.
+    /// Returns whether a rectangle was applied; faces with no area are left alone.
+    pub fn hotspot(&mut self, points: &[DVec3], hotspots: &[Hotspot], alternates: bool, random: u64) -> bool {
+        let normal = side_normal(self);
+        let (mut u, mut v) = (self.uaxis.axis.normalize_or_zero(), self.vaxis.axis.normalize_or_zero());
+        if u == DVec3::ZERO || v == DVec3::ZERO || u.cross(v).length() < 1e-6 {
+            (u, v) = face_axes(normal);
+        }
+        let size = |axis: DVec3| {
+            let (min, max) = extent(axis, points);
+            max - min
+        };
+        if points.is_empty() {
+            return false;
+        }
+        let (width, height) = (size(u), size(v));
+        if width < 1e-3 || height < 1e-3 {
+            return false;
+        }
+        let wanted_alt = alternates && hotspots.iter().any(|hotspot| hotspot.alt);
+        let mut candidates: Vec<(f64, Hotspot, bool)> = Vec::new();
+        for hotspot in hotspots.iter().filter(|hotspot| hotspot.alt == wanted_alt) {
+            let [rect_width, rect_height] = hotspot.size().map(|texels| texels * HOTSPOT_SCALE);
+            let error = |across: f64, down: f64| (across / rect_width).ln().abs() + (down / rect_height).ln().abs();
+            candidates.push((error(width, height), *hotspot, false));
+            if hotspot.rotate {
+                candidates.push((error(height, width), *hotspot, true));
+            }
+        }
+        let Some(best) = candidates.iter().map(|(error, ..)| *error).min_by(f64::total_cmp) else {
+            return false;
+        };
+        let ties: Vec<&(f64, Hotspot, bool)> = candidates
+            .iter()
+            .filter(|(error, ..)| *error <= best + HOTSPOT_TIE)
+            .collect();
+        let (_, hotspot, turned) = *ties[(random % ties.len() as u64) as usize];
+        if turned {
+            (u, v) = (v, -u);
+            self.rotation = Some((self.rotation.unwrap_or(0.0) + 90.0).rem_euclid(360.0));
+        }
+        if hotspot.reflect && (random >> 32) & 1 == 1 {
+            u = -u;
+        }
+        let [rect_width, rect_height] = hotspot.size();
+        let (u_min, u_max) = extent(u, points);
+        let (v_min, v_max) = extent(v, points);
+        self.uaxis.axis = u;
+        self.vaxis.axis = v;
+        self.uaxis.scale = ((u_max - u_min) / rect_width).max(1e-4);
+        self.vaxis.scale = ((v_max - v_min) / rect_height).max(1e-4);
+        self.uaxis.offset = hotspot.min[0] - u_min / self.uaxis.scale;
+        self.vaxis.offset = hotspot.min[1] - v_min / self.vaxis.scale;
+        true
+    }
 }
 
 #[cfg(test)]
@@ -279,5 +419,113 @@ side { "id" "6" "plane" "(128 0 0) (0 0 0) (0 0 32)" "material" "A" "uaxis" "[1 
         side.justify(Justify::Center, &points, [128.0, 128.0]);
         let middle = texel(&side, DVec3::new(64.0, 32.0, 32.0));
         assert!((middle[0].rem_euclid(128.0) - 64.0).abs() < 1e-6, "{middle:?}");
+    }
+
+    #[test]
+    fn reads_rect_files() {
+        let text = "Rectangles\n{\n\trectangle\n\t{\n\t\tmin\t\t\"0 0\"\n\t\tmax\t\t\"512 32\"\n\t}\n\
+                    \trectangle\n\t{\n\t\tmin \"768 32\"\n\t\tmax \"512 0\"\n\t\treflect 1\n\t\trotate 1\n\t}\n\
+                    \trectangle { min \"0 0\" max \"0 10\" }\n}\n";
+        let hotspots = Hotspot::parse_rect_file(text).unwrap();
+        assert_eq!(hotspots.len(), 2, "the empty rectangle is skipped");
+        assert_eq!(hotspots[0].size(), [512.0, 32.0]);
+        assert_eq!(hotspots[1].min, [512.0, 0.0]);
+        assert!(hotspots[1].reflect && hotspots[1].rotate && !hotspots[1].alt);
+    }
+
+    #[test]
+    fn hotspot_fits_the_face_into_the_closest_rectangle() {
+        let rect = |min: [f64; 2], max: [f64; 2], rotate: bool| Hotspot {
+            min,
+            max,
+            rotate,
+            reflect: false,
+            alt: false,
+        };
+        let texel = |side: &Side, point: DVec3| {
+            [
+                point.dot(side.uaxis.axis) / side.uaxis.scale + side.uaxis.offset,
+                point.dot(side.vaxis.axis) / side.vaxis.scale + side.vaxis.offset,
+            ]
+        };
+        let points = [
+            DVec3::new(0.0, 0.0, 32.0),
+            DVec3::new(128.0, 0.0, 32.0),
+            DVec3::new(128.0, 64.0, 32.0),
+            DVec3::new(0.0, 64.0, 32.0),
+        ];
+        let hotspots = [
+            rect([0.0, 0.0], [256.0, 256.0], false),
+            rect([256.0, 0.0], [768.0, 256.0], false),
+            rect([0.0, 256.0], [64.0, 512.0], false),
+        ];
+        let mut side = side_facing(DVec3::Z);
+        assert!(side.hotspot(&points, &hotspots, false, 7));
+        let corners = [DVec3::new(0.0, 64.0, 32.0), DVec3::new(128.0, 0.0, 32.0)].map(|point| texel(&side, point));
+        assert!(
+            (corners[0][0] - 256.0).abs() < 1e-6 && corners[0][1].abs() < 1e-6,
+            "the top left corner lands on the wide rectangle's corner: {corners:?}"
+        );
+        assert!(
+            (corners[1][0] - 768.0).abs() < 1e-6 && (corners[1][1] - 256.0).abs() < 1e-6,
+            "the bottom right corner lands on the opposite corner: {corners:?}"
+        );
+
+        let tall = [rect([0.0, 0.0], [256.0, 512.0], true)];
+        let mut side = side_facing(DVec3::Z);
+        assert!(side.hotspot(&points, &tall, false, 0));
+        assert_eq!(
+            side.rotation,
+            Some(90.0),
+            "the tall rectangle is turned to suit the wide face"
+        );
+        let spans = [side.uaxis, side.vaxis].map(|axis| {
+            let (min, max) = extent(axis.axis, &points);
+            (max - min) / axis.scale
+        });
+        assert!(
+            (spans[0] - 256.0).abs() < 1e-6 && (spans[1] - 512.0).abs() < 1e-6,
+            "{spans:?}"
+        );
+    }
+
+    #[test]
+    fn hotspot_alternates_and_flat_faces() {
+        let base = Hotspot {
+            min: [0.0, 0.0],
+            max: [512.0, 256.0],
+            rotate: false,
+            reflect: false,
+            alt: false,
+        };
+        let alternate = Hotspot {
+            min: [0.0, 256.0],
+            max: [64.0, 320.0],
+            alt: true,
+            ..base
+        };
+        let points = [
+            DVec3::new(0.0, 0.0, 32.0),
+            DVec3::new(128.0, 0.0, 32.0),
+            DVec3::new(128.0, 64.0, 32.0),
+            DVec3::new(0.0, 64.0, 32.0),
+        ];
+        let top = DVec3::new(0.0, 64.0, 32.0);
+        let corner = |side: &Side| top.dot(side.vaxis.axis) / side.vaxis.scale + side.vaxis.offset;
+        let mut side = side_facing(DVec3::Z);
+        assert!(side.hotspot(&points, &[base, alternate], true, 3));
+        assert!((corner(&side) - 256.0).abs() < 1e-6, "only the alternate is used");
+        let small = DVec3::new(16.0, 16.0, 0.0);
+        let square = [points[0], points[0] + small * DVec3::X, points[0] + small, points[0] + small * DVec3::Y];
+        let mut side = side_facing(DVec3::Z);
+        assert!(side.hotspot(&square, &[base, alternate], false, 3));
+        let top = square[3];
+        let texel = top.dot(side.vaxis.axis) / side.vaxis.scale + side.vaxis.offset;
+        assert!(texel.abs() < 1e-6, "without alternates the alternate is skipped, though it fits better");
+        let line = [DVec3::ZERO, DVec3::X * 64.0];
+        assert!(
+            !side.hotspot(&line, &[base], false, 0),
+            "a face with no area is left alone"
+        );
     }
 }
