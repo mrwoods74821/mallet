@@ -13,8 +13,7 @@ its milestone is done. Last compared against both sources on 2026-11-09.
 
 ## Milestone 1: everyday brush editing
 
-The tools a mapper reaches for every few minutes. The tool palette already shows the
-vertex tool greyed out.
+The tools a mapper reaches for every few minutes.
 
 ### Clipboard
 
@@ -33,11 +32,11 @@ vertex tool greyed out.
 
 ### Vertex tool (Shift+V)
 
-- [ ] Drag vertices and edge midpoints in the 2D and 3D views, with grid snapping. Hammer
-- [ ] Splitting a face by selecting two vertices (Ctrl+F). Hammer
-- [ ] Merging vertices that are dragged onto each other, with a prompt. Hammer
-- [ ] Live update of the brush and undo inside the tool. H++
-- [ ] Red highlight on faces of invalid shapes. H++
+- [x] Drag vertices and edge midpoints in the 2D and 3D views, with grid snapping. Hammer
+- [x] Splitting a face by selecting two vertices (Ctrl+F). Hammer
+- [x] Merging vertices that are dragged onto each other, with a prompt. Hammer
+- [x] Live update of the brush and undo inside the tool. H++
+- [x] Red highlight on faces of invalid shapes. H++
 
 ### Brush operations
 

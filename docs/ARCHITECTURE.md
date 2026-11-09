@@ -227,6 +227,25 @@ the 2D views or from faces in the 3D view. Shift+X cycles the halves kept and En
 The preview (kept pieces and the plane's outline) is recomputed only when the points, the
 selection or the map change, and travels in `Overlay::clip`, so every view draws it.
 
+## Vertex editing
+
+`mallet_vmf::vertex::BrushMesh` holds a brush as welded corners and faces that list them,
+each face remembering the side its material comes from. `build` turns a mesh back into a
+brush: corners on top of each other merge, faces bent out of their plane become a fan of
+triangles (the first fan that stays convex), faces left in one plane become one side again,
+and each side's plane is written through three of its real corners so grid-aligned brushes
+stay exact. The result is refused unless every corner is behind every face and VBSP-style
+clipping of the new planes gives back the same corners. Hammer++'s `vertices_plus` is
+dropped from changed sides.
+
+`crates/mallet/src/vertex_tool.rs` keeps a mesh per selected brush, read again whenever the
+brush changes outside the tool, so split faces live only in the tool until a corner on the
+split moves. Selected corners and edges are remembered by position, which survives
+rebuilds. A drag rebuilds from the meshes it started with on every grid step and applies
+`Edit::ReplaceSolids` through `History::apply_grouped`, so the brush updates live and the
+whole drag undoes at once; a refused shape is drawn red and leaves the last good one in
+place. `app/vertex_tool.rs` does the picking, the 3D drag planes and the merge question.
+
 ## Compiling
 
 `compile` turns a `Preset` (a list of `Step`s with options from a per-tool catalog,

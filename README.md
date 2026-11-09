@@ -14,8 +14,7 @@ a CompilePal-style compile window with presets, SourceCubemap and leak lines,
 Hammer's texture tool with a texture browser that loads every mounted game's materials, and
 a Hammer++-style 3D Lighting Preview that lights the map with every Source light entity. A
 built-in MCP server lets AI agents inspect and edit maps, compile them and take
-screenshots. It is a work in progress: clipping, vertex editing and displacements are
-next.
+screenshots. It is a work in progress: displacements are next.
 
 ## Running
 
@@ -90,6 +89,8 @@ These follow Hammer++'s default keybindings.
 | Entity tool: click in 3D | Create an entity of the class chosen under New entity on the brush face under the cursor |
 | Entity tool: click in 2D views, then Enter | Place the new entity's marker (each view sets its two axes, snapped to the grid), then create it |
 | Drag with the Block tool, then Enter | Create a box brush; drag inside it to move it, drag handles in any view to resize it (its depth starts from the last block) |
+| Shift+V | Vertex tool for the selected brushes: drag a white corner or yellow edge midpoint in any view to move it on the grid (in 3D across the floor, or up and down when Shift is held as the drag starts). Click or drag a rectangle to select corners, Ctrl to add; every selected corner moves together. The brush changes as you drag and each drag is one undo step |
+| Ctrl+F | With the Vertex tool, split a face between two selected corners; the halves bend apart once a corner on the split moves |
 | Delete / Shift+Q or Escape / Ctrl+Shift+A | Delete selection / deselect or cancel the block / select all |
 | Numpad `-` / Numpad `+` | Smaller / larger grid |
 | Ctrl+E / Ctrl+R | Centre 2D views / 3D view on the map |
