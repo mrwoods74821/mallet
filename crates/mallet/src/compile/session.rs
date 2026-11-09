@@ -297,6 +297,7 @@ impl Editor {
             sprite: None,
             origin: None,
             first_face: None,
+            decal: false,
         });
         self.scene.geometry_generation = next_generation();
     }

@@ -63,6 +63,9 @@ struct FaceVertex {
 
 /// The face number of a face the lighting preview keeps nothing for.
 const NO_FACE: u32 = u32::MAX;
+/// How far the pieces of overlays and decals are lifted off the faces they lie on, in
+/// world units. The blended pipelines' depth bias does the rest at a distance.
+const DECAL_LIFT: f64 = 0.0625;
 
 /// Where each [`FaceVertex`] field goes in the shaders, in field order.
 const FACE_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![0 => Float32x3, 5 => Float32x3, 1 => Float32x2, 2 => Float32x4, 3 => Float32, 4 => Float32x2, 6 => Uint32];
@@ -1606,7 +1609,7 @@ impl Renderer3D {
                     .as_deref()
                     .map_or_else(|| WHITE_KEY.to_owned(), material_key);
                 let texture = self.texture_for(&key);
-                if matches!(texture.alpha, AlphaMode::Blend(_)) {
+                if face.decal || matches!(texture.alpha, AlphaMode::Blend(_)) {
                     let mut vertices = Vec::new();
                     triangulate(face, (id, texture), tint, highlight, remap, &mut vertices);
                     let center = face.vertices.iter().sum::<DVec3>() / face.vertices.len().max(1) as f64;
@@ -2006,7 +2009,8 @@ fn mip_chain(image: &Image) -> Vec<Image> {
 /// Source:
 /// `u = (point · axis / scale + offset) / texture width`, and likewise for `v`. The normal
 /// turns with a remap, so a rotated preview is lit the way it faces. Every vertex carries
-/// the face's number `id`.
+/// the face's number `id`. The pieces of overlays and decals have axes that already run
+/// from 0 to 1 across the picture, and are lifted a little off the face they lie on.
 fn triangulate(
     face: &SceneFace,
     (id, texture): (u32, &GpuTexture),
@@ -2024,10 +2028,15 @@ fn triangulate(
         .to_array();
     let coordinate = |point: DVec3, axis: &mallet_vmf::TexAxis, size: f32| {
         let scale = if axis.scale == 0.0 { 1.0 } else { axis.scale };
-        ((point.dot(axis.axis) / scale + axis.offset) as f32) / size
+        let size = if face.decal { 1.0 } else { size };
+        ((point.dot(axis.axis) / scale + axis.offset) / f64::from(size)) as f32
     };
+    let lift = if face.decal { face.normal * DECAL_LIFT } else { DVec3::ZERO };
     let vertex = |point: DVec3| FaceVertex {
-        position: remap.map_or(point, |remap| remap.apply(point)).as_vec3().to_array(),
+        position: remap
+            .map_or(point + lift, |remap| remap.apply(point + lift))
+            .as_vec3()
+            .to_array(),
         normal,
         uv: [
             coordinate(point, &face.uaxis, texture.width),
@@ -2040,7 +2049,7 @@ fn triangulate(
             AlphaMode::Test(reference) => [reference, 0.0],
             AlphaMode::Blend(opacity) => [0.0, opacity.max(f32::EPSILON)],
         },
-        face: id,
+        face: if face.decal { NO_FACE } else { id },
     };
     let points = &face.vertices;
     if points.len() < 3 {
@@ -2110,6 +2119,14 @@ fn material_key(material: &str) -> String {
     material.replace('\\', "/").to_ascii_lowercase()
 }
 
+/// Pulls blended faces a few depth steps towards the camera, so overlays and decals
+/// never flicker against the brush face they lie on, however far away it is.
+const TRANSLUCENT_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: -8,
+    slope_scale: -1.0,
+    clamp: 0.0,
+};
+
 #[allow(clippy::too_many_arguments)]
 fn pipeline(
     device: &wgpu::Device,
@@ -2132,7 +2149,11 @@ fn pipeline(
                 _ => wgpu::CompareFunction::Always,
             },
             stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
+            bias: if depth == Depth::Translucent {
+                TRANSLUCENT_BIAS
+            } else {
+                wgpu::DepthBiasState::default()
+            },
         }),
     };
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

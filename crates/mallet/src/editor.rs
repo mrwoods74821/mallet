@@ -13,6 +13,7 @@ use glam::{DVec2, DVec3};
 use mallet_vmf::build::box_solid;
 use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
+use mallet_vmf::overlay::DECAL_CLASS;
 use mallet_vmf::sides::{CopiedSides, OtherFaces};
 use mallet_vmf::{format_vec3, Entity, IdAllocator, SavedCamera, Solid, Vmf};
 
@@ -27,7 +28,7 @@ use crate::document::Document;
 use crate::input::InputFrame;
 use crate::lighting::{load_texture_lights, TextureLights};
 use crate::render3d::{CameraStyle, LightingInput, Renderer3D};
-use crate::scene::{entity_model, model_key, ModelCache, Overlay, Owner, Scene};
+use crate::scene::{decal_key, entity_model, model_key, DecalSizes, ModelCache, Overlay, Owner, Scene};
 use crate::view2d::{Axis2D, View2D};
 use crate::view3d::Camera3D;
 
@@ -300,6 +301,9 @@ pub struct Editor {
     pub materials: Option<Materials>,
     /// Prop models loaded so far, shared by every tab.
     pub models: ModelCache,
+    /// The size of the picture each decal texture seen so far projects, shared by every
+    /// tab.
+    pub decal_sizes: DecalSizes,
     /// Entity classes from the game's FGD files, when they could be read.
     pub game_data: Option<Arc<GameData>>,
     /// A screenshot of the whole window asked for by the MCP `screenshot` tool.
@@ -408,6 +412,7 @@ impl Default for Editor {
             gpu_info: String::new(),
             materials: None,
             models: ModelCache::new(),
+            decal_sizes: DecalSizes::new(),
             model_errors: HashMap::new(),
             game_data: None,
             properties_open: false,
@@ -649,7 +654,13 @@ impl Editor {
 
     fn set_document(&mut self, document: Document) {
         self.ensure_models(&document.vmf);
-        self.scene = Scene::build(&document.vmf, &self.models, self.game_data.as_deref());
+        self.ensure_decal_sizes(&document.vmf);
+        self.scene = Scene::build(
+            &document.vmf,
+            &self.models,
+            self.game_data.as_deref(),
+            &self.decal_sizes,
+        );
         self.document = Some(document);
         self.selection.clear();
         self.overlay = Overlay::default();
@@ -763,7 +774,13 @@ impl Editor {
     pub fn rebuild_scene(&mut self) {
         if let Some(document) = self.document.take() {
             self.ensure_models(&document.vmf);
-            self.scene = Scene::build(&document.vmf, &self.models, self.game_data.as_deref());
+            self.ensure_decal_sizes(&document.vmf);
+            self.scene = Scene::build(
+            &document.vmf,
+            &self.models,
+            self.game_data.as_deref(),
+            &self.decal_sizes,
+        );
             self.document = Some(document);
             self.add_pointfile_to_scene();
         } else {
@@ -1187,6 +1204,7 @@ impl Editor {
         let mounts = filesystem.mounts().len();
         self.materials = Some(Materials::new(filesystem));
         self.models.clear();
+        self.decal_sizes.clear();
         self.model_errors.clear();
         if let Some(gpu) = &mut self.gpu {
             gpu.clear_textures();
@@ -1296,6 +1314,34 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// Looks up the size of every decal texture in the map that has not been seen yet,
+    /// so the scene can draw each `infodecal` as large as the game does: the texture's
+    /// size times the material's `$decalscale`.
+    fn ensure_decal_sizes(&mut self, vmf: &Vmf) {
+        let Some(materials) = &mut self.materials else {
+            return;
+        };
+        let mut missing: Vec<String> = vmf
+            .entities()
+            .filter(|entity| entity.classname().eq_ignore_ascii_case(DECAL_CLASS))
+            .filter_map(|entity| entity.get("texture"))
+            .map(decal_key)
+            .filter(|key| !key.is_empty() && !self.decal_sizes.contains_key(key))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        if missing.is_empty() {
+            return;
+        }
+        let names: Vec<&str> = missing.iter().map(String::as_str).collect();
+        let sizes: Vec<Option<DVec2>> = materials
+            .materials(&names)
+            .iter()
+            .map(|material| picture_size(material, f64::from(material.decal_scale)))
+            .collect();
+        self.decal_sizes.extend(missing.into_iter().zip(sizes));
     }
 
     /// The mounted game folder, if any.
@@ -1473,6 +1519,13 @@ fn origin_edits(origins: EntityOrigins, map: impl Fn(DVec3) -> DVec3) -> impl It
         key: "origin".to_owned(),
         value: format_vec3(map(origin)),
     })
+}
+
+/// The size of a material's picture at `scale` world units per texel, or `None` when it
+/// has no texture.
+pub(crate) fn picture_size(material: &mallet_content::Material, scale: f64) -> Option<DVec2> {
+    let texture = material.texture.as_ref()?;
+    Some(DVec2::new(f64::from(texture.width), f64::from(texture.height)) * scale)
 }
 
 /// Key edits that carry one entity's overlay through a transform. Entities that are not

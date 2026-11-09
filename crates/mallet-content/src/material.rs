@@ -78,6 +78,8 @@ pub struct Material {
     pub self_illum: Option<[f32; 3]>,
     /// Drawn without lighting, as `UnlitGeneric` and sky materials are.
     pub unlit: bool,
+    /// World units per texel of an `infodecal` that uses the material (`$decalscale`).
+    pub decal_scale: f32,
 }
 
 impl Material {
@@ -88,6 +90,7 @@ impl Material {
             surface: Surface::Normal,
             self_illum: None,
             unlit: false,
+            decal_scale: 1.0,
         }
     }
 }
@@ -116,6 +119,7 @@ struct Properties {
     alpha_test: Option<bool>,
     alpha_test_reference: Option<f32>,
     alpha: Option<f32>,
+    decal_scale: Option<f32>,
     self_illum: Option<bool>,
     self_illum_tint: Option<[f32; 3]>,
     envmap: Option<bool>,
@@ -155,6 +159,7 @@ impl Properties {
             alpha_test: flag("$alphatest"),
             alpha_test_reference: number("$alphatestreference"),
             alpha: number("$alpha"),
+            decal_scale: number("$decalscale").filter(|scale| *scale > 0.0),
             self_illum: flag("$selfillum"),
             self_illum_tint: block.get("$selfillumtint").and_then(material_color),
             envmap: block.get("$envmap").map(|value| !value.trim().is_empty()),
@@ -195,6 +200,7 @@ impl Properties {
             alpha_test: other.alpha_test.or(self.alpha_test),
             alpha_test_reference: other.alpha_test_reference.or(self.alpha_test_reference),
             alpha: other.alpha.or(self.alpha),
+            decal_scale: other.decal_scale.or(self.decal_scale),
             self_illum: other.self_illum.or(self.self_illum),
             self_illum_tint: other.self_illum_tint.or(self.self_illum_tint),
             envmap: other.envmap.or(self.envmap),
@@ -205,15 +211,44 @@ impl Properties {
         }
     }
 
+    /// Whether the material darkens and lightens what is under it instead of covering
+    /// it, as the `DecalModulate` shader of stains, cracks and scorch marks does.
+    fn modulates(&self) -> bool {
+        self.shader.as_deref() == Some("decalmodulate")
+    }
+
     fn alpha_mode(&self) -> AlphaMode {
         let opacity = self.alpha.unwrap_or(1.0).clamp(0.0, 1.0);
-        if self.translucent == Some(true) || opacity < 1.0 {
+        if self.translucent == Some(true) || opacity < 1.0 || self.modulates() {
             AlphaMode::Blend(opacity)
         } else if self.alpha_test == Some(true) {
             AlphaMode::Test(self.alpha_test_reference.unwrap_or(DEFAULT_ALPHA_TEST_REFERENCE))
         } else {
             AlphaMode::Opaque
         }
+    }
+}
+
+/// Rewrites the pixels of a modulating decal so that blending them by alpha looks like
+/// the game multiplying the surface by twice their colour: mid grey becomes clear, darker
+/// pixels become a dark tint as opaque as they are dark, and lighter pixels a white
+/// haze. A blend cannot multiply, so the tint is the one that is right over a mid grey
+/// surface.
+fn modulate_to_blend(rgba: &mut [u8]) {
+    for pixel in rgba.chunks_exact_mut(4) {
+        let color = [pixel[0], pixel[1], pixel[2]].map(|channel| f32::from(channel) / 255.0);
+        let darkest = color.into_iter().fold(1.0, f32::min);
+        let lightest = color.into_iter().fold(0.0, f32::max);
+        let (tint, alpha) = if darkest < 0.5 {
+            let alpha = 1.0 - 2.0 * darkest;
+            (color.map(|channel| ((channel - darkest) / alpha).clamp(0.0, 1.0)), alpha)
+        } else {
+            ([1.0; 3], (2.0 * lightest - 1.0).clamp(0.0, 1.0))
+        };
+        for (channel, value) in pixel.iter_mut().zip(tint) {
+            *channel = (value * 255.0).round() as u8;
+        }
+        pixel[3] = (alpha * 255.0).round() as u8;
     }
 }
 
@@ -289,7 +324,12 @@ impl MaterialLoader {
             .as_ref()
             .and_then(|name| self.filesystem.read(&format!("materials/{name}.vtf")))
             .and_then(|data| vtf::decode(&data, MAX_TEXTURE_SIDE).ok())
-            .map(Arc::new);
+            .map(|mut image| {
+                if properties.modulates() {
+                    modulate_to_blend(&mut image.rgba);
+                }
+                Arc::new(image)
+            });
         let unlit = properties
             .shader
             .as_deref()
@@ -303,6 +343,7 @@ impl MaterialLoader {
                 .unwrap_or(false)
                 .then(|| properties.self_illum_tint.unwrap_or([1.0; 3])),
             unlit,
+            decal_scale: properties.decal_scale.unwrap_or(1.0),
         }
     }
 

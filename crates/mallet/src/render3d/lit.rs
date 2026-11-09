@@ -730,7 +730,7 @@ impl LuxelFace {
                 continue;
             };
             for (index, face) in mesh.faces.iter().enumerate() {
-                let Some(material) = &face.material else {
+                let Some(material) = face.material.as_ref().filter(|_| !face.decal) else {
                     continue;
                 };
                 let texture = renderer.texture_for(&material_key(material));
@@ -2958,7 +2958,7 @@ fn surface_lights(scene: &Scene, renderer: &Renderer3D, table: &TextureLights) -
     }
     let mut lights = Vec::new();
     for face in scene.meshes.iter().flat_map(|mesh| &mesh.faces) {
-        let Some(material) = &face.material else {
+        let Some(material) = face.material.as_ref().filter(|_| !face.decal) else {
             continue;
         };
         let key = material_key(material);
