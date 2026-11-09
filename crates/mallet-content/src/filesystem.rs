@@ -220,11 +220,8 @@ impl GameFs {
         for mount in &self.mounts {
             match &mount.place {
                 Place::Vpk(archive) => {
-                    for path in archive
-                        .paths()
-                        .filter(|path| path.starts_with(folder) && path.ends_with(&extension))
-                    {
-                        note(path.to_owned(), mount.source);
+                    for path in archive.paths_matching(folder, &extension) {
+                        note(path, mount.source);
                     }
                 }
                 Place::Folder(mounted) => {

@@ -158,7 +158,10 @@ A game with its addons and mounted games is a hundred or more mounts listing hun
 thousands of files, and a map looks thousands of files up, so lookups are kept cheap. A
 mounted folder remembers which of its directories exist and is skipped without touching
 the disk when it lacks the file's directory; a directory found missing is looked for
-again after five seconds, so content added while Mallet runs shows up.
+again after five seconds, so content added while Mallet runs shows up. A VPK's tree is
+kept as folders sorted by path, each with its files sorted by name and all names in one
+string, which takes half the memory of a table of whole paths and finds a file with two
+binary searches.
 
 `Materials` turns a material name into the texture
 Hammer shows: `%tooltexture` first, then `$basetexture`, following `patch` materials. A
