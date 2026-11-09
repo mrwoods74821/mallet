@@ -273,6 +273,16 @@ the game still draws it. Every path that moves entities calls it: `Entity::trans
 clones, the clipboard's paste, and `Editor::selected_overlay_edits` for moves and
 `Edit::Transform`, as `Edit::SetKey` edits beside the one that moves `origin`.
 
+Texture lock takes overlays along with the brushes under them. `Editor::riding_overlay_edits`
+gets the brushes each transform moves, its matrix and its `TextureLock`, and finds the
+unselected overlays whose listed faces all belong to brushes moved by the same
+transform; an overlay with a face on a brush left behind stays. `overlay::follow_keys`
+then follows the lock: `Off` changes nothing, `Full` is `Overlay::transformed`, and
+`Align` is `Overlay::carried`, which moves the origin with the matrix and turns the
+overlay onto the transformed plane but keeps its corners, so it does not stretch.
+Moves, `Edit::Transform` and the per-object moves of snapping and aligning all add
+these edits to their batch, so they undo with the move.
+
 `mallet_vmf::sides` keeps face lists right across copies. `CopiedSides` records each
 copied face's new id as brushes are renumbered, and `remap_entity` rewrites `sides` (and
 `sides2` of `info_overlay_transition`) through it. A paste drops listed faces that were

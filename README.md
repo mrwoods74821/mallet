@@ -130,6 +130,12 @@ all carry its picture along. An overlay only shows on the faces it lists, as in 
 after moving one onto another brush, Ctrl+click that face with the Overlay tool to add it.
 Copying an overlay together with its wall keeps it on the copied wall.
 
+Texture lock covers overlays too. While it is on, an overlay rides along with the brushes
+it lies on when you move, rotate, flip, resize or snap them, without being selected
+itself. With texture scale lock it stretches with a resized brush; without, it keeps its
+size and only moves with the spot it was on. With texture lock off it stays where it is,
+like the textures. An overlay that also lies on a brush you leave behind stays put.
+
 The Decal tool (Shift+D) places a decal on the face you click. The game decides a decal's
 size from its texture and always draws it upright, so a decal has no handles; use an
 overlay when you need a set size or angle.
