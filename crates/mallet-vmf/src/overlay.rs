@@ -17,7 +17,7 @@
 use glam::{DMat3, DMat4, DVec2, DVec3};
 
 use crate::geometry::{clip_polygon, Plane};
-use crate::transform::{clean, linear_part};
+use crate::transform::{clean, linear_part, TextureLock};
 use crate::{format_vec3, parse_vec3, Entity, TexAxis};
 
 /// The class of overlay entities.
@@ -194,18 +194,11 @@ impl Overlay {
     /// the picture to stay on the corners it was on, mirrored with everything else.
     pub fn transformed(&self, matrix: &DMat4) -> Option<(Self, bool)> {
         let linear = linear_part(matrix);
-        if linear.determinant().abs() < 1e-12 {
-            return None;
-        }
+        let (mut u, v, normal) = self.carried_axes(&linear)?;
         let mirrored = linear.determinant() < 0.0;
-        let normal = (linear.inverse().transpose() * self.normal).try_normalize()?;
-        let across = linear * self.u;
-        let mut u = (across - normal * across.dot(normal)).try_normalize()?;
         if mirrored {
             u = -u;
         }
-        let up = linear * self.v;
-        let v = (up - normal * up.dot(normal) - u * up.dot(u)).try_normalize()?;
         let origin = matrix.transform_point3(self.origin);
         let mut corners = self.world_corners().map(|corner| {
             let moved = matrix.transform_point3(corner) - origin;
@@ -222,6 +215,40 @@ impl Overlay {
             corners,
         };
         Some((moved, mirrored))
+    }
+
+    /// The overlay carried along by a transform without changing shape: it goes where
+    /// the transform takes its origin and turns to lie on the transformed plane, but a
+    /// stretch or skew leaves its width, height and corners as they are. This is how an
+    /// overlay follows a brush whose textures keep their scale. The second value is as
+    /// for [`Overlay::transformed`].
+    pub fn carried(&self, matrix: &DMat4) -> Option<(Self, bool)> {
+        let (u, v, normal) = self.carried_axes(&linear_part(matrix))?;
+        let from = DMat3::from_cols(self.u, self.v, self.normal);
+        if from.determinant().abs() < 1e-9 {
+            return None;
+        }
+        let turn = DMat3::from_cols(u, v, normal) * from.inverse();
+        let rigid = DMat4::from_translation(matrix.transform_point3(self.origin))
+            * DMat4::from_mat3(turn)
+            * DMat4::from_translation(-self.origin);
+        self.transformed(&rigid)
+    }
+
+    /// Where a transform's linear part takes the overlay's axes and normal, squared up
+    /// again: the normal stays at right angles to the transformed plane, U keeps its
+    /// direction in that plane, and V is turned to stand at right angles to both. `None`
+    /// when the transform flattens the overlay.
+    fn carried_axes(&self, linear: &DMat3) -> Option<(DVec3, DVec3, DVec3)> {
+        if linear.determinant().abs() < 1e-12 {
+            return None;
+        }
+        let normal = (linear.inverse().transpose() * self.normal).try_normalize()?;
+        let across = *linear * self.u;
+        let u = (across - normal * across.dot(normal)).try_normalize()?;
+        let up = *linear * self.v;
+        let v = (up - normal * up.dot(normal) - u * up.dot(u)).try_normalize()?;
+        Some((u, v, normal))
     }
 
     /// Adds to `out` the pieces of the overlay that land on a face with the corners
@@ -296,7 +323,30 @@ impl Overlay {
 /// the entity is not a placed overlay. A mirror also swaps `StartU` and `EndU`, as
 /// [`Overlay::transformed`] asks.
 pub fn transform_keys(entity: &Entity, matrix: &DMat4) -> Vec<(&'static str, String)> {
-    let Some((moved, mirrored)) = Overlay::of(entity).and_then(|overlay| overlay.transformed(matrix)) else {
+    moved_keys(
+        entity,
+        Overlay::of(entity).and_then(|overlay| overlay.transformed(matrix)),
+    )
+}
+
+/// The key changes that take an overlay along with the brush faces it lies on when those
+/// are transformed, the way `lock` takes their textures along: not at all without
+/// texture lock, stretching with the faces under texture scale lock, and otherwise
+/// moving and turning with them at its own size.
+pub fn follow_keys(entity: &Entity, matrix: &DMat4, lock: TextureLock) -> Vec<(&'static str, String)> {
+    let overlay = Overlay::of(entity);
+    let moved = match lock {
+        TextureLock::Off => None,
+        TextureLock::Full => overlay.and_then(|overlay| overlay.transformed(matrix)),
+        TextureLock::Align { .. } => overlay.and_then(|overlay| overlay.carried(matrix)),
+    };
+    moved_keys(entity, moved)
+}
+
+/// The keys of an overlay after a transform, with `StartU` and `EndU` swapped when it
+/// was mirrored. Nothing when there is no moved overlay.
+fn moved_keys(entity: &Entity, moved: Option<(Overlay, bool)>) -> Vec<(&'static str, String)> {
+    let Some((moved, mirrored)) = moved else {
         return Vec::new();
     };
     let mut keys = moved.keys();

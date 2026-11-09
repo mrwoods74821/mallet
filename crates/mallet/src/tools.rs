@@ -154,7 +154,8 @@ pub fn definitions() -> Value {
         tool("clear_selection", "Deselect everything.", json!({}), &[]),
         tool(
             "move_selection",
-            "Move the selection with texture lock. Entity origins move too. Undoable.",
+            "Move the selection with texture lock. Entity origins move too, and while texture lock is on, so do \
+             overlays whose faces are all on the moved brushes. Undoable.",
             json!({ "offset": vec3 }),
             &["offset"],
         ),

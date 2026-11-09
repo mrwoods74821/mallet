@@ -3,14 +3,18 @@
 //! The Overlay tool puts an `info_overlay` with the current material on the brush face
 //! under the cursor, lists the faces of that wall the picture reaches, and gives the
 //! selected overlay a handle on each corner. The Decal tool puts an `infodecal` on the
-//! face under the cursor.
+//! face under the cursor. Overlays also ride along with the brushes they lie on when
+//! those are moved with texture lock.
 
-use glam::{DVec2, DVec3};
+use std::collections::HashMap;
+
+use glam::{DMat4, DVec2, DVec3};
 use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
 use mallet_vmf::overlay::{
-    Overlay, DECAL_CLASS, OVERLAY_CLASS, OVERLAY_TEXEL_SIZE, UPRIGHT_TEXTURE, UPRIGHT_TEXTURE_KEYS,
+    follow_keys, Overlay, DECAL_CLASS, OVERLAY_CLASS, OVERLAY_TEXEL_SIZE, UPRIGHT_TEXTURE, UPRIGHT_TEXTURE_KEYS,
 };
+use mallet_vmf::transform::TextureLock;
 
 use crate::editor::{picture_size, Editor, SelectMode};
 use crate::scene::{FaceHit, Owner};
@@ -30,6 +34,67 @@ pub enum CornerDrag {
 }
 
 impl Editor {
+    /// Key edits that take overlays along with the brushes they lie on, the way texture
+    /// lock takes those brushes' textures along. Each group is the brushes one transform
+    /// moves, the transform, and how their textures follow it.
+    ///
+    /// An overlay follows when every brush face it lists is moved by the same group, so
+    /// a poster that also lies on a brush left behind stays where it is. Selected
+    /// overlays are left out, since they are transformed in their own right.
+    pub(crate) fn riding_overlay_edits(&self, groups: &[(Vec<u32>, DMat4, TextureLock)]) -> Vec<Edit> {
+        let Some(document) = &self.document else {
+            return Vec::new();
+        };
+        if groups.iter().all(|(_, _, lock)| *lock == TextureLock::Off) {
+            return Vec::new();
+        }
+        let riders: Vec<(u32, &mallet_vmf::Entity)> = document
+            .vmf
+            .entities()
+            .filter(|entity| entity.classname().eq_ignore_ascii_case(OVERLAY_CLASS) && entity.get("sides").is_some())
+            .filter_map(|entity| Some((entity.id()?, entity)))
+            .filter(|(id, _)| !self.selection.contains(&Owner::Entity(*id)))
+            .collect();
+        if riders.is_empty() {
+            return Vec::new();
+        }
+        let group_of: HashMap<u32, usize> = groups
+            .iter()
+            .enumerate()
+            .flat_map(|(index, (solids, _, _))| solids.iter().map(move |solid| (*solid, index)))
+            .collect();
+        let mut side_group: HashMap<u32, Option<usize>> = HashMap::new();
+        for solid in document.vmf.all_entities().flat_map(mallet_vmf::Entity::solids) {
+            let group = solid.id().and_then(|id| group_of.get(&id).copied());
+            side_group.extend(solid.sides().map(|side| (side.id, group)));
+        }
+        let mut edits = Vec::new();
+        for (id, entity) in riders {
+            let mut listed = entity
+                .get("sides")
+                .unwrap_or_default()
+                .split_whitespace()
+                .filter_map(|word| side_group.get(&word.parse::<u32>().ok()?).copied());
+            let Some(Some(group)) = listed.next() else {
+                continue;
+            };
+            if listed.any(|other| other != Some(group)) {
+                continue;
+            }
+            let (_, matrix, lock) = &groups[group];
+            edits.extend(
+                follow_keys(entity, matrix, *lock)
+                    .into_iter()
+                    .map(|(key, value)| Edit::SetKey {
+                        entity: id,
+                        key: key.to_owned(),
+                        value,
+                    }),
+            );
+        }
+        edits
+    }
+
     /// The size a new overlay with `material` gets: its texture at the scale new brush
     /// faces use, so the picture keeps its shape.
     pub fn overlay_size(&mut self, material: &str) -> DVec2 {

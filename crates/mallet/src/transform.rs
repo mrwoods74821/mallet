@@ -209,7 +209,7 @@ impl Editor {
     /// Applies an affine transform to the selection as one undo step. With `turn` set,
     /// entity angles turn with it, as for rotations and mirrors; scaling and skewing leave
     /// them alone, as Hammer does. `anchor` is where textures stay pinned when they keep
-    /// their scale.
+    /// their scale. Overlays lying on the transformed brushes follow as their textures do.
     pub fn transform_selection(&mut self, matrix: DMat4, turn: bool, anchor: DVec3) -> Result<(), String> {
         if !transform::is_invertible(&matrix) {
             return Err("the transform would flatten the selection".to_owned());
@@ -217,6 +217,7 @@ impl Editor {
         let (solids, entities) = self.transform_targets()?;
         let lock = self.texture_lock(turn, anchor);
         let linear = transform::linear_part(&matrix);
+        let riding = self.riding_overlay_edits(&[(solids.clone(), matrix, lock)]);
         let mut edits = vec![Edit::Transform { solids, matrix, lock }];
         for entity in entities {
             if let Some(origin) = entity.origin {
@@ -240,6 +241,7 @@ impl Editor {
             }
         }
         edits.extend(self.selected_overlay_edits(&matrix));
+        edits.extend(riding);
         self.apply_edit(&Edit::Batch(edits))?;
         if let Some(pivot) = self.overlay.pivot {
             self.overlay.pivot = Some(clean_vec3(matrix.transform_point3(pivot)));
@@ -361,23 +363,29 @@ impl Editor {
         bounds
     }
 
-    /// Moves objects by their own offsets as one undo step, with texture lock. Returns
-    /// how many moved.
+    /// Moves objects by their own offsets as one undo step, with texture lock, taking
+    /// along the overlays that lie on each moved brush. Returns how many moved.
     fn move_owners(&mut self, moves: &[(Owner, DVec3)]) -> Result<usize, String> {
         let vmf = &self.document.as_ref().ok_or("no map is open")?.vmf;
         let mut edits = Vec::new();
+        let mut groups = Vec::new();
         let mut moved = 0;
         for (owner, offset) in moves.iter().filter(|(_, offset)| *offset != DVec3::ZERO) {
             moved += 1;
+            let shift = DMat4::from_translation(*offset);
             match *owner {
-                Owner::Solid(id) => edits.push(Edit::Translate {
-                    solids: vec![id],
-                    offset: *offset,
-                }),
+                Owner::Solid(id) => {
+                    groups.push((vec![id], shift, TextureLock::Full));
+                    edits.push(Edit::Translate {
+                        solids: vec![id],
+                        offset: *offset,
+                    });
+                }
                 Owner::Entity(id) => {
                     let entity = find_entity(vmf, id)?;
                     let solids: Vec<u32> = entity.solids().filter_map(Solid::id).collect();
                     if !solids.is_empty() {
+                        groups.push((solids.clone(), shift, TextureLock::Full));
                         edits.push(Edit::Translate {
                             solids,
                             offset: *offset,
@@ -390,10 +398,11 @@ impl Editor {
                             value: format_vec3(clean_vec3(origin + *offset)),
                         });
                     }
-                    edits.extend(overlay_edits(entity, &DMat4::from_translation(*offset)));
+                    edits.extend(overlay_edits(entity, &shift));
                 }
             }
         }
+        edits.extend(self.riding_overlay_edits(&groups));
         if !edits.is_empty() {
             self.apply_edit(&Edit::Batch(edits))?;
             if let (Some(pivot), [(_, offset), ..]) = (self.overlay.pivot, moves) {

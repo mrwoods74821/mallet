@@ -15,6 +15,7 @@ use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
 use mallet_vmf::overlay::DECAL_CLASS;
 use mallet_vmf::sides::{CopiedSides, OtherFaces};
+use mallet_vmf::transform::TextureLock;
 use mallet_vmf::{format_vec3, Entity, IdAllocator, SavedCamera, Solid, Vmf};
 
 use std::sync::Arc;
@@ -895,20 +896,28 @@ impl Editor {
         Some(format!("{count} {noun} selected, {}w {}l {}h", size.x, size.y, size.z))
     }
 
-    /// Moves the selection, with texture lock. Entity origins move with it.
+    /// Moves the selection, with texture lock. Entity origins move with it, and so do
+    /// overlays lying on the moved brushes while texture lock is on.
     pub fn move_selection(&mut self, offset: DVec3) -> Result<(), String> {
         let (solids, origins) = self.selection_parts()?;
+        let riding = if self.config.transform.texture_lock {
+            let moved = (solids.clone(), glam::DMat4::from_translation(offset), TextureLock::Full);
+            self.riding_overlay_edits(&[moved])
+        } else {
+            Vec::new()
+        };
         let mut edits = vec![if self.config.transform.texture_lock {
             Edit::Translate { solids, offset }
         } else {
             Edit::Transform {
                 solids,
                 matrix: glam::DMat4::from_translation(offset),
-                lock: mallet_vmf::transform::TextureLock::Off,
+                lock: TextureLock::Off,
             }
         }];
         edits.extend(origin_edits(origins, |origin| origin + offset));
         edits.extend(self.selected_overlay_edits(&glam::DMat4::from_translation(offset)));
+        edits.extend(riding);
         self.apply_edit(&Edit::Batch(edits))?;
         if let Some(pivot) = self.overlay.pivot {
             self.overlay.pivot = Some(pivot + offset);
