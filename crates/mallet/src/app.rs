@@ -3,6 +3,7 @@
 
 mod chrome;
 mod compile_window;
+mod context_menu;
 pub(crate) use compile_window::count;
 mod options;
 mod properties;
@@ -172,6 +173,8 @@ pub struct MalletApp {
     transform: transform_window::TransformState,
     /// The 3D gizmo part being dragged, if any.
     gizmo_drag: Option<crate::gizmo::GizmoDrag>,
+    /// The viewport right-click menu's remembered choices.
+    context_menu: context_menu::ContextMenuState,
 }
 
 impl MalletApp {
@@ -204,6 +207,7 @@ impl MalletApp {
             applied_scale: None,
             transform: transform_window::TransformState::default(),
             gizmo_drag: None,
+            context_menu: context_menu::ContextMenuState::default(),
         };
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
@@ -705,6 +709,16 @@ impl MalletApp {
                 Tool::Block => {}
             }
         }
+        if editor.tool == Tool::Select && !looking {
+            let hit = match (response.secondary_clicked(), pointer.position) {
+                (true, Some(position)) => {
+                    let (origin, direction) = editor.camera.ray(rect, position);
+                    editor.scene.pick_ray(origin, direction, &editor.models)
+                }
+                _ => None,
+            };
+            self.selection_context_menu(response, hit, editor);
+        }
         if editor.tool == Tool::Texture {
             let applied = if looking {
                 ui.input(|input| input.pointer.secondary_pressed())
@@ -919,6 +933,18 @@ impl MalletApp {
             self.use_tool_2d(slot, &view, rect, response, editor, pointer);
             if let Some(icon) = self.cursor_icon(slot, &view, rect, response, editor) {
                 ui.ctx().set_cursor_icon(icon);
+            }
+            if editor.tool == Tool::Select {
+                let hit = match (response.secondary_clicked(), pointer.position) {
+                    (true, Some(position)) => {
+                        let tolerance = pick_tolerance(editor) / view.scale;
+                        editor
+                            .scene
+                            .pick_2d(view.axis, view.to_world(rect, position), tolerance)
+                    }
+                    _ => None,
+                };
+                self.selection_context_menu(response, hit, editor);
             }
         }
         let painter = ui.painter_at(rect);
