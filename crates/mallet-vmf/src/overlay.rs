@@ -7,9 +7,12 @@
 //! from the origin along U and V. The compilers push the quad along the normal onto the
 //! faces listed in `sides` and cut it to their shape.
 //!
-//! The picture's left edge is at the first two corners and its top edge at the first and
-//! the last, so with Hammer's default texture coordinates U runs to the picture's right
-//! and V down it.
+//! The four corners take the texture coordinates (`StartU`, `StartV`), (`StartU`, `EndV`),
+//! (`EndU`, `EndV`) and (`EndU`, `StartV`). The game only draws an overlay whose corners
+//! run clockwise seen from in front of its faces, against its normal. Hammer gets there
+//! with U to the picture's right, V up it (`U x V` is the normal), the first corner at
+//! the bottom left, and `StartV` 1 and `EndV` 0 so the picture is not upside down. An
+//! overlay wound the other way compiles, and the game leaves it out.
 
 use glam::{DMat3, DMat4, DVec2, DVec3};
 
@@ -42,10 +45,15 @@ pub struct Overlay {
     pub v: DVec3,
     /// The direction out of the faces the overlay lies on.
     pub normal: DVec3,
-    /// The corners along `u` and `v` from the origin: top left, bottom left, bottom right
-    /// and top right of the picture.
+    /// The corners along `u` and `v` from the origin, in the order `uv0` to `uv3`.
     pub corners: [DVec2; 4],
 }
+
+/// The texture coordinate keys of an overlay Hammer makes, which show the picture upright
+/// on the axes of [`Overlay::on_surface`].
+pub const UPRIGHT_TEXTURE_KEYS: [(&str, &str); 4] = [("StartU", "0"), ("EndU", "1"), ("StartV", "1"), ("EndV", "0")];
+/// The texture coordinates [`UPRIGHT_TEXTURE_KEYS`] give the four corners.
+pub const UPRIGHT_TEXTURE: [DVec2; 4] = [DVec2::Y, DVec2::ZERO, DVec2::X, DVec2::ONE];
 
 /// One convex piece of an overlay or decal on a brush face. A point's texture coordinate
 /// is `point · axis + offset` on each axis, from 0 to 1 across the picture whatever the
@@ -119,15 +127,16 @@ impl Overlay {
             .flatten()
     }
 
-    /// An upright overlay or decal `size` units wide and high, centred on `point` of a
-    /// surface facing `normal`.
+    /// An overlay or decal `size` units wide and high, centred on `point` of a surface
+    /// facing `normal`, laid out as Hammer does: U to the picture's right and V up it, so
+    /// it shows upright with [`UPRIGHT_TEXTURE_KEYS`] and the game draws it.
     pub fn on_surface(point: DVec3, normal: DVec3, size: DVec2) -> Self {
-        let (u, v) = surface_axes(normal);
+        let (u, down) = surface_axes(normal);
         let half = size * 0.5;
         Self {
             origin: point,
             u,
-            v,
+            v: tidy(-down),
             normal: tidy(normal.normalize_or(DVec3::Z)),
             corners: [
                 DVec2::new(-half.x, -half.y),
@@ -167,39 +176,62 @@ impl Overlay {
             .map(|corner| self.origin + self.u * corner.x + self.v * corner.y)
     }
 
+    /// Whether the game draws the overlay: its corners run clockwise seen from in front
+    /// of its faces. An overlay wound the other way is compiled into the map and then
+    /// left out.
+    pub fn shows_in_game(&self) -> bool {
+        let [a, b, c, _] = self.world_corners();
+        (b - a).cross(c - b).dot(self.normal) < 0.0
+    }
+
     /// The overlay carried through an affine transform: moved, turned, mirrored or
     /// stretched with whatever it is selected with. The axes stay at right angles, so a
     /// skew bends the corners instead. `None` when the transform flattens the overlay.
-    pub fn transformed(&self, matrix: &DMat4) -> Option<Self> {
+    ///
+    /// A mirror would turn the corners the other way round, which the game does not
+    /// draw. So after one, U is turned back and the corners are numbered in reverse; the
+    /// second value is then `true`, and the caller has to swap `StartU` and `EndU` for
+    /// the picture to stay on the corners it was on, mirrored with everything else.
+    pub fn transformed(&self, matrix: &DMat4) -> Option<(Self, bool)> {
         let linear = linear_part(matrix);
         if linear.determinant().abs() < 1e-12 {
             return None;
         }
+        let mirrored = linear.determinant() < 0.0;
         let normal = (linear.inverse().transpose() * self.normal).try_normalize()?;
         let across = linear * self.u;
-        let u = (across - normal * across.dot(normal)).try_normalize()?;
-        let down = linear * self.v;
-        let v = (down - normal * down.dot(normal) - u * down.dot(u)).try_normalize()?;
+        let mut u = (across - normal * across.dot(normal)).try_normalize()?;
+        if mirrored {
+            u = -u;
+        }
+        let up = linear * self.v;
+        let v = (up - normal * up.dot(normal) - u * up.dot(u)).try_normalize()?;
         let origin = matrix.transform_point3(self.origin);
-        let corners = self.world_corners().map(|corner| {
+        let mut corners = self.world_corners().map(|corner| {
             let moved = matrix.transform_point3(corner) - origin;
             DVec2::new(tidy_number(moved.dot(u)), tidy_number(moved.dot(v)))
         });
-        Some(Self {
+        if mirrored {
+            corners.reverse();
+        }
+        let moved = Self {
             origin: tidy(origin),
             u: tidy(u),
             v: tidy(v),
             normal: tidy(normal),
             corners,
-        })
+        };
+        Some((moved, mirrored))
     }
 
     /// Adds to `out` the pieces of the overlay that land on a face with the corners
     /// `polygon` and the outward normal `normal`. `texture` holds the texture coordinates
-    /// at the overlay's corners. A face seen edge-on from the overlay gets nothing.
+    /// at the overlay's corners. A face seen edge-on from the overlay gets nothing, and
+    /// neither does any face when the game would not draw the overlay.
     pub fn pieces_on(&self, texture: &[DVec2; 4], polygon: &[DVec3], normal: DVec3, out: &mut Vec<Piece>) {
         let frame = DMat3::from_cols(self.u, self.v, self.normal);
-        if polygon.len() < 3 || frame.determinant().abs() < 1e-9 || normal.dot(self.normal).abs() < 1e-3 {
+        let unusable = polygon.len() < 3 || frame.determinant().abs() < 1e-9 || normal.dot(self.normal).abs() < 1e-3;
+        if unusable || !self.shows_in_game() {
             return;
         }
         let inverse = frame.inverse();
@@ -261,12 +293,19 @@ impl Overlay {
 }
 
 /// The key changes that carry an entity's overlay through a transform, or nothing when
-/// the entity is not a placed overlay.
+/// the entity is not a placed overlay. A mirror also swaps `StartU` and `EndU`, as
+/// [`Overlay::transformed`] asks.
 pub fn transform_keys(entity: &Entity, matrix: &DMat4) -> Vec<(&'static str, String)> {
-    Overlay::of(entity)
-        .and_then(|overlay| overlay.transformed(matrix))
-        .map(|overlay| overlay.keys())
-        .unwrap_or_default()
+    let Some((moved, mirrored)) = Overlay::of(entity).and_then(|overlay| overlay.transformed(matrix)) else {
+        return Vec::new();
+    };
+    let mut keys = moved.keys();
+    if mirrored {
+        let value = |key: &str, default: &str| entity.get(key).unwrap_or(default).to_owned();
+        keys.push(("StartU", value("EndU", "1")));
+        keys.push(("EndU", value("StartU", "0")));
+    }
+    keys
 }
 
 /// Carries an entity's overlay through a transform in place. Entities that are not

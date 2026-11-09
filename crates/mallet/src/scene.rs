@@ -612,7 +612,7 @@ impl Scene {
             return (Some(overlay::Overlay::on_surface(origin, DVec3::Z, size)), Vec::new());
         };
         let placed = overlay::Overlay::on_surface(point, normal, size);
-        let texture = [DVec2::ZERO, DVec2::Y, DVec2::ONE, DVec2::X];
+        let texture = overlay::UPRIGHT_TEXTURE;
         let mut pieces = Vec::new();
         for face in brushes
             .iter()
@@ -1121,8 +1121,9 @@ fn decal_targets(mesh: &WireMesh) -> impl Iterator<Item = &SceneFace> {
 
 /// The mesh of an overlay's or decal's picture: its pieces as faces, their outline as
 /// edges, and for picking the slab of its quad just in front of and behind the faces.
-/// Without pieces, as when it lists no faces or hangs in the air, only the quad's
-/// outline is drawn, so it can still be found and picked.
+/// Without pieces, as when it lists no faces, hangs in the air or is wound so that the
+/// game leaves it out, only the quad's outline is drawn, so it can still be found and
+/// picked.
 fn decal_mesh(
     entity: &Entity,
     material: &str,

@@ -8,7 +8,9 @@
 use glam::{DVec2, DVec3};
 use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
-use mallet_vmf::overlay::{Overlay, DECAL_CLASS, OVERLAY_CLASS, OVERLAY_TEXEL_SIZE};
+use mallet_vmf::overlay::{
+    Overlay, DECAL_CLASS, OVERLAY_CLASS, OVERLAY_TEXEL_SIZE, UPRIGHT_TEXTURE, UPRIGHT_TEXTURE_KEYS,
+};
 
 use crate::editor::{picture_size, Editor, SelectMode};
 use crate::scene::{FaceHit, Owner};
@@ -71,17 +73,11 @@ impl Editor {
         let placed = Overlay::on_surface(on_face, normal, size);
         let sides = self.overlay_sides(&placed, side);
         let listed = sides.iter().map(u32::to_string).collect::<Vec<_>>().join(" ");
-        let mut keys: Vec<(String, String)> = [
-            ("material", material),
-            ("sides", listed.as_str()),
-            ("StartU", "0"),
-            ("EndU", "1"),
-            ("StartV", "0"),
-            ("EndV", "1"),
-        ]
-        .into_iter()
-        .map(|(key, value)| (key.to_owned(), value.to_owned()))
-        .collect();
+        let mut keys: Vec<(String, String)> = [("material", material), ("sides", listed.as_str())]
+            .into_iter()
+            .chain(UPRIGHT_TEXTURE_KEYS)
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect();
         keys.extend(placed.keys().into_iter().map(|(key, value)| (key.to_owned(), value)));
         let id = self.create_entity(OVERLAY_CLASS, placed.origin, &keys)?;
         let count = sides.len();
@@ -97,7 +93,6 @@ impl Editor {
         for corner in placed.world_corners() {
             around.add_point(corner);
         }
-        let texture = [DVec2::ZERO, DVec2::Y, DVec2::ONE, DVec2::X];
         let mut sides = vec![side];
         for candidate in self.scene.faces_in_plane(side, &around) {
             let reached = self
@@ -108,7 +103,7 @@ impl Editor {
                 .find(|face| face.side == Some(candidate))
                 .is_some_and(|face| {
                     let mut pieces = Vec::new();
-                    placed.pieces_on(&texture, &face.vertices, face.normal, &mut pieces);
+                    placed.pieces_on(&UPRIGHT_TEXTURE, &face.vertices, face.normal, &mut pieces);
                     !pieces.is_empty()
                 });
             if reached && !sides.contains(&candidate) {

@@ -242,19 +242,30 @@ selection or the map change, and travels in `Overlay::clip`, so every view draws
 
 `mallet_vmf::overlay` holds what an `info_overlay` stores and what the compilers make of
 it. `Overlay` is the quad: `BasisOrigin`, the axes `BasisU` and `BasisV` its picture runs
-along, `BasisNormal`, and the corners `uv0` to `uv3` measured along the axes. The first
-two corners are the picture's left edge and the first and last its top edge, so with the
-usual texture coordinates V points down the picture and `V = U x normal`, which is what
-`surface_axes` builds for a new overlay or a decal, the way the game's
-`R_DecalComputeBasis` does: upright on walls, top to the north on floors.
+along, `BasisNormal`, and the corners `uv0` to `uv3` measured along the axes. The corners
+take the texture coordinates (`StartU`, `StartV`), (`StartU`, `EndV`), (`EndU`, `EndV`)
+and (`EndU`, `StartV`).
+
+The game only draws an overlay whose corners run clockwise seen from in front of its
+faces; one wound the other way compiles into the BSP with its faces and is then left
+out. Every overlay in the maps checked (769 of them, made in Hammer or decompiled) is
+wound that way. Hammer gets there with U to the picture's right and V up it, so
+`U x V` is the normal, the first corner at the bottom left, and `StartV` 1 with `EndV` 0
+to turn the picture the right way up. `Overlay::on_surface` builds new overlays the
+same, on the directions `surface_axes` gives, which follow the game's
+`R_DecalComputeBasis`: upright on walls, top to the north on floors. `shows_in_game`
+tests the winding, and an overlay that fails it gets no picture in Mallet either, only
+its outline.
 
 `Overlay::pieces_on` cuts the quad to one brush face. The quad is two triangles; each is
 pushed along the normal onto the face, clipped by the face's polygon, and given texture
 axes that are affine in world space, so a `Piece` is drawn like any face whose
 coordinates run from 0 to 1. `Overlay::transformed` carries an overlay through any affine
 matrix: the normal goes through the inverse transpose, the axes are squared up again, and
-the corners are measured anew from the moved quad, so resizing stretches the picture and
-a mirror flips it. Every path that moves entities calls it: `Entity::translate` for
+the corners are measured anew from the moved quad, so resizing stretches the picture. A
+mirror would reverse the winding, so after one U is turned back, the corners are
+numbered in reverse and `StartU` and `EndU` trade places: the picture is mirrored and
+the game still draws it. Every path that moves entities calls it: `Entity::translate` for
 clones, the clipboard's paste, and `Editor::selected_overlay_edits` for moves and
 `Edit::Transform`, as `Edit::SetKey` edits beside the one that moves `origin`.
 
