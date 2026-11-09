@@ -37,6 +37,10 @@ pub enum Action {
     /// Toggle the Clipping tool between two-point and three-point clipping.
     ClipThreePoint,
     VertexTool,
+    /// Switch to the Overlay tool.
+    OverlayTool,
+    /// Switch to the Decal tool.
+    DecalTool,
     /// Split the face between the two selected vertices.
     SplitFace,
     Properties,
@@ -243,6 +247,8 @@ impl KeyMap {
                 (Action::ClipTool, Chord::shift(Key::X)),
                 (Action::ClipThreePoint, Chord::key(Key::C)),
                 (Action::VertexTool, Chord::shift(Key::V)),
+                (Action::OverlayTool, Chord::shift(Key::O)),
+                (Action::DecalTool, Chord::shift(Key::D)),
                 (Action::SplitFace, Chord::ctrl(Key::F)),
                 (Action::Properties, Chord::alt(Key::Enter)),
                 (Action::Compile, Chord::key(Key::F9)),

@@ -16,6 +16,7 @@ mod canvas;
 mod clipper;
 mod compile;
 mod config;
+mod decals;
 mod document;
 mod editor;
 mod faces;

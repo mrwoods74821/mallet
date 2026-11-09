@@ -235,13 +235,16 @@ impl Properties {
 /// haze. A blend cannot multiply, so the tint is the one that is right over a mid grey
 /// surface.
 fn modulate_to_blend(rgba: &mut [u8]) {
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         let color = [pixel[0], pixel[1], pixel[2]].map(|channel| f32::from(channel) / 255.0);
         let darkest = color.into_iter().fold(1.0, f32::min);
         let lightest = color.into_iter().fold(0.0, f32::max);
         let (tint, alpha) = if darkest < 0.5 {
             let alpha = 1.0 - 2.0 * darkest;
-            (color.map(|channel| ((channel - darkest) / alpha).clamp(0.0, 1.0)), alpha)
+            (
+                color.map(|channel| ((channel - darkest) / alpha).clamp(0.0, 1.0)),
+                alpha,
+            )
         } else {
             ([1.0; 3], (2.0 * lightest - 1.0).clamp(0.0, 1.0))
         };

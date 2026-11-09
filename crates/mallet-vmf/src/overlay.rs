@@ -88,12 +88,7 @@ pub fn texture_corners(entity: &Entity) -> [DVec2; 4] {
         DVec2::new(number("StartU", 0.0), number("StartV", 0.0)),
         DVec2::new(number("EndU", 1.0), number("EndV", 1.0)),
     );
-    [
-        start,
-        DVec2::new(start.x, end.y),
-        end,
-        DVec2::new(end.x, start.y),
-    ]
+    [start, DVec2::new(start.x, end.y), end, DVec2::new(end.x, start.y)]
 }
 
 impl Overlay {
@@ -225,10 +220,13 @@ impl Overlay {
                 if outward.dot(c - a) > 0.0 {
                     outward = -outward;
                 }
-                piece = clip_polygon(&piece, &Plane {
-                    normal: outward,
-                    dist: outward.dot(a),
-                });
+                piece = clip_polygon(
+                    &piece,
+                    &Plane {
+                        normal: outward,
+                        dist: outward.dot(a),
+                    },
+                );
                 if piece.len() < 3 {
                     break;
                 }

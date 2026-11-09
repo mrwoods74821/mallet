@@ -4,6 +4,7 @@
 mod chrome;
 mod compile_window;
 mod context_menu;
+mod decal_tools;
 pub(crate) use compile_window::count;
 mod options;
 mod paste_special;
@@ -47,7 +48,7 @@ const PIVOT_REACH_PIXELS: f32 = 7.0;
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 39] = [
+const KEY_ACTIONS: [Action; 41] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -69,6 +70,8 @@ const KEY_ACTIONS: [Action; 39] = [
     Action::ClipTool,
     Action::ClipThreePoint,
     Action::VertexTool,
+    Action::OverlayTool,
+    Action::DecalTool,
     Action::SplitFace,
     Action::Properties,
     Action::Compile,
@@ -195,6 +198,8 @@ pub struct MalletApp {
     context_menu: context_menu::ContextMenuState,
     /// The vertex tool's drag in progress, if any.
     vertex_drag: Option<vertex_tool::VertexPointer>,
+    /// The overlay corner being dragged with the Overlay tool.
+    overlay_drag: Option<decal_tools::CornerPointer>,
     /// The Paste Special dialog's settings, kept between pastes as Hammer does.
     paste_options: editor::PasteOptions,
     /// The modifiers held on their own and when they went down, for the key hints.
@@ -235,6 +240,7 @@ impl MalletApp {
             gizmo_drag: None,
             context_menu: context_menu::ContextMenuState::default(),
             vertex_drag: None,
+            overlay_drag: None,
             paste_options: editor::PasteOptions::default(),
             hint_modifiers: None,
             status_bar_top: 0.0,
@@ -474,6 +480,8 @@ impl MalletApp {
                     );
                     menu_item(ui, &self.keymap, "Clipping Tool", Action::ClipTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Vertex Tool", Action::VertexTool, &mut chosen);
+                    menu_item(ui, &self.keymap, "Overlay Tool", Action::OverlayTool, &mut chosen);
+                    menu_item(ui, &self.keymap, "Decal Tool", Action::DecalTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Split Face", Action::SplitFace, &mut chosen);
                     menu_item(ui, &self.keymap, "Create Block", Action::CreateBlock, &mut chosen);
                     ui.separator();
@@ -816,7 +824,8 @@ impl MalletApp {
         }
         let looking = editor.camera.mouse_look();
         let gizmo_hot = self.use_gizmo(slot, rect, response, editor, pointer)
-            || self.vertex_tool_3d(slot, rect, response, editor, pointer);
+            || self.vertex_tool_3d(slot, rect, response, editor, pointer)
+            || self.overlay_tool_3d(slot, rect, response, editor, pointer);
         let clicked = if looking {
             ui.input(|input| input.pointer.primary_pressed())
         } else {
@@ -859,6 +868,8 @@ impl MalletApp {
                         pick(editor, Some(owner), pointer.modifiers);
                     }
                 }
+                Tool::Overlay => editor.overlay_tool_click(origin, direction, pointer.modifiers.ctrl),
+                Tool::Decal => editor.decal_tool_click(origin, direction),
                 Tool::Block | Tool::Clip => {}
             }
         }
@@ -905,6 +916,7 @@ impl MalletApp {
                 Camera3D::draw_crosshair(&painter, rect);
                 self.draw_gizmo(&painter, slot, rect, response, editor);
                 vertex_tool::draw_vertex_3d(&painter, &editor.camera, rect, editor);
+                decal_tools::draw_overlay_handles(&painter, &editor.camera, rect, editor);
                 if style == CameraStyle::Lit {
                     lighting_notice(&painter, rect, editor);
                     let animated = editor.config.lighting.animate
@@ -1227,7 +1239,9 @@ impl MalletApp {
                 start,
                 bounds,
             },
-            (Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex, ..) => Drag::Marquee { view: index, start },
+            (Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex | Tool::Overlay | Tool::Decal, ..) => {
+                Drag::Marquee { view: index, start }
+            }
             (Tool::Block, ..) => Drag::NewBlock {
                 view: index,
                 start: snap(start, editor.grid),
@@ -2126,6 +2140,16 @@ fn run(action: Action, editor: &mut Editor) {
                 "Vertex tool: drag corners and edges; Ctrl+F splits a face between two corners".to_owned()
             };
         }
+        Action::OverlayTool => {
+            editor.set_tool(Tool::Overlay);
+            editor.message =
+                "Overlay tool: click a face in the 3D view to place the current material; drag a corner to resize"
+                    .to_owned();
+        }
+        Action::DecalTool => {
+            editor.set_tool(Tool::Decal);
+            editor.message = "Decal tool: click a face in the 3D view to place the current material".to_owned();
+        }
         Action::SplitFace => report(editor.split_vertex_face(), editor),
         Action::SelectAll => editor.select_all(),
         Action::ClearSelection => {
@@ -2147,7 +2171,7 @@ fn run(action: Action, editor: &mut Editor) {
                 Tool::Block => editor.commit_block().map(|_| ()),
                 Tool::Entity => editor.commit_entity().map(|_| ()),
                 Tool::Clip => editor.apply_clip().map(|_| ()),
-                Tool::Select | Tool::Texture | Tool::Vertex => Ok(()),
+                Tool::Select | Tool::Texture | Tool::Vertex | Tool::Overlay | Tool::Decal => Ok(()),
             };
             if let Err(error) = result {
                 editor.message = error;

@@ -63,6 +63,11 @@ pub enum Tool {
     Clip,
     /// Hammer's Vertex tool (Shift+V): drag the corners and edges of the selected brushes.
     Vertex,
+    /// Hammer's Overlay tool (Shift+O): place overlays on brush faces and drag their
+    /// corners.
+    Overlay,
+    /// Hammer's Decal tool (Shift+D): place decals on brush faces.
+    Decal,
 }
 
 /// Point entity classes offered by the entity tool's class list. Any other class name
@@ -746,6 +751,19 @@ impl Editor {
         Ok(())
     }
 
+    /// Applies an edit that continues the previous one when both have the same `group`,
+    /// as each step of a drag does, so the whole drag undoes at once.
+    pub fn apply_edit_grouped(&mut self, edit: &Edit, group: u64) -> Result<(), String> {
+        let document = self.document.as_mut().ok_or("no map is open")?;
+        document
+            .history
+            .apply_grouped(&mut document.vmf, edit, group)
+            .map_err(|error| error.to_string())?;
+        document.dirty = true;
+        self.rebuild_scene();
+        Ok(())
+    }
+
     /// Undoes or redoes one step. Returns whether anything changed.
     pub fn step_history(&mut self, redo: bool) -> Result<bool, String> {
         let document = self.document.as_mut().ok_or("no map is open")?;
@@ -776,11 +794,11 @@ impl Editor {
             self.ensure_models(&document.vmf);
             self.ensure_decal_sizes(&document.vmf);
             self.scene = Scene::build(
-            &document.vmf,
-            &self.models,
-            self.game_data.as_deref(),
-            &self.decal_sizes,
-        );
+                &document.vmf,
+                &self.models,
+                self.game_data.as_deref(),
+                &self.decal_sizes,
+            );
             self.document = Some(document);
             self.add_pointfile_to_scene();
         } else {
@@ -954,7 +972,7 @@ impl Editor {
     pub fn handle_box(&self) -> Option<Bounds> {
         match self.tool {
             Tool::Block => self.overlay.block,
-            Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex => None,
+            Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex | Tool::Overlay | Tool::Decal => None,
             Tool::Select => {
                 let bounds = self.scene.selection_bounds();
                 (!bounds.is_empty()).then(|| self.overlay.transform.map_or(bounds, |remap| remap.map_bounds(&bounds)))

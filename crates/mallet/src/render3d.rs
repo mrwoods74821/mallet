@@ -2031,7 +2031,11 @@ fn triangulate(
         let size = if face.decal { 1.0 } else { size };
         ((point.dot(axis.axis) / scale + axis.offset) / f64::from(size)) as f32
     };
-    let lift = if face.decal { face.normal * DECAL_LIFT } else { DVec3::ZERO };
+    let lift = if face.decal {
+        face.normal * DECAL_LIFT
+    } else {
+        DVec3::ZERO
+    };
     let vertex = |point: DVec3| FaceVertex {
         position: remap
             .map_or(point + lift, |remap| remap.apply(point + lift))
