@@ -856,7 +856,7 @@ fn box_faces(bounds: &Bounds) -> Vec<SceneFace> {
 
 /// Model space to world for a prop: `origin`, then `angles` (pitch, yaw, roll in degrees,
 /// applied roll first, then pitch, then yaw, like the engine), then `modelscale`.
-fn entity_transform(origin: DVec3, entity: &Entity) -> DMat4 {
+pub fn entity_transform(origin: DVec3, entity: &Entity) -> DMat4 {
     let [pitch, yaw, roll] = entity
         .get("angles")
         .and_then(parse_vec3)

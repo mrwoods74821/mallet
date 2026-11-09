@@ -25,6 +25,7 @@ mod keymap;
 mod lighting;
 mod mcp;
 mod netgraph;
+mod prop_brushes;
 mod properties;
 mod render3d;
 mod scene;

@@ -18,6 +18,7 @@ use crate::editor::{Editor, SelectMode, ShotTarget, Tool, ViewMode, MAX_GRID, MI
 use crate::faces::{FaceChange, FaceInfo, FaceValues};
 use crate::input::{self, InputFrame};
 use crate::mcp::ToolResult;
+use crate::prop_brushes::{PropBrushOptions, PropShape};
 use crate::scene::Owner;
 use mallet_vmf::texture::Justify;
 
@@ -162,6 +163,20 @@ pub fn definitions() -> Value {
              in Hammer. Undoable.",
             json!({ "offset": vec3 }),
             &["offset"],
+        ),
+        tool(
+            "props_to_brushes",
+            "Mesh to Geometry: rebuild the selected props as brushes with the current material, then select the \
+             new brushes. shape \"collision\" uses each prop's collision model (.phy), one brush per convex \
+             piece; \"mesh\" splits the visual mesh into nearly convex parts, closer to how the prop looks but \
+             with more brushes. Brushes go into a func_detail per prop unless detail is false, and the props are \
+             removed unless keep_props is true. Undoable.",
+            json!({
+                "shape": { "type": "string", "enum": ["collision", "mesh"] },
+                "detail": { "type": "boolean" },
+                "keep_props": { "type": "boolean" }
+            }),
+            &["shape"],
         ),
         tool(
             "resize_selection",
@@ -1107,6 +1122,23 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
         "clone_selection" => {
             editor.clone_selection(required_vec3(args, "offset")?)?;
             Ok(ToolResult::json(&selection_json(editor)))
+        }
+        "props_to_brushes" => {
+            let shape = PropShape::parse(args.get("shape").and_then(Value::as_str).unwrap_or_default())?;
+            let defaults = PropBrushOptions::default();
+            let options = PropBrushOptions {
+                detail: args.get("detail").and_then(Value::as_bool).unwrap_or(defaults.detail),
+                keep_props: args
+                    .get("keep_props")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(defaults.keep_props),
+            };
+            let brushes = editor.props_to_brushes(shape, options)?;
+            Ok(ToolResult::json(&json!({
+                "brushes": brushes,
+                "message": editor.message,
+                "selection": selection_json(editor),
+            })))
         }
         "resize_selection" => {
             let to = Bounds {
