@@ -80,6 +80,7 @@ fn main() -> eframe::Result {
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             present_mode,
             desired_maximum_frame_latency: latency,
+            wgpu_setup: render3d::wgpu_setup(),
             ..Default::default()
         },
         ..Default::default()

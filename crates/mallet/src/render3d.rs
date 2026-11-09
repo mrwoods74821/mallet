@@ -62,6 +62,21 @@ const MAX_SWAP_INTERVAL: Duration = Duration::from_secs(2);
 /// rebuilding takes a small share of the time while a large map's textures stream in.
 const SWAP_COST_FACTOR: u32 = 8;
 
+/// How eframe sets up the graphics card: as it does by itself, and asking for DXT texture
+/// sampling where the card has it, so textures can stay compressed in its memory.
+pub fn wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
+    let defaults = eframe::egui_wgpu::WgpuSetupCreateNew::default();
+    let describe = Arc::clone(&defaults.device_descriptor);
+    eframe::egui_wgpu::WgpuSetup::CreateNew(eframe::egui_wgpu::WgpuSetupCreateNew {
+        device_descriptor: Arc::new(move |adapter| {
+            let mut descriptor = describe(adapter);
+            descriptor.required_features |= adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC;
+            descriptor
+        }),
+        ..defaults
+    })
+}
+
 /// One corner of a brush face on the GPU. The textured view shades it by its normal, as
 /// Hammer does; the lighting preview lights it.
 #[repr(C)]
