@@ -73,6 +73,8 @@ pub enum Action {
     ToggleGizmo,
     /// Switch the 3D transform gizmo to its next mode: move, rotate, then scale.
     CycleGizmoMode,
+    /// Turn snapping rotations to the rotation step on or off.
+    ToggleRotationSnap,
     ToggleMouseLook,
     MoveForward,
     MoveBack,
@@ -259,6 +261,7 @@ impl KeyMap {
                 (Action::FlipVertical, Chord::ctrl(Key::I)),
                 (Action::ToggleTextureLock, Chord::shift(Key::L)),
                 (Action::CycleGizmoMode, Chord::key(Key::Q)),
+                (Action::ToggleRotationSnap, Chord::shift(Key::R)),
                 (Action::ToggleMouseLook, Chord::key(Key::Z)),
                 (Action::MoveForward, Chord::key(Key::W)),
                 (Action::MoveBack, Chord::key(Key::S)),

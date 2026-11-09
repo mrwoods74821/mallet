@@ -131,6 +131,12 @@ impl MalletApp {
                         edit.texture_scale_lock,
                     ),
                     (
+                        icon::ANGLE,
+                        "Rotation snap: rotations turn in steps; hold Shift to do the opposite",
+                        Action::ToggleRotationSnap,
+                        edit.snap_rotation,
+                    ),
+                    (
                         icon::ARROWS_OUT_CARDINAL,
                         "3D transform gizmo on the selection; click its centre or press Q to switch between move, rotate and scale",
                         Action::ToggleGizmo,

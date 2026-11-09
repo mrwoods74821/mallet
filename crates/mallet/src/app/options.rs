@@ -1188,16 +1188,20 @@ fn editing_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
                 )
                 .changed();
             ui.end_row();
-            ui.label("Rotation snap")
-                .on_hover_text("Rotations snap to this step while Shift is held; 0 turns snapping off.");
-            *dirty |= ui
-                .add(
-                    egui::DragValue::new(&mut transform.rotation_snap)
-                        .range(0.0..=90.0)
-                        .speed(0.5)
-                        .suffix("\u{b0}"),
-                )
-                .changed();
+            ui.label("Rotation snap").on_hover_text(
+                "Rotations turn in steps of this angle; holding Shift does the opposite. 0 turns snapping off.",
+            );
+            ui.horizontal(|ui| {
+                *dirty |= ui.checkbox(&mut transform.snap_rotation, "Snap").changed();
+                *dirty |= ui
+                    .add(
+                        egui::DragValue::new(&mut transform.rotation_snap)
+                            .range(0.0..=90.0)
+                            .speed(0.5)
+                            .suffix("\u{b0}"),
+                    )
+                    .changed();
+            });
             ui.end_row();
             ui.label("Arrow keys");
             *dirty |= ui

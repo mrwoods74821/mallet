@@ -47,7 +47,7 @@ const PIVOT_REACH_PIXELS: f32 = 7.0;
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 38] = [
+const KEY_ACTIONS: [Action; 39] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -86,6 +86,7 @@ const KEY_ACTIONS: [Action; 38] = [
     Action::FlipVertical,
     Action::ToggleTextureLock,
     Action::CycleGizmoMode,
+    Action::ToggleRotationSnap,
 ];
 
 /// A left-button drag in progress in one 2D view. `start` is the 2D world point where the
@@ -516,6 +517,17 @@ impl MalletApp {
                     let mut scale_lock = editor.config.transform.texture_scale_lock;
                     if ui.checkbox(&mut scale_lock, "Texture Scale Lock").clicked() {
                         chosen = Some(Action::ToggleTextureScaleLock);
+                        ui.close_menu();
+                    }
+                    let mut rotation_snap = editor.config.transform.snap_rotation;
+                    if ui
+                        .checkbox(
+                            &mut rotation_snap,
+                            format!("Rotation Snap\t{}", self.keymap.label(Action::ToggleRotationSnap)),
+                        )
+                        .clicked()
+                    {
+                        chosen = Some(Action::ToggleRotationSnap);
                         ui.close_menu();
                     }
                 });
@@ -988,8 +1000,7 @@ impl MalletApp {
             return hovered.is_some();
         };
         response.ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-        let step = editor.config.transform.rotation_snap;
-        let angle_step = (pointer.modifiers.shift && step > 0.0).then_some(step);
+        let angle_step = editor.config.transform.angle_step(pointer.modifiers.shift);
         let change = pointer
             .position
             .and_then(|position| drag.change(&editor.camera, rect, position, editor.grid, angle_step));
@@ -1001,7 +1012,11 @@ impl MalletApp {
             editor.overlay.cloning = pointer.modifiers.shift && matches!(change, GizmoChange::Move(_));
             if let GizmoChange::Rotate(matrix) = change {
                 let degrees = mallet_vmf::transform::matrix_angles(mallet_vmf::transform::linear_part(&matrix));
-                editor.message = format!("Rotating {}; hold Shift to snap", mallet_vmf::format_vec3(degrees));
+                editor.message = format!(
+                    "Rotating {}; {}",
+                    mallet_vmf::format_vec3(degrees),
+                    editor.config.transform.rotation_hint()
+                );
             }
         }
         if response.drag_stopped() {
@@ -1396,15 +1411,16 @@ impl MalletApp {
                     let center = view.axis.project(pivot);
                     let (from, to) = (start - center, world - center);
                     let mut degrees = from.perp_dot(to).atan2(from.dot(to)).to_degrees();
-                    if pointer.modifiers.shift {
-                        degrees = transform::snap_angle(degrees, editor.config.transform.rotation_snap);
+                    if let Some(step) = editor.config.transform.angle_step(pointer.modifiers.shift) {
+                        degrees = transform::snap_angle(degrees, step);
                     }
                     let [horizontal, vertical, _] = view.axis.axes();
                     let turn = transform::plane_rotation(horizontal, vertical, degrees.to_radians());
                     editor.overlay.transform = Some(Remap {
                         matrix: mallet_vmf::transform::around(pivot, turn),
                     });
-                    editor.message = format!("Rotating {degrees:.1}\u{b0}; hold Shift to snap");
+                    let hint = editor.config.transform.rotation_hint();
+                    editor.message = format!("Rotating {degrees:.1}\u{b0}; {hint}");
                 }
                 Drag::Skew {
                     start, bounds, handle, ..
@@ -2172,6 +2188,16 @@ fn run(action: Action, editor: &mut Editor) {
             editor.save_config();
         }
         Action::CycleGizmoMode => editor.cycle_gizmo_mode(),
+        Action::ToggleRotationSnap => {
+            let transform = &mut editor.config.transform;
+            transform.snap_rotation = !transform.snap_rotation;
+            editor.message = format!(
+                "Rotation snap {} ({}\u{b0})",
+                on_off(transform.snap_rotation),
+                transform.rotation_snap
+            );
+            editor.save_config();
+        }
         _ => {}
     }
 }

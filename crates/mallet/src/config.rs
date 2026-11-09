@@ -241,8 +241,11 @@ pub struct TransformOptions {
     pub texture_lock: bool,
     /// Textures also stretch when brushes are scaled (Hammer's texture scale lock).
     pub texture_scale_lock: bool,
-    /// Degrees a rotation snaps to while Shift is held; 0 turns snapping off.
+    /// Degrees a snapped rotation turns in; 0 turns snapping off.
     pub rotation_snap: f64,
+    /// Whether rotations snap to [`Self::rotation_snap`] without Shift. Holding Shift
+    /// does the opposite.
+    pub snap_rotation: bool,
     /// Whether the 3D view shows the transform gizmo on the selection.
     pub gizmo: bool,
     /// What dragging the gizmo does.
@@ -251,12 +254,30 @@ pub struct TransformOptions {
     pub arrow_nudge: bool,
 }
 
+impl TransformOptions {
+    /// The step a rotation snaps to, if any, with Shift held or not. Shift flips the
+    /// rotation snap toggle for the length of the drag.
+    pub fn angle_step(&self, shift: bool) -> Option<f64> {
+        (self.snap_rotation != shift && self.rotation_snap > 0.0).then_some(self.rotation_snap)
+    }
+
+    /// The status bar hint for what Shift does to a rotation.
+    pub fn rotation_hint(&self) -> &'static str {
+        if self.snap_rotation {
+            "hold Shift to rotate freely"
+        } else {
+            "hold Shift to snap"
+        }
+    }
+}
+
 impl Default for TransformOptions {
     fn default() -> Self {
         Self {
             texture_lock: true,
             texture_scale_lock: false,
             rotation_snap: 15.0,
+            snap_rotation: true,
             gizmo: true,
             gizmo_mode: crate::transform::GizmoMode::Move,
             arrow_nudge: true,
