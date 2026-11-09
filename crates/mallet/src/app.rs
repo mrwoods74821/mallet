@@ -1123,6 +1123,8 @@ impl MalletApp {
                     _ => None,
                 };
                 self.selection_context_menu(response, hit, editor);
+            } else if editor.tool == Tool::Block {
+                self.block_context_menu(response, editor);
             }
         }
         let painter = ui.painter_at(rect);
