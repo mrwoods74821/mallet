@@ -1477,7 +1477,7 @@ fn keyboard_section(ui: &mut egui::Ui, keymap: &KeyMap) {
         .spacing([24.0, 4.0])
         .show(ui, |ui| {
             for (action, chord) in keymap.bindings() {
-                ui.label(action_name(&format!("{action:?}")));
+                ui.label(action.name());
                 ui.label(RichText::new(chord.label()).monospace());
                 ui.end_row();
             }
@@ -1536,18 +1536,4 @@ fn agents_section(ui: &mut egui::Ui, editor: &mut Editor, mcp_url: Option<&str>,
     if ui.small_button(format!("{} Copy", icon::CLIPBOARD_TEXT)).clicked() {
         ui.ctx().copy_text(config);
     }
-}
-
-/// `CenterViews2D` as "Center views 2D".
-fn action_name(debug: &str) -> String {
-    let mut name = String::new();
-    for (index, c) in debug.chars().enumerate() {
-        if c.is_ascii_uppercase() && index > 0 {
-            name.push(' ');
-            name.push(c.to_ascii_lowercase());
-        } else {
-            name.push(c);
-        }
-    }
-    name
 }

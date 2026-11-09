@@ -2708,22 +2708,22 @@ impl LitState {
         };
         if let Some(faces) = &renderer.faces {
             pass.set_pipeline(&self.face);
-            pass.set_vertex_buffer(0, faces.opaque.buffer.slice(..));
             stats.chunks = faces.opaque.chunks.len();
-            for chunk in faces
-                .opaque
-                .chunks
-                .iter()
-                .filter(|chunk| box_visible(planes, chunk.min, chunk.max))
-            {
-                stats.chunks_drawn += 1;
-                stats.triangles_drawn += chunk.triangles;
-                for (key, range) in &chunk.batches {
-                    if hidden(key) {
-                        continue;
+            for (mesh, skipped) in renderer.opaque_faces() {
+                pass.set_vertex_buffer(0, mesh.buffer.slice(..));
+                for chunk in mesh.chunks.iter().filter(|chunk| {
+                    skipped.is_none_or(|cells| !cells.contains(&chunk.cell))
+                        && box_visible(planes, chunk.min, chunk.max)
+                }) {
+                    stats.chunks_drawn += 1;
+                    stats.triangles_drawn += chunk.triangles;
+                    for (key, range) in &chunk.batches {
+                        if hidden(key) {
+                            continue;
+                        }
+                        pass.set_bind_group(1, &renderer.texture_for(key).bind_group, &[]);
+                        pass.draw(range.clone(), 0..1);
                     }
-                    pass.set_bind_group(1, &renderer.texture_for(key).bind_group, &[]);
-                    pass.draw(range.clone(), 0..1);
                 }
             }
         }

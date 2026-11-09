@@ -47,7 +47,7 @@ const PIVOT_REACH_PIXELS: f32 = 7.0;
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 37] = [
+const KEY_ACTIONS: [Action; 38] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -85,6 +85,7 @@ const KEY_ACTIONS: [Action; 37] = [
     Action::FlipHorizontal,
     Action::FlipVertical,
     Action::ToggleTextureLock,
+    Action::CycleGizmoMode,
 ];
 
 /// A left-button drag in progress in one 2D view. `start` is the 2D world point where the
@@ -195,6 +196,10 @@ pub struct MalletApp {
     vertex_drag: Option<vertex_tool::VertexPointer>,
     /// The Paste Special dialog's settings, kept between pastes as Hammer does.
     paste_options: editor::PasteOptions,
+    /// The modifiers held on their own and when they went down, for the key hints.
+    hint_modifiers: Option<(egui::Modifiers, f64)>,
+    /// The top edge of the status bar, which the key hints sit just above.
+    status_bar_top: f32,
 }
 
 impl MalletApp {
@@ -230,6 +235,8 @@ impl MalletApp {
             context_menu: context_menu::ContextMenuState::default(),
             vertex_drag: None,
             paste_options: editor::PasteOptions::default(),
+            hint_modifiers: None,
+            status_bar_top: 0.0,
         };
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
@@ -429,6 +436,9 @@ impl MalletApp {
                         chosen = Some(Action::ToggleGizmo);
                         ui.close_menu();
                     }
+                    let gizmo_mode = editor.config.transform.gizmo_mode.label();
+                    let cycle_label = format!("Next Gizmo Mode (now {gizmo_mode})");
+                    menu_item(ui, &self.keymap, &cycle_label, Action::CycleGizmoMode, &mut chosen);
                     ui.horizontal(|ui| {
                         ui.label("3D draw distance");
                         ui.add(
@@ -609,8 +619,75 @@ impl MalletApp {
         }
     }
 
-    fn status_bar(&self, ctx: &egui::Context, editor: &Editor) {
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+    /// While Ctrl, Shift or Alt is held on its own for a moment, lists the shortcuts that
+    /// use exactly those modifiers just above the status bar, as Blender does. It floats
+    /// over the viewports so they keep their size, and hides as soon as another key or a
+    /// mouse button goes down, so Ctrl+click and the like never flash it.
+    fn key_hints(&mut self, ctx: &egui::Context, editor: &Editor) {
+        const DELAY_SECONDS: f64 = 0.35;
+        let (modifiers, quiet, now) = ctx.input(|input| {
+            let quiet = input.keys_down.is_empty() && !input.pointer.any_down();
+            (input.modifiers, quiet, input.time)
+        });
+        let held = modifiers.ctrl || modifiers.shift || modifiers.alt;
+        if !held || !quiet || editor.camera.mouse_look() || ctx.wants_keyboard_input() {
+            self.hint_modifiers = None;
+            return;
+        }
+        let since = match self.hint_modifiers {
+            Some((previous, since)) if previous == modifiers => since,
+            _ => {
+                self.hint_modifiers = Some((modifiers, now));
+                now
+            }
+        };
+        let waited = now - since;
+        if waited < DELAY_SECONDS {
+            ctx.request_repaint_after(Duration::from_secs_f64(DELAY_SECONDS - waited));
+            return;
+        }
+        let hints = self.keymap.hints(&modifiers);
+        if hints.is_empty() {
+            return;
+        }
+        let screen = ctx.screen_rect();
+        let lift = screen.bottom() - self.status_bar_top + 4.0;
+        egui::Area::new(Id::new("key_hints"))
+            .order(egui::Order::Foreground)
+            .interactable(false)
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(4.0, -lift))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    // A fixed width, so the hints wrap onto more rows instead of running
+                    // off the window's edge.
+                    ui.set_width(screen.width() - 32.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(16.0, 4.0);
+                        for (action, chord) in hints {
+                            // One label per hint, so a row only ever breaks between hints.
+                            let mut job = egui::text::LayoutJob::default();
+                            let style = ui.style();
+                            egui::RichText::new(chord.label()).monospace().strong().append_to(
+                                &mut job,
+                                style,
+                                egui::FontSelection::Default,
+                                egui::Align::Center,
+                            );
+                            egui::RichText::new(format!("  {}", action.name())).append_to(
+                                &mut job,
+                                style,
+                                egui::FontSelection::Default,
+                                egui::Align::Center,
+                            );
+                            ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend));
+                        }
+                    });
+                });
+            });
+    }
+
+    fn status_bar(&mut self, ctx: &egui::Context, editor: &Editor) {
+        let panel = egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&editor.message);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -634,6 +711,7 @@ impl MalletApp {
                 });
             });
         });
+        self.status_bar_top = panel.response.rect.top();
     }
 
     fn viewports(&mut self, ui: &mut egui::Ui, editor: &mut Editor, frame: &eframe::Frame) {
@@ -921,6 +999,8 @@ impl MalletApp {
             editor.overlay.transform = Some(Remap {
                 matrix: change.matrix(),
             });
+            // Shift at release clones a move, so the originals stay in view.
+            editor.overlay.cloning = pointer.modifiers.shift && matches!(change, GizmoChange::Move(_));
             if let GizmoChange::Rotate(matrix) = change {
                 let degrees = mallet_vmf::transform::matrix_angles(mallet_vmf::transform::linear_part(&matrix));
                 editor.message = format!("Rotating {}; hold Shift to snap", mallet_vmf::format_vec3(degrees));
@@ -1003,9 +1083,7 @@ impl MalletApp {
                 let hit = match (response.secondary_clicked(), pointer.position) {
                     (true, Some(position)) => {
                         let tolerance = pick_tolerance(editor) / view.scale;
-                        editor
-                            .scene
-                            .pick_2d(view.axis, view.to_world(rect, position), tolerance)
+                        editor.scene.pick_2d(view.axis, view.to_world(rect, position), tolerance)
                     }
                     _ => None,
                 };
@@ -1301,6 +1379,8 @@ impl MalletApp {
             return;
         };
 
+        // Shift at release clones instead of moving, so the originals stay in view.
+        editor.overlay.cloning = matches!(drag, Drag::Move { .. }) && pointer.modifiers.shift;
         if let Some(position) = pointer.position {
             let world = view.to_world(rect, position);
             match drag {
@@ -1458,6 +1538,7 @@ impl eframe::App for MalletApp {
         self.toolbar(ctx, &mut editor);
         self.tab_strip(ctx, &mut editor);
         self.status_bar(ctx, &editor);
+        self.key_hints(ctx, &editor);
         self.tool_palette(ctx, &mut editor);
         self.side_panel(ctx, &mut editor);
         self.close_dialog(ctx, &mut editor);
@@ -2090,6 +2171,11 @@ fn run(action: Action, editor: &mut Editor) {
         Action::ToggleGizmo => {
             editor.config.transform.gizmo = !editor.config.transform.gizmo;
             editor.message = format!("3D gizmo {}", on_off(editor.config.transform.gizmo));
+            editor.save_config();
+        }
+        Action::CycleGizmoMode => {
+            editor.config.transform.gizmo_mode = editor.config.transform.gizmo_mode.next();
+            editor.message = format!("Gizmo: {}", editor.config.transform.gizmo_mode.label());
             editor.save_config();
         }
         _ => {}

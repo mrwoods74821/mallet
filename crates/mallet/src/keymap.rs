@@ -71,6 +71,8 @@ pub enum Action {
     ToggleTextureScaleLock,
     /// Show or hide the 3D transform gizmo.
     ToggleGizmo,
+    /// Switch the 3D transform gizmo to its next mode: move, rotate, then scale.
+    CycleGizmoMode,
     ToggleMouseLook,
     MoveForward,
     MoveBack,
@@ -99,6 +101,33 @@ const MOVEMENT_ACTIONS: [Action; 10] = [
     Action::LookUp,
     Action::LookDown,
 ];
+
+impl Action {
+    /// A readable name built from the variant's name: `CenterViews2D` reads as
+    /// "Center views 2D".
+    pub fn name(&self) -> String {
+        let debug = format!("{self:?}");
+        let mut name = String::new();
+        let mut previous: Option<char> = None;
+        for c in debug.chars() {
+            match previous {
+                // A letter right after a digit, as in "2D", stays with it.
+                Some(before) if before.is_ascii_digit() => name.push(c),
+                Some(_) if c.is_ascii_digit() => {
+                    name.push(' ');
+                    name.push(c);
+                }
+                Some(_) if c.is_ascii_uppercase() => {
+                    name.push(' ');
+                    name.push(c.to_ascii_lowercase());
+                }
+                _ => name.push(c),
+            }
+            previous = Some(c);
+        }
+        name
+    }
+}
 
 /// A key plus the exact modifiers that must be held with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,6 +258,7 @@ impl KeyMap {
                 (Action::FlipHorizontal, Chord::ctrl(Key::L)),
                 (Action::FlipVertical, Chord::ctrl(Key::I)),
                 (Action::ToggleTextureLock, Chord::shift(Key::L)),
+                (Action::CycleGizmoMode, Chord::key(Key::Q)),
                 (Action::ToggleMouseLook, Chord::key(Key::Z)),
                 (Action::MoveForward, Chord::key(Key::W)),
                 (Action::MoveBack, Chord::key(Key::S)),
@@ -258,6 +288,25 @@ impl KeyMap {
     /// Menu label for an action's shortcut, or an empty string when it has none.
     pub fn label(&self, action: Action) -> String {
         self.chord(action).map(|chord| chord.label()).unwrap_or_default()
+    }
+
+    /// The bindings that use exactly the held modifiers, one per action, for the key hints
+    /// shown while a modifier is held. Empty when no modifier is held, and movement keys
+    /// are left out because they act while held rather than as shortcuts.
+    pub fn hints(&self, modifiers: &Modifiers) -> Vec<(Action, Chord)> {
+        if !modifiers.ctrl && !modifiers.shift && !modifiers.alt {
+            return Vec::new();
+        }
+        let mut hints: Vec<(Action, Chord)> = Vec::new();
+        for (action, chord) in &self.bindings {
+            if chord.modifiers_match(modifiers)
+                && !MOVEMENT_ACTIONS.contains(action)
+                && !hints.iter().any(|(shown, _)| shown == action)
+            {
+                hints.push((*action, *chord));
+            }
+        }
+        hints
     }
 
     /// Whether the action was triggered this frame, with exactly its modifiers held.
@@ -306,5 +355,48 @@ pub fn clipboard_action(event: &Event, modifiers: &Modifiers) -> Option<Action> 
         Event::Paste(_) if modifiers.ctrl && modifiers.shift => Some(Action::PasteSpecial),
         Event::Paste(_) => Some(Action::Paste),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn held(ctrl: bool, shift: bool, alt: bool) -> Modifiers {
+        Modifiers {
+            ctrl,
+            shift,
+            alt,
+            ..Modifiers::NONE
+        }
+    }
+
+    #[test]
+    fn hints_list_only_chords_with_exactly_the_held_modifiers() {
+        let keymap = KeyMap::hammer_plus_plus_defaults();
+        let ctrl = keymap.hints(&held(true, false, false));
+        assert!(ctrl.iter().any(|(action, _)| *action == Action::SaveFile));
+        assert!(ctrl.iter().all(|(_, chord)| chord.ctrl && !chord.shift && !chord.alt));
+        assert!(!ctrl.iter().any(|(action, _)| *action == Action::SelectAll));
+        let ctrl_shift = keymap.hints(&held(true, true, false));
+        assert!(ctrl_shift.iter().any(|(action, _)| *action == Action::SelectAll));
+    }
+
+    #[test]
+    fn hints_are_empty_without_a_modifier_and_list_each_action_once() {
+        let keymap = KeyMap::hammer_plus_plus_defaults();
+        assert!(keymap.hints(&Modifiers::NONE).is_empty());
+        let shift = keymap.hints(&held(false, true, false));
+        let cuts = shift.iter().filter(|(action, _)| *action == Action::Cut).count();
+        assert_eq!(cuts, 1);
+    }
+
+    #[test]
+    fn q_cycles_the_gizmo_mode() {
+        let keymap = KeyMap::hammer_plus_plus_defaults();
+        assert_eq!(keymap.chord(Action::CycleGizmoMode), Some(Chord::key(Key::Q)));
+        assert_eq!(Action::CycleGizmoMode.name(), "Cycle gizmo mode");
+        assert_eq!(Action::CenterViews2D.name(), "Center views 2D");
+        assert_eq!(Action::CenterView3D.name(), "Center view 3D");
     }
 }

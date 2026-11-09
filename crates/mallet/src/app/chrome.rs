@@ -132,7 +132,7 @@ impl MalletApp {
                     ),
                     (
                         icon::ARROWS_OUT_CARDINAL,
-                        "3D transform gizmo on the selection; click its centre to switch between move, rotate and scale",
+                        "3D transform gizmo on the selection; click its centre or press Q to switch between move, rotate and scale",
                         Action::ToggleGizmo,
                         edit.gizmo,
                     ),

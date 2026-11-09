@@ -256,8 +256,20 @@ struct FaceMesh {
     chunks: Vec<Chunk>,
 }
 
+/// The chunks that hold selected brushes, rebuilt without them, so a drag does not leave a
+/// copy of the selection behind where it started.
+struct DragFaces {
+    /// The geometry and selection generations these were built from.
+    key: (u64, u64),
+    /// The cells of [`StaticFaces`] that `mesh` stands in for.
+    cells: HashSet<[i32; 3]>,
+    mesh: FaceMesh,
+}
+
 /// The faces of the brushes whose centres fall in one cube of the world.
 struct Chunk {
+    /// Which cube of the world this is, as [`chunk_cell`] numbers them.
+    cell: [i32; 3],
     min: Vec3,
     max: Vec3,
     batches: Vec<(String, Range<u32>)>,
@@ -335,6 +347,12 @@ pub struct Renderer3D {
     faces: Option<StaticFaces>,
     /// Every edge, cached until the geometry changes; shared by the 2D views.
     edges: Option<(u64, LineMesh)>,
+    /// Every edge but the selection's, for while a drag shows the selection elsewhere;
+    /// keyed by the geometry and selection generations it was built from.
+    drag_edges: Option<((u64, u64), Option<LineMesh>)>,
+    /// The chunks of [`Self::faces`] that hold selected brushes, rebuilt without them,
+    /// for while a drag shows the selection elsewhere.
+    drag_faces: Option<DragFaces>,
     /// The geometry generation whose materials have been loaded.
     textures_checked: u64,
     /// One image per viewport slot.
@@ -530,6 +548,8 @@ impl Renderer3D {
             reused: [false; 4],
             faces: None,
             edges: None,
+            drag_edges: None,
+            drag_faces: None,
             textures_checked: 0,
             targets: [None, None, None, None],
             stats: RenderStats::default(),
@@ -725,8 +745,9 @@ impl Renderer3D {
             {
                 self.update_static_faces(scene);
             }
+            self.update_drag_faces(scene, overlay);
         } else {
-            self.ensure_edges(scene);
+            self.update_edges(scene, overlay);
         }
         let selected: Vec<&WireMesh> = scene.meshes.iter().filter(|mesh| mesh.selected).collect();
         let selected_faces = selected_face_meshes(scene);
@@ -780,10 +801,12 @@ impl Renderer3D {
         };
         let translucent = match (&self.faces, textured) {
             (Some(faces), true) => {
-                let unselected = faces
-                    .translucent
-                    .iter()
-                    .filter(|face| face.owner.is_none_or(|owner| !selected_owners.contains(&owner)));
+                // A selected brush's cached faces give way to its tinted copy, except in a
+                // clone drag, which leaves the original where it is.
+                let keep_originals = overlay.transform.is_some() && overlay.cloning;
+                let unselected = faces.translucent.iter().filter(|face| {
+                    keep_originals || face.owner.is_none_or(|owner| !selected_owners.contains(&owner))
+                });
                 self.sorted_translucent(unselected.chain(&tinted_translucent).chain(&sprites), camera, &planes)
             }
             _ => None,
@@ -833,19 +856,19 @@ impl Renderer3D {
             match (style, &self.faces) {
                 (CameraStyle::Textured, Some(faces)) => {
                     pass.set_pipeline(&self.face_pipeline);
-                    pass.set_vertex_buffer(0, faces.opaque.buffer.slice(..));
                     stats.chunks = faces.opaque.chunks.len();
-                    for chunk in faces
-                        .opaque
-                        .chunks
-                        .iter()
-                        .filter(|chunk| box_visible(&planes, chunk.min, chunk.max))
-                    {
-                        stats.chunks_drawn += 1;
-                        stats.triangles_drawn += chunk.triangles;
-                        for (key, range) in &chunk.batches {
-                            pass.set_bind_group(1, &self.texture_for(key).bind_group, &[]);
-                            pass.draw(range.clone(), 0..1);
+                    for (mesh, skipped) in self.opaque_faces() {
+                        pass.set_vertex_buffer(0, mesh.buffer.slice(..));
+                        for chunk in mesh.chunks.iter().filter(|chunk| {
+                            skipped.is_none_or(|cells| !cells.contains(&chunk.cell))
+                                && box_visible(&planes, chunk.min, chunk.max)
+                        }) {
+                            stats.chunks_drawn += 1;
+                            stats.triangles_drawn += chunk.triangles;
+                            for (key, range) in &chunk.batches {
+                                pass.set_bind_group(1, &self.texture_for(key).bind_group, &[]);
+                                pass.draw(range.clone(), 0..1);
+                            }
                         }
                     }
                     if let Some((buffer, ranges)) = &instances {
@@ -889,7 +912,7 @@ impl Renderer3D {
                     }
                 }
                 (CameraStyle::Wireframe, _) => {
-                    if let Some((_, edges)) = &self.edges {
+                    if let Some(edges) = self.static_edges() {
                         pass.set_pipeline(&self.line_pipeline);
                         pass.set_vertex_buffer(0, edges.buffer.slice(..));
                         pass.draw(0..edges.count, 0..1);
@@ -1020,6 +1043,17 @@ impl Renderer3D {
                 continue;
             }
             stats.models += 1;
+            // A clone drag leaves the original where it is, so draw it there as well.
+            let original = mesh.selected && overlay.transform.is_some() && overlay.cloning;
+            if original && box_visible(planes, mesh.bounds.min.as_vec3(), mesh.bounds.max.as_vec3()) {
+                by_model
+                    .entry(instance.key.as_str())
+                    .or_default()
+                    .push(ModelInstanceData {
+                        transform: instance.transform.as_mat4().to_cols_array(),
+                        tint: [1.0, 1.0, 1.0, 0.0],
+                    });
+            }
             let (_, remap) = mesh.appearance(overlay);
             let bounds = mesh.mapped_bounds(remap.as_ref());
             if !box_visible(planes, bounds.min.as_vec3(), bounds.max.as_vec3()) {
@@ -1152,7 +1186,7 @@ impl Renderer3D {
             return (&self.targets[slot].as_ref().expect("target exists").color_view, false);
         }
         self.signatures[slot] = Some(signature);
-        self.ensure_edges(scene);
+        self.update_edges(scene, overlay);
 
         let local = Rect::from_min_size(Pos2::ZERO, points);
         let mut under = Vec::new();
@@ -1196,8 +1230,7 @@ impl Renderer3D {
             let mut pass = begin_pass(&mut encoder, target, &look);
             pass.set_pipeline(&self.flat_line_pipeline);
             pass.set_bind_group(0, &target.uniform_group, &[]);
-            let static_edges = self.edges.as_ref().map(|(_, mesh)| mesh);
-            for lines in [under.as_ref(), static_edges, over.as_ref()].into_iter().flatten() {
+            for lines in [under.as_ref(), self.static_edges(), over.as_ref()].into_iter().flatten() {
                 pass.set_vertex_buffer(0, lines.buffer.slice(..));
                 pass.draw(0..lines.count, 0..1);
             }
@@ -1448,6 +1481,73 @@ impl Renderer3D {
         });
     }
 
+    /// Keeps [`Self::drag_faces`] matching the scene while a drag hides the selection's
+    /// own copy, and drops it otherwise. Only the chunks holding selected brushes are
+    /// triangulated again, once per drag.
+    fn update_drag_faces(&mut self, scene: &Scene, overlay: &Overlay) {
+        if !overlay.hides_selection() {
+            self.drag_faces = None;
+            return;
+        }
+        let key = (scene.geometry_generation, scene.selection_generation);
+        if self.drag_faces.as_ref().is_some_and(|faces| faces.key == key) {
+            return;
+        }
+        let cells: HashSet<[i32; 3]> = scene
+            .meshes
+            .iter()
+            .filter(|mesh| mesh.selected)
+            .map(|mesh| chunk_cell(&mesh.bounds))
+            .collect();
+        let kept = scene
+            .meshes
+            .iter()
+            .filter(|mesh| !mesh.selected && cells.contains(&chunk_cell(&mesh.bounds)));
+        let rebuilt = self.cell_faces(kept, None, 0.0, true);
+        let mesh = self.upload_cells(&rebuilt);
+        self.drag_faces = Some(DragFaces { key, cells, mesh });
+    }
+
+    /// The opaque map faces to draw, each with the chunks of it to leave out: all of
+    /// [`Self::faces`], or while a drag hides the selection, the chunks holding it swapped
+    /// for copies without it.
+    fn opaque_faces(&self) -> Vec<(&FaceMesh, Option<&HashSet<[i32; 3]>>)> {
+        let Some(faces) = &self.faces else {
+            return Vec::new();
+        };
+        match &self.drag_faces {
+            Some(drag) => vec![(&faces.opaque, Some(&drag.cells)), (&drag.mesh, None)],
+            None => vec![(&faces.opaque, None)],
+        }
+    }
+
+    /// Keeps the edge caches matching the scene: [`Self::edges`] always, and while a drag
+    /// hides the selection's own copy, [`Self::drag_edges`] too.
+    fn update_edges(&mut self, scene: &Scene, overlay: &Overlay) {
+        self.ensure_edges(scene);
+        if !overlay.hides_selection() {
+            self.drag_edges = None;
+            return;
+        }
+        let key = (scene.geometry_generation, scene.selection_generation);
+        if self.drag_edges.as_ref().is_none_or(|(built, _)| *built != key) {
+            let mut vertices = Vec::new();
+            for mesh in scene.meshes.iter().filter(|mesh| !mesh.selected) {
+                push_edges(&mut vertices, &mesh.edges, None, mesh.color);
+            }
+            self.drag_edges = Some((key, self.line_mesh(&vertices)));
+        }
+    }
+
+    /// The map's edges to draw: every edge, or while a drag hides the selection, every
+    /// edge but the selection's, which the drag draws where it is going instead.
+    fn static_edges(&self) -> Option<&LineMesh> {
+        match &self.drag_edges {
+            Some((_, mesh)) => mesh.as_ref(),
+            None => self.edges.as_ref().map(|(_, mesh)| mesh),
+        }
+    }
+
     fn face_mesh<'a>(
         &self,
         meshes: impl Iterator<Item = &'a WireMesh>,
@@ -1531,7 +1631,7 @@ impl Renderer3D {
     fn upload_cells(&self, cells: &HashMap<[i32; 3], CellFaces>) -> FaceMesh {
         let mut all = Vec::new();
         let mut built = Vec::with_capacity(cells.len());
-        for cell in cells.values() {
+        for (at, cell) in cells {
             let mut keys: Vec<&String> = cell.by_texture.keys().collect();
             keys.sort();
             let mut batches = Vec::with_capacity(keys.len());
@@ -1542,6 +1642,7 @@ impl Renderer3D {
                 batches.push((key.clone(), start..all.len() as u32));
             }
             built.push(Chunk {
+                cell: *at,
                 min: cell.min,
                 max: cell.max,
                 batches,

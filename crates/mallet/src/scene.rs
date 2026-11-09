@@ -139,6 +139,9 @@ impl Remap {
 pub struct Overlay {
     /// Where selected meshes are drawn while being moved or resized.
     pub transform: Option<Remap>,
+    /// Whether letting go of the drag will clone the selection rather than move it, so
+    /// the originals stay drawn where they are.
+    pub cloning: bool,
     /// The block tool's box, waiting for Enter.
     pub block: Option<Bounds>,
     /// A selection rectangle being dragged in one 2D view, as two world corners.
@@ -155,6 +158,14 @@ pub struct Overlay {
     pub pivot: Option<DVec3>,
     /// The clipping tool's points, plane and the pieces it would keep.
     pub clip: Option<crate::clipper::ClipOverlay>,
+}
+
+impl Overlay {
+    /// Whether the selection is drawn only where a drag is taking it, leaving nothing
+    /// where it started. A clone drag keeps the originals in view.
+    pub fn hides_selection(&self) -> bool {
+        self.transform.is_some() && !self.cloning
+    }
 }
 
 /// Half-size of the marker the entity tool draws where a new entity will go.
