@@ -1556,8 +1556,8 @@ fn origin_edits(origins: EntityOrigins, map: impl Fn(DVec3) -> DVec3) -> impl It
 /// The size of a material's picture at `scale` world units per texel, or `None` when it
 /// has no texture.
 pub(crate) fn picture_size(material: &mallet_content::Material, scale: f64) -> Option<DVec2> {
-    let texture = material.texture.as_ref()?;
-    Some(DVec2::new(f64::from(texture.width), f64::from(texture.height)) * scale)
+    let [width, height] = material.size?;
+    Some(DVec2::new(f64::from(width), f64::from(height)) * scale)
 }
 
 /// Key edits that carry one entity's overlay through a transform. Entities that are not

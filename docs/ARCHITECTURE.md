@@ -164,7 +164,9 @@ string, which takes half the memory of a table of whole paths and finds a file w
 binary searches.
 
 `Materials` turns a material name into the texture
-Hammer shows: `%tooltexture` first, then `$basetexture`, following `patch` materials. A
+Hammer shows: `%tooltexture` first, then `$basetexture`, following `patch` materials. It
+caches what each material is and how large its texture is, read from the texture file's
+header, but no pixels: the viewports keep theirs on the graphics card. A
 VTF keeps its picture at many sizes, smallest first, and only its header and the sizes no
 bigger than 512 pixels are read from the file (`GameFs::open` reads a file a part at a
 time). DXT pictures go to the graphics card as the file stores them when it can sample

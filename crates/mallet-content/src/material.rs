@@ -70,8 +70,13 @@ const TOOL_KEYS: [&str; 14] = [
 /// What the editor needs to draw a material.
 #[derive(Debug, Clone)]
 pub struct Material {
-    /// The texture, or `None` when the material or its texture cannot be found or decoded.
+    /// The texture's pixels, when they were loaded: [`MaterialLoader::load`] loads them,
+    /// [`MaterialLoader::measure`] and the cache of [`Materials`] do not. `None` too when
+    /// the material or its texture cannot be found or decoded.
     pub texture: Option<Texture>,
+    /// Width and height of the full-size texture, used for texture coordinates; `None`
+    /// when the material or its texture cannot be found.
+    pub size: Option<[u32; 2]>,
     pub alpha: AlphaMode,
     pub surface: Surface,
     /// For `$selfillum` materials, the glow's tint (`$selfillumtint`); the texture's
@@ -87,6 +92,7 @@ impl Material {
     fn missing() -> Self {
         Self {
             texture: None,
+            size: None,
             alpha: AlphaMode::Opaque,
             surface: Surface::Normal,
             self_illum: None,
@@ -96,7 +102,9 @@ impl Material {
     }
 }
 
-/// Loads and caches materials from a game's files.
+/// Loads materials from a game's files, and caches what each one is and how large its
+/// texture is. Pixels are not kept: a map can use a thousand materials, and the viewports
+/// keep their own copies on the graphics card.
 #[derive(Debug)]
 pub struct Materials {
     loader: MaterialLoader,
@@ -237,6 +245,7 @@ impl Properties {
             .is_some_and(|shader| matches!(shader, "unlitgeneric" | "unlittwotexture" | "sky" | "sprite"));
         Material {
             texture: None,
+            size: None,
             alpha: self.alpha_mode(),
             surface: self.surface.unwrap_or_default(),
             self_illum: self
@@ -296,9 +305,16 @@ impl Materials {
     }
 
     /// The texture Hammer shows for a material such as `TOOLS/TOOLSNODRAW`, or `None`
-    /// when the material or its texture cannot be found or decoded. Results are cached.
-    pub fn texture(&mut self, material: &str) -> Option<Texture> {
-        self.materials(&[material]).pop().and_then(|material| material.texture)
+    /// when the material or its texture cannot be found or decoded. It is read from the
+    /// game's files every time.
+    pub fn texture(&self, material: &str) -> Option<Texture> {
+        self.loader.load(material).texture
+    }
+
+    /// Width and height of a material's full-size texture, or `None` when the material
+    /// or its texture cannot be found. Results are cached.
+    pub fn size(&mut self, material: &str) -> Option<[u32; 2]> {
+        self.materials(&[material]).pop().and_then(|material| material.size)
     }
 
     /// The text of a hotspot material's `.rect` file, named by its `%rectanglemap`, or
@@ -313,14 +329,15 @@ impl Materials {
         text
     }
 
-    /// Loads several materials at once, spread over every CPU core, and returns them in
-    /// the same order. Results are cached.
+    /// Looks several materials up at once, spread over every CPU core, and returns them
+    /// in the same order: what each is and its texture's size, without its pixels. Results
+    /// are cached.
     pub fn materials(&mut self, materials: &[&str]) -> Vec<Material> {
         let keys: Vec<String> = materials.iter().map(|material| material_key(material)).collect();
         let mut missing: Vec<&String> = keys.iter().filter(|key| !self.cache.contains_key(*key)).collect();
         missing.sort();
         missing.dedup();
-        let loaded = parallel_map(&missing, |key| self.loader.load(key));
+        let loaded = parallel_map(&missing, |key| self.loader.measure(key));
         for (key, material) in missing.into_iter().zip(loaded) {
             self.cache.insert(key.clone(), material);
         }
@@ -342,8 +359,28 @@ impl MaterialLoader {
         let Some(properties) = self.properties(&key, 0) else {
             return Material::missing();
         };
+        let image = self.image(&properties);
         Material {
-            texture: self.image(&properties).map(Arc::new),
+            size: image.as_ref().map(|image| [image.width, image.height]),
+            texture: image.map(Arc::new),
+            ..properties.material()
+        }
+    }
+
+    /// Looks a material up without loading its texture: what it is, and the texture's
+    /// size from the header of its file.
+    pub fn measure(&self, material: &str) -> Material {
+        let key = material_key(material);
+        let Some(properties) = self.properties(&key, 0) else {
+            return Material::missing();
+        };
+        let size = properties
+            .texture
+            .as_ref()
+            .and_then(|name| self.texture_file(name))
+            .and_then(|file| vtf::size(|start, length| file.read(start, length)).ok());
+        Material {
+            size,
             ..properties.material()
         }
     }
@@ -367,7 +404,11 @@ impl MaterialLoader {
                     vtf::load_mips(|start, length| file.read(start, length), MAX_TEXTURE_SIDE, blocks).ok()
                 })
         };
-        (properties.material(), mips)
+        let material = Material {
+            size: mips.as_ref().map(|mips| [mips.width, mips.height]),
+            ..properties.material()
+        };
+        (material, mips)
     }
 
     /// A material's texture as the viewports show it, decoded.

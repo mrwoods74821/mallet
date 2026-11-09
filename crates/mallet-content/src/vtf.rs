@@ -345,6 +345,13 @@ pub fn decode(data: &[u8], max_side: u32) -> Result<Image, String> {
     )
 }
 
+/// The width and height of a VTF's full-size picture, from its header alone. `read`
+/// gives part of the file, as for [`load`].
+pub fn size(read: impl Fn(u64, u64) -> Option<Vec<u8>>) -> Result<[u32; 2], String> {
+    let header = Header::read(&read)?;
+    Ok([header.width, header.height])
+}
+
 /// Decodes the largest size of a VTF's picture whose sides are at most `max_side` pixels.
 /// `read` gives `length` bytes of the file from `start`, or fewer at its end, so only the
 /// header and that one size are read. A texture stored without a size that small is
