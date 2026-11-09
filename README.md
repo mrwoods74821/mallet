@@ -71,6 +71,8 @@ These follow Hammer++'s default keybindings.
 | File > Recent Maps | The maps opened or saved last, the latest first (20 unless Mallet Options > Files says otherwise) |
 | Ctrl+F4 / Ctrl+Tab / Ctrl+Shift+Tab | Close tab (asks about unsaved changes) / next tab / previous tab |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
+| Ctrl+X / Ctrl+C / Ctrl+V | Cut / copy / paste the selection; Shift+Delete, Ctrl+Insert and Shift+Insert work too. Paste centres the objects under the cursor in a 2D view, snapped to the grid, or in the 2D view used last |
+| Ctrl+Shift+V | Paste Special: several copies, each moved and turned from the one before, renamed or grouped |
 | Shift+S / Shift+B / Shift+E / Shift+A | Selection tool / Block tool / Entity tool / Texture application |
 | Alt+Enter or double-click | Object Properties for the selection: keyvalues, outputs, inputs and flags from the game's FGD |
 | F9 / Shift+F9 | Open the compile window / compile again with the preset used last |
@@ -127,6 +129,20 @@ with their brushes. Texture scale lock, beside it, also stretches them when brus
 scaled; without it they keep their scale and stay pinned to the brush's corner. Mallet
 Options > Editing holds both locks, the rotation snap step, arrow-key nudging and the
 gizmo.
+
+## Copying and pasting
+
+The clipboard belongs to no tab, so objects copied in one map paste into any other, with
+fresh ids. Copying also puts them on the system clipboard as VMF text, which another
+Mallet window can paste. Each paste is one undo step and selects what it pasted.
+
+Edit > Paste Special works as Hammer's: it pastes a number of copies, each moved by the
+offset and turned by the rotation more than the one before it, starting from the cursor or
+from where the objects were copied. Copies turn around their centre or, as in Hammer++,
+around the pivot placed before copying, which makes spiral stairs a single paste. Entity
+names can get a prefix or suffix, or be numbered so no other entity in the map has them;
+outputs between the pasted entities follow the new names. Group each copy puts every copy
+in a group of its own in the saved map.
 
 ## Lighting
 

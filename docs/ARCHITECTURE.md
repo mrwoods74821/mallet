@@ -430,6 +430,7 @@ Tools:
 | `set_entity_key`, `remove_entity_key` | Undoable key edits |
 | `get_selection`, `select`, `clear_selection` | Read or change the selection the window shows |
 | `move_selection`, `clone_selection`, `delete_selection` | Undoable selection edits; moves keep textures locked |
+| `copy_selection`, `cut_selection`, `paste` | Hammer's clipboard, shared by every tab; `paste` takes Paste Special's copies, offset, rotation, naming and grouping options |
 | `resize_selection` | Stretch the selection to a new bounding box, like dragging its handles |
 | `transform_selection` | Scale, rotate and move the selection in one step around its centre, the pivot, the origin or a point |
 | `flip_selection`, `snap_selection_to_grid`, `align_selection` | Hammer's Flip Objects, Snap Selected to Grid and Align Objects |
