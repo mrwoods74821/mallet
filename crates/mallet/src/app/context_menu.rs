@@ -1,10 +1,11 @@
 //! The menu that opens on a right-click in a viewport with the selection tool, like
-//! Hammer's: what can be done to the selection, plus Mesh to Geometry for props.
+//! Hammer's: what can be done to the selection, the clipboard, plus Mesh to Geometry for
+//! props.
 
 use eframe::egui::{self, Response};
 
 use super::{menu_item, MalletApp};
-use crate::editor::{Editor, SelectMode};
+use crate::editor::{Editor, PasteAt, PasteOptions, SelectMode};
 use crate::keymap::Action;
 use crate::prop_brushes::{PropBrushOptions, PropShape};
 use crate::scene::Owner;
@@ -13,6 +14,8 @@ use crate::scene::Owner;
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ContextMenuState {
     pub options: PropBrushOptions,
+    /// Where the menu's Paste puts objects: where the menu was opened.
+    pub paste_at: Option<PasteAt>,
 }
 
 impl MalletApp {
@@ -21,12 +24,15 @@ impl MalletApp {
     /// keeps the selection.
     pub(super) fn selection_context_menu(&mut self, response: &Response, hit: Option<Owner>, editor: &mut Editor) {
         if response.secondary_clicked() {
+            self.context_menu.paste_at = Some(editor.paste_point());
             if let Some(owner) = hit.filter(|owner| !editor.selection.contains(owner)) {
                 editor.select([owner], SelectMode::Replace);
             }
         }
         let mut chosen = None;
         let mut convert = None;
+        let mut paste = false;
+        let can_paste = !editor.clipboard.is_empty();
         let props = editor.selected_props().len();
         let selected = !editor.selection.is_empty();
         let options = &mut self.context_menu.options;
@@ -64,6 +70,19 @@ impl MalletApp {
             });
             ui.separator();
             ui.add_enabled_ui(selected, |ui| {
+                menu_item(ui, keymap, "Cut", Action::Cut, &mut chosen);
+                menu_item(ui, keymap, "Copy", Action::Copy, &mut chosen);
+            });
+            ui.add_enabled_ui(can_paste, |ui| {
+                let button = egui::Button::new("Paste").shortcut_text(keymap.label(Action::Paste));
+                if ui.add(button).on_hover_text("Paste where the menu was opened").clicked() {
+                    paste = true;
+                    ui.close_menu();
+                }
+                menu_item(ui, keymap, "Paste Special...", Action::PasteSpecial, &mut chosen);
+            });
+            ui.separator();
+            ui.add_enabled_ui(selected, |ui| {
                 menu_item(ui, keymap, "Transform...", Action::Transform, &mut chosen);
                 menu_item(ui, keymap, "Snap Selected to Grid", Action::SnapToGrid, &mut chosen);
                 menu_item(ui, keymap, "Delete", Action::DeleteSelection, &mut chosen);
@@ -75,6 +94,12 @@ impl MalletApp {
         if let Some(shape) = convert {
             if let Err(error) = editor.props_to_brushes(shape, self.context_menu.options) {
                 editor.message = format!("Mesh to Geometry: {error}");
+            }
+        }
+        if paste {
+            let at = self.context_menu.paste_at.unwrap_or_else(|| editor.paste_point());
+            if let Err(error) = editor.paste(at, &PasteOptions::default()) {
+                editor.message = error;
             }
         }
         if let Some(action) = chosen {
