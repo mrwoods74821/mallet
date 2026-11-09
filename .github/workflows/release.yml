@@ -1,4 +1,7 @@
-# Releases Mallet. Run it by hand from the Actions tab.
+# Releases Mallet on every push to main. It can also be run by hand from the Actions tab.
+#
+# Pushes made with the workflow's own token never start workflows, so the release commit and tag do not
+# trigger another run.
 #
 # The judge (tools/versioning/judge_version.py) reads every commit since the newest vMAJOR.MINOR.PATCH tag and asks
 # the Copilot CLI for one bump per commit. The largest bump becomes the new SemVer version. The job then commits the
@@ -15,6 +18,9 @@
 name: Release
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       bump:
