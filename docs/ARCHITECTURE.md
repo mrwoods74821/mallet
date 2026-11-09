@@ -439,9 +439,5 @@ make any map change through `Editor::apply_edit` so it stays undoable.
 
 ## Roadmap
 
-1. The Model and VisGroup tabs of Object Properties.
-2. Model skins and bodygroups, and a model browser for prop entities.
-3. Clip, vertex and displacement tools.
-4. Lighting: a bake through VRAD with lightmaps read back, now that the real-time preview
-   is in.
-5. Entity I/O editor, instances, VisGroups and Check Problems.
+[ROADMAP.md](ROADMAP.md) lists the Hammer and Hammer++ features still to come, grouped
+into milestones.
