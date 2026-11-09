@@ -337,6 +337,8 @@ pub struct GizmoDrag {
     pub gizmo: Gizmo,
     /// The selection's bounds when the drag started.
     bounds: Bounds,
+    /// The point moves snap to the grid: a point entity's origin or the bounds' corner.
+    anchor: DVec3,
     start_pointer: Pos2,
     /// Where the press landed on the dragged axis (units from the centre) or plane.
     start_along: f64,
@@ -376,6 +378,7 @@ impl GizmoDrag {
         rect: Rect,
         pointer: Pos2,
         bounds: Bounds,
+        anchor: DVec3,
     ) -> Option<Self> {
         let (origin, direction) = camera.ray(rect, pointer);
         let (start_along, start_point) = match (gizmo.mode, part) {
@@ -393,13 +396,14 @@ impl GizmoDrag {
             part,
             gizmo,
             bounds,
+            anchor,
             start_pointer: pointer,
             start_along,
             start_point,
         })
     }
 
-    /// What the drag does with the mouse at `pointer`. Moves snap the selection's corner
+    /// What the drag does with the mouse at `pointer`. Moves snap the selection's anchor
     /// to the grid, scales snap its size to the grid, and rotations snap to `angle_step`
     /// degrees when it is given.
     pub fn change(
@@ -412,7 +416,7 @@ impl GizmoDrag {
     ) -> Option<Change> {
         let (origin, direction) = camera.ray(rect, pointer);
         let center = self.gizmo.center;
-        let min = self.bounds.min;
+        let min = self.anchor;
         let snap_offset = |delta: DVec3, axes: &[usize]| {
             let mut offset = DVec3::ZERO;
             for &axis in axes {

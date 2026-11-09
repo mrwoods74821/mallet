@@ -275,20 +275,20 @@ impl Editor {
     /// to Grid and Hammer++'s Snap Selected to Grid Individually.
     pub fn snap_selection_to_grid(&mut self, individually: bool) -> Result<(), String> {
         let grid = self.grid;
-        let snap_offset = |bounds: &Bounds| {
+        let snap_offset = |anchor: DVec3| {
             DVec3::new(
-                snap(bounds.min.x, grid) - bounds.min.x,
-                snap(bounds.min.y, grid) - bounds.min.y,
-                snap(bounds.min.z, grid) - bounds.min.z,
+                snap(anchor.x, grid) - anchor.x,
+                snap(anchor.y, grid) - anchor.y,
+                snap(anchor.z, grid) - anchor.z,
             )
         };
         let moves: Vec<(Owner, DVec3)> = if individually {
             self.selection
                 .iter()
-                .map(|owner| (*owner, snap_offset(&self.owner_bounds(*owner))))
+                .map(|owner| (*owner, snap_offset(self.owner_anchor(*owner))))
                 .collect()
         } else {
-            let offset = snap_offset(&self.scene.selection_bounds());
+            let offset = snap_offset(self.scene.selection_anchor());
             self.selection.iter().map(|owner| (*owner, offset)).collect()
         };
         let moved = self.move_owners(&moves)?;
@@ -331,6 +331,17 @@ impl Editor {
     }
 
     /// The bounds of one selected object.
+    /// The point snapping moves one object by: a point entity's origin, or else the
+    /// minimum corner of its bounds.
+    pub fn owner_anchor(&self, owner: Owner) -> DVec3 {
+        self.scene
+            .meshes
+            .iter()
+            .find(|mesh| mesh.owner == Some(owner))
+            .and_then(|mesh| mesh.origin)
+            .unwrap_or_else(|| self.owner_bounds(owner).min)
+    }
+
     pub fn owner_bounds(&self, owner: Owner) -> Bounds {
         let mut bounds = Bounds::EMPTY;
         for mesh in self.scene.meshes.iter().filter(|mesh| mesh.owner == Some(owner)) {

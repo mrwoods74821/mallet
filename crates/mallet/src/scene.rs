@@ -265,6 +265,9 @@ pub struct WireMesh {
     /// such as `editor/light`. Once its texture loads, the sprite replaces the entity's
     /// flat box, the way Hammer shows lights, sounds and cube maps.
     pub sprite: Option<String>,
+    /// The origin of a point entity, which moves snap to the grid instead of the
+    /// corner of its box, as in Hammer.
+    pub origin: Option<DVec3>,
     /// The number of the first of `faces` among all the scene's faces, counting mesh by
     /// mesh, so a renderer can keep data for each face; `None` for meshes made outside
     /// [`Scene::build`].
@@ -394,6 +397,7 @@ impl Scene {
                         helper: !own_model,
                     }),
                     sprite: None,
+                    origin: Some(origin),
                     first_face: None,
                 };
                 scene.bounds.add_bounds(&mesh.bounds);
@@ -417,6 +421,7 @@ impl Scene {
                     selected: false,
                     model: None,
                     sprite: entity_sprite(class),
+                    origin: Some(origin),
                     first_face: None,
                 };
                 scene.bounds.add_bounds(&mesh.bounds);
@@ -451,6 +456,18 @@ impl Scene {
             bounds.add_bounds(&mesh.bounds);
         }
         bounds
+    }
+
+    /// The point that moves of the selection snap to the grid: the origin of the first
+    /// selected point entity when only point entities are selected, as Hammer snaps them
+    /// by their origin, or else the minimum corner of the selection's bounds.
+    pub fn selection_anchor(&self) -> DVec3 {
+        let mut selected = self.meshes.iter().filter(|mesh| mesh.selected).peekable();
+        let first = selected.peek().and_then(|mesh| mesh.origin);
+        match first {
+            Some(origin) if selected.all(|mesh| mesh.origin.is_some()) => origin,
+            _ => self.selection_bounds().min,
+        }
     }
 
     /// Every selectable owner, without duplicates.
@@ -804,6 +821,7 @@ fn brush_mesh(solid: &Solid, color: Color32, owner: Option<Owner>) -> Option<Wir
         selected: false,
         model: None,
         sprite: None,
+        origin: None,
         first_face: None,
     })
 }
@@ -940,6 +958,7 @@ mod tests {
             selected: false,
             model: None,
             sprite: None,
+            origin: None,
             first_face: None,
         }
     }

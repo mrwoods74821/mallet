@@ -76,11 +76,12 @@ const KEY_ACTIONS: [Action; 29] = [
 ];
 
 /// A left-button drag in progress in one 2D view. `start` is the 2D world point where the
-/// button went down; `bounds` is the box being moved or resized as it was at that moment.
+/// button went down; `bounds` is the box being moved or resized as it was at that moment,
+/// and `anchor` the point a move snaps to the grid.
 #[derive(Clone, Copy, Debug)]
 enum Drag {
     /// Moving the selection, or cloning it when Shift is held at release.
-    Move { view: usize, start: DVec2, bounds: Bounds },
+    Move { view: usize, start: DVec2, anchor: DVec3 },
     /// Resizing the selection with one of its handles.
     Resize {
         view: usize,
@@ -832,7 +833,8 @@ impl MalletApp {
                 .and_then(|origin| gizmo.hit(camera, rect, origin).map(|part| (part, origin)));
             if let Some((part, origin)) = pressed {
                 let bounds = editor.scene.selection_bounds();
-                self.gizmo_drag = GizmoDrag::begin(slot, gizmo, part, camera, rect, origin, bounds);
+                let anchor = editor.scene.selection_anchor();
+                self.gizmo_drag = GizmoDrag::begin(slot, gizmo, part, camera, rect, origin, bounds, anchor);
             }
         }
         let Some(drag) = self.gizmo_drag.filter(|drag| drag.slot == slot) else {
@@ -1051,10 +1053,10 @@ impl MalletApp {
                 bounds,
                 handle,
             },
-            (Tool::Select, Some(bounds), None, true) => Drag::Move {
+            (Tool::Select, Some(_), None, true) => Drag::Move {
                 view: index,
                 start,
-                bounds,
+                anchor: editor.scene.selection_anchor(),
             },
             (Tool::Select, ..) => Drag::Marquee { view: index, start },
             (Tool::Block, Some(bounds), Some(handle), _) => Drag::ResizeBlock {
@@ -1183,8 +1185,8 @@ impl MalletApp {
         if let Some(position) = pointer.position {
             let world = view.to_world(rect, position);
             match drag {
-                Drag::Move { start, bounds, .. } => {
-                    let offset = snapped_offset(view.axis, &bounds, world - start, grid);
+                Drag::Move { start, anchor, .. } => {
+                    let offset = snapped_offset(view.axis, anchor, world - start, grid);
                     editor.overlay.transform = Some(Remap::translate(offset));
                 }
                 Drag::Resize {
@@ -1227,7 +1229,7 @@ impl MalletApp {
                     editor.overlay.block = editor.block_from_drag(view.axis, start, snap(world, grid));
                 }
                 Drag::MoveBlock { start, bounds, .. } => {
-                    let offset = snapped_offset(view.axis, &bounds, world - start, grid);
+                    let offset = snapped_offset(view.axis, bounds.min, world - start, grid);
                     editor.overlay.block = Some(Remap::translate(offset).map_bounds(&bounds));
                 }
                 Drag::ResizeBlock {
@@ -1299,10 +1301,10 @@ fn finish_drag(drag: Drag, editor: &mut Editor, modifiers: Modifiers) -> Result<
     }
 }
 
-/// The world offset that moves a box by a dragged distance so its minimum corner lands on
-/// the grid, the way Hammer snaps moves.
-fn snapped_offset(axis: Axis2D, bounds: &Bounds, dragged: DVec2, grid: f64) -> DVec3 {
-    let corner = axis.project(bounds.min);
+/// The world offset that moves `anchor` by a dragged distance so it lands on the grid, the
+/// way Hammer snaps moves: brushes by their minimum corner, point entities by their origin.
+fn snapped_offset(axis: Axis2D, anchor: DVec3, dragged: DVec2, grid: f64) -> DVec3 {
+    let corner = axis.project(anchor);
     axis.lift(snap(corner + dragged, grid) - corner)
 }
 
