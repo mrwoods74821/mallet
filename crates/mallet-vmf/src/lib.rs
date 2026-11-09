@@ -6,6 +6,7 @@
 pub mod build;
 pub mod edit;
 pub mod geometry;
+pub mod hull;
 pub mod light;
 pub mod lightmap;
 mod model;
