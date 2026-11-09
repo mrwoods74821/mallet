@@ -38,7 +38,9 @@ NON_APP_PREFIXES = (".github/", ".claude/", "docs/", "tools/versioning/")
 NON_APP_FILES = ("AGENTS.md", "CLAUDE.md", "README.md", ".gitignore", ".gitattributes", "rustfmt.toml")
 COPILOT_COMMAND = shlex.split(os.environ.get("COPILOT_COMMAND", "copilot"))
 DEFAULT_MODEL = "auto"
-PROMPT_BUDGET = 90000
+# Copilot receives the prompt as one command-line argument, and Windows caps a command line at 32,767 characters.
+# The instructions take about 4,000 more, so keep the commit text of one prompt well under the cap.
+PROMPT_BUDGET = 20000
 BODY_LIMIT = 2000
 DIFF_LIMIT = 6000
 STAT_LIMIT = 1500
