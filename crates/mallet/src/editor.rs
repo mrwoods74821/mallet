@@ -791,7 +791,7 @@ impl Editor {
             }
         }
         if self.selection != before {
-            self.overlay.handle_mode = crate::transform::HandleMode::Scale;
+            self.overlay.handle_mode = crate::transform::HandleMode::for_gizmo(self.config.transform.gizmo_mode);
             self.overlay.pivot = None;
             self.refresh_clip_preview();
         }
@@ -1170,6 +1170,16 @@ impl Editor {
     /// Puts a map at the top of File > Recent Maps and saves the list.
     pub fn remember_map(&mut self, path: &Path) {
         self.config.remember_map(path);
+        self.save_config();
+    }
+
+    /// Switches the 3D gizmo to its next mode and the 2D views' handles to match, then
+    /// saves the choice.
+    pub fn cycle_gizmo_mode(&mut self) {
+        let mode = self.config.transform.gizmo_mode.next();
+        self.config.transform.gizmo_mode = mode;
+        self.overlay.handle_mode = crate::transform::HandleMode::for_gizmo(mode);
+        self.message = format!("Gizmo: {}", mode.label());
         self.save_config();
     }
 

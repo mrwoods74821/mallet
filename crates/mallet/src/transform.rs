@@ -46,6 +46,16 @@ impl HandleMode {
             Self::Skew => "Skew",
         }
     }
+
+    /// The 2D handles that match a 3D gizmo mode, so both kinds of view offer the same
+    /// transform. The 2D views move a selection by dragging its body, so a move gizmo
+    /// pairs with the scale handles.
+    pub fn for_gizmo(mode: GizmoMode) -> Self {
+        match mode {
+            GizmoMode::Rotate => Self::Rotate,
+            GizmoMode::Move | GizmoMode::Scale => Self::Scale,
+        }
+    }
 }
 
 /// What the 3D gizmo does when one of its parts is dragged.

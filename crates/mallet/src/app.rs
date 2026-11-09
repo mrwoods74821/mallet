@@ -980,9 +980,7 @@ impl MalletApp {
         }
         let Some(drag) = self.gizmo_drag.filter(|drag| drag.slot == slot) else {
             if response.clicked_by(PointerButton::Primary) && hovered == Some(GizmoPart::Center) {
-                editor.config.transform.gizmo_mode = editor.config.transform.gizmo_mode.next();
-                editor.message = format!("Gizmo: {}", editor.config.transform.gizmo_mode.label());
-                editor.save_config();
+                editor.cycle_gizmo_mode();
             }
             if hovered.is_some() {
                 response.ctx.set_cursor_icon(egui::CursorIcon::Grab);
@@ -2173,11 +2171,7 @@ fn run(action: Action, editor: &mut Editor) {
             editor.message = format!("3D gizmo {}", on_off(editor.config.transform.gizmo));
             editor.save_config();
         }
-        Action::CycleGizmoMode => {
-            editor.config.transform.gizmo_mode = editor.config.transform.gizmo_mode.next();
-            editor.message = format!("Gizmo: {}", editor.config.transform.gizmo_mode.label());
-            editor.save_config();
-        }
+        Action::CycleGizmoMode => editor.cycle_gizmo_mode(),
         _ => {}
     }
 }
