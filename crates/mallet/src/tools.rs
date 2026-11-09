@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use glam::{DVec2, DVec3};
 use mallet_content::{ClassKind, EntityClass};
+use mallet_vmf::clip::Keep;
 use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
 use mallet_vmf::light::{Falloff, CATALOGUE};
@@ -251,6 +252,29 @@ pub fn definitions() -> Value {
                 "material": { "type": "string", "description": "Material for every face; default is the editor's current material." }
             }),
             &["min", "max"],
+        ),
+        tool(
+            "clip_selection",
+            "Cut the selected brushes, and the brushes of selected entities, along the plane through \
+             three points, like the Clipping tool. The points are wound like a VMF side's plane: the \
+             front is the side (a - b) x (c - b) points to. Brushes the plane misses are left alone and \
+             displacements are skipped. The new faces get the editor's current material. Overlays on \
+             cut faces follow them. Undoable as one step. Returns how many brushes were cut.",
+            json!({
+                "points": {
+                    "type": "array",
+                    "items": vec3,
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "description": "Three points on the clip plane."
+                },
+                "keep": {
+                    "type": "string",
+                    "enum": ["both", "front", "back"],
+                    "description": "Which halves survive; default both, as two brushes."
+                }
+            }),
+            &["points"],
         ),
         tool(
             "create_entity",
@@ -1181,6 +1205,29 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
                 "Deleted {count} objects. Undo with the undo tool or Ctrl+Z."
             )))
         }
+        "clip_selection" => {
+            let points = args
+                .get("points")
+                .and_then(Value::as_array)
+                .filter(|points| points.len() == 3)
+                .ok_or("\"points\" must be three [x, y, z] points")?
+                .iter()
+                .map(|point| {
+                    let numbers: Option<Vec<f64>> = point.as_array()?.iter().map(Value::as_f64).collect();
+                    let [x, y, z] = numbers?.try_into().ok()?;
+                    Some(DVec3::new(x, y, z))
+                })
+                .collect::<Option<Vec<DVec3>>>()
+                .ok_or("each point must be [x, y, z]")?;
+            let keep = match optional_string(args, "keep")?.unwrap_or("both") {
+                "both" => Keep::Both,
+                "front" => Keep::Front,
+                "back" => Keep::Back,
+                other => return Err(format!("\"keep\" must be both, front or back, not \"{other}\"")),
+            };
+            let cut = editor.clip_selection([points[0], points[1], points[2]], keep)?;
+            Ok(ToolResult::json(&json!({ "clipped": cut, "message": editor.message })))
+        }
         "create_block" => {
             let min = required_vec3(args, "min")?;
             let max = required_vec3(args, "max")?;
@@ -1345,6 +1392,15 @@ fn status_json(editor: &Editor) -> Value {
             Tool::Entity => "entity",
             Tool::Texture => "texture",
             Tool::Clip => "clip",
+        },
+        "clip": {
+            "points": editor.clipper.points.iter().map(|point| point.to_array()).collect::<Vec<_>>(),
+            "keep": match editor.clipper.keep {
+                Keep::Both => "both",
+                Keep::Front => "front",
+                Keep::Back => "back",
+            },
+            "three_point": editor.clipper.three_point,
         },
         "entity_class": editor.entity_class,
         "fgd": editor.game_data.as_deref().map(|data| json!({
