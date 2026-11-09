@@ -40,6 +40,8 @@ pub struct Config {
     pub editing: EditingOptions,
     pub files: FileOptions,
     pub texture_browser: TextureBrowserOptions,
+    /// What the texture browser shows, as it was last left.
+    pub texture_browser_view: TextureBrowserView,
     pub interface: InterfaceOptions,
     pub agents: AgentOptions,
     pub transform: TransformOptions,
@@ -364,6 +366,55 @@ impl TextureBrowserOptions {
     /// The cache size, kept between 200 and 50000 thumbnails.
     pub fn cache_size(&self) -> usize {
         self.cache.clamp(200, 50_000)
+    }
+}
+
+/// The texture browser's filters and layout, kept between runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextureBrowserView {
+    /// How many cards fit across the grid.
+    pub per_row: usize,
+    /// Show only materials the map uses.
+    pub used_only: bool,
+    /// Hide model, particle, sprite and interface materials.
+    pub brush_only: bool,
+    /// Text the search box held.
+    pub filter: String,
+    /// Earlier searches, the latest first.
+    pub filter_history: Vec<String>,
+    /// `%keywords` every shown material must have.
+    pub keywords: String,
+    /// The top-level folder the list is narrowed to, if any.
+    pub folder: Option<String>,
+    /// Folders and archives whose materials are hidden, by path.
+    pub hidden_sources: Vec<PathBuf>,
+    pub show_opaque: bool,
+    pub show_translucent: bool,
+    pub show_self_illum: bool,
+    pub show_envmap: bool,
+    pub show_errors: bool,
+    pub show_alpha: bool,
+}
+
+impl Default for TextureBrowserView {
+    fn default() -> Self {
+        Self {
+            per_row: 7,
+            used_only: false,
+            brush_only: true,
+            filter: String::new(),
+            filter_history: Vec::new(),
+            keywords: String::new(),
+            folder: None,
+            hidden_sources: Vec::new(),
+            show_opaque: true,
+            show_translucent: true,
+            show_self_illum: true,
+            show_envmap: true,
+            show_errors: true,
+            show_alpha: false,
+        }
     }
 }
 

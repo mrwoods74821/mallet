@@ -16,7 +16,7 @@ use mallet_content::vtf::Image;
 use mallet_content::{parallel_map, MaterialInfo, MaterialLoader, Source, SourceKind};
 
 use super::MalletApp;
-use crate::config::TextureBrowserOptions;
+use crate::config::{TextureBrowserOptions, TextureBrowserView};
 use crate::editor::Editor;
 
 const MUTED: Color32 = Color32::from_gray(140);
@@ -88,29 +88,19 @@ struct Listing {
 /// What the texture browser remembers between frames.
 pub(super) struct TextureBrowserState {
     pub(super) pick: Pick,
-    filter: String,
-    filter_history: Vec<String>,
-    keywords: String,
-    used_only: bool,
-    brush_only: bool,
-    /// How many cards fit across the grid; their size follows from the window width.
-    per_row: usize,
+    /// The filters and layout, saved to the settings when they change.
+    view: TextureBrowserView,
+    /// Whether `view` has been read from the settings yet.
+    view_loaded: bool,
     listing: Option<Listing>,
     list_receiver: Option<(PathBuf, Receiver<Listing>)>,
     hidden_sources: HashSet<usize>,
-    folder: Option<String>,
     loaders: Option<Loaders>,
     thumbnails: HashMap<String, Thumbnail>,
     info: HashMap<String, MaterialInfo>,
     index_receiver: Option<Receiver<Vec<(String, MaterialInfo)>>>,
     /// The game's loader, for describing materials once they are listed.
     index_loader: Option<MaterialLoader>,
-    show_opaque: bool,
-    show_translucent: bool,
-    show_self_illum: bool,
-    show_envmap: bool,
-    show_errors: bool,
-    show_alpha: bool,
     /// The material clicked last, shown in the bar at the bottom.
     selected: Option<String>,
     /// Materials the map uses, cached per geometry generation.
@@ -122,27 +112,16 @@ impl Default for TextureBrowserState {
     fn default() -> Self {
         Self {
             pick: Pick::Current,
-            filter: String::new(),
-            filter_history: Vec::new(),
-            keywords: String::new(),
-            used_only: false,
-            brush_only: true,
-            per_row: 7,
+            view: TextureBrowserView::default(),
+            view_loaded: false,
             listing: None,
             list_receiver: None,
             hidden_sources: HashSet::new(),
-            folder: None,
             loaders: None,
             thumbnails: HashMap::new(),
             info: HashMap::new(),
             index_receiver: None,
             index_loader: None,
-            show_opaque: true,
-            show_translucent: true,
-            show_self_illum: true,
-            show_envmap: true,
-            show_errors: true,
-            show_alpha: false,
             selected: None,
             used: None,
             focus_search: true,
@@ -166,10 +145,18 @@ impl MalletApp {
     }
 
     pub(super) fn texture_browser_window(&mut self, ctx: &egui::Context, editor: &mut Editor) {
+        if !self.texture_browser.view_loaded {
+            self.texture_browser.view = editor.config.texture_browser_view.clone();
+            self.texture_browser.view_loaded = true;
+        }
         if let Some(filter) = editor.texture_browser_filter.take() {
-            self.texture_browser.filter = filter;
+            self.texture_browser.view.filter = filter;
         }
         if !editor.texture_browser_open {
+            if self.texture_browser.view_loaded && self.texture_browser.view != editor.config.texture_browser_view {
+                editor.config.texture_browser_view = self.texture_browser.view.clone();
+                editor.save_config();
+            }
             return;
         }
         let Some(loader) = editor.materials.as_ref().map(|materials| materials.loader()) else {
@@ -226,6 +213,7 @@ impl MalletApp {
                 });
             });
         state.trim(options.cache_size());
+        state.save_view(ctx, editor);
         for command in commands {
             match command {
                 Command::Choose(material, confirm) => {
@@ -292,8 +280,6 @@ impl TextureBrowserState {
             self.list_receiver = Some((game.clone(), receiver));
             self.thumbnails.clear();
             self.info.clear();
-            self.hidden_sources.clear();
-            self.folder = None;
         }
         let (threads, side) = (options.thread_count(), options.thumbnail_side());
         let stale = |loaders: &Loaders| &loaders.game != game || loaders.threads != threads || loaders.side != side;
@@ -338,6 +324,7 @@ impl TextureBrowserState {
             match receiver.try_recv() {
                 Ok(listing) => {
                     self.start_index(&listing);
+                    self.restore_view(&listing);
                     self.listing = Some(listing);
                     self.list_receiver = None;
                 }
@@ -507,11 +494,11 @@ impl TextureBrowserState {
         }
         ui.add_space(8.0);
         ui.label(RichText::new("Folders").strong());
-        if ui.selectable_label(self.folder.is_none(), "All folders").clicked() {
-            self.folder = None;
+        if ui.selectable_label(self.view.folder.is_none(), "All folders").clicked() {
+            self.view.folder = None;
         }
         for (folder, count) in &listing.per_folder {
-            let hidden = self.brush_only
+            let hidden = self.view.brush_only
                 && NON_BRUSH_FOLDERS
                     .iter()
                     .any(|skip| skip.trim_end_matches('/') == folder);
@@ -519,9 +506,9 @@ impl TextureBrowserState {
                 continue;
             }
             ui.horizontal(|ui| {
-                let selected = self.folder.as_deref() == Some(folder.as_str());
+                let selected = self.view.folder.as_deref() == Some(folder.as_str());
                 if ui.selectable_label(selected, folder).clicked() {
-                    self.folder = if selected { None } else { Some(folder.clone()) };
+                    self.view.folder = if selected { None } else { Some(folder.clone()) };
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(thousands(*count)).small().color(MUTED));
@@ -537,9 +524,19 @@ impl TextureBrowserState {
         let Some(listing) = &self.listing else {
             return Vec::new();
         };
-        let terms: Vec<String> = self.filter.split_whitespace().map(str::to_ascii_lowercase).collect();
-        let keywords: Vec<String> = self.keywords.split_whitespace().map(str::to_ascii_lowercase).collect();
-        let folder = self.folder.as_ref().map(|folder| format!("{folder}/"));
+        let terms: Vec<String> = self
+            .view
+            .filter
+            .split_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect();
+        let keywords: Vec<String> = self
+            .view
+            .keywords
+            .split_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect();
+        let folder = self.view.folder.as_ref().map(|folder| format!("{folder}/"));
         listing
             .materials
             .iter()
@@ -548,24 +545,24 @@ impl TextureBrowserState {
             .filter(|(_, _, sources)| sources.iter().any(|source| !self.hidden_sources.contains(source)))
             .map(|(index, name, _)| (index, name))
             .filter(|(_, name)| folder.as_ref().is_none_or(|folder| name.starts_with(folder.as_str())))
-            .filter(|(_, name)| !self.brush_only || !NON_BRUSH_FOLDERS.iter().any(|skip| name.starts_with(skip)))
-            .filter(|(_, name)| !self.used_only || used.contains(name.as_str()))
+            .filter(|(_, name)| !self.view.brush_only || !NON_BRUSH_FOLDERS.iter().any(|skip| name.starts_with(skip)))
+            .filter(|(_, name)| !self.view.used_only || used.contains(name.as_str()))
             .filter(|(_, name)| terms.iter().all(|term| name.contains(term.as_str())))
             .filter(|(_, name)| match self.info.get(name.as_str()) {
                 None => keywords.is_empty(),
                 Some(info) => {
                     let kind = if info.translucent {
-                        self.show_translucent
+                        self.view.show_translucent
                     } else {
-                        self.show_opaque
+                        self.view.show_opaque
                     };
                     let keywords_match = keywords
                         .iter()
                         .all(|word| info.keywords.to_ascii_lowercase().contains(word.as_str()));
                     kind && keywords_match
-                        && (self.show_self_illum || !info.self_illum)
-                        && (self.show_envmap || !info.envmap)
-                        && (self.show_errors || !info.error)
+                        && (self.view.show_self_illum || !info.self_illum)
+                        && (self.view.show_envmap || !info.envmap)
+                        && (self.view.show_errors || !info.error)
                 }
             })
             .map(|(index, _)| index)
@@ -597,7 +594,7 @@ impl TextureBrowserState {
             return;
         }
         let gap = 6.0;
-        let columns = self.per_row.max(1);
+        let columns = self.view.per_row.max(1);
         let card = ((width - 16.0 - gap * (columns as f32 - 1.0)) / columns as f32).max(32.0);
         let row_height = card + 22.0 + gap;
         let rows = names.len().div_ceil(columns);
@@ -691,7 +688,7 @@ impl TextureBrowserState {
         let image_rect = egui::Rect::from_min_size(rect.min, egui::Vec2::splat(size));
         let painter = ui.painter();
         painter.rect_filled(rect, 4, Color32::from_gray(if response.hovered() { 44 } else { 30 }));
-        if self.show_alpha {
+        if self.view.show_alpha {
             checkerboard(painter, image_rect.shrink(3.0));
         }
         match self.thumbnails.get(name) {
@@ -781,12 +778,12 @@ impl TextureBrowserState {
             .num_columns(4)
             .spacing([14.0, 6.0])
             .show(ui, |ui| {
-                ui.add(egui::Slider::new(&mut self.per_row, 2..=14).text("per row"))
+                ui.add(egui::Slider::new(&mut self.view.per_row, 2..=14).text("per row"))
                     .on_hover_text("How many textures fit across; they grow and shrink with the window");
                 ui.horizontal(|ui| {
                     ui.label("Filter");
                     let search = ui.add(
-                        egui::TextEdit::singleline(&mut self.filter)
+                        egui::TextEdit::singleline(&mut self.view.filter)
                             .hint_text("such as brick wall")
                             .desired_width(170.0),
                     );
@@ -794,17 +791,17 @@ impl TextureBrowserState {
                         search.request_focus();
                         self.focus_search = false;
                     }
-                    if search.lost_focus() && !self.filter.trim().is_empty() {
-                        let filter = self.filter.trim().to_owned();
-                        self.filter_history.retain(|old| old != &filter);
-                        self.filter_history.insert(0, filter);
-                        self.filter_history.truncate(MAX_FILTER_HISTORY);
+                    if search.lost_focus() && !self.view.filter.trim().is_empty() {
+                        let filter = self.view.filter.trim().to_owned();
+                        self.view.filter_history.retain(|old| old != &filter);
+                        self.view.filter_history.insert(0, filter);
+                        self.view.filter_history.truncate(MAX_FILTER_HISTORY);
                     }
-                    ui.add_enabled_ui(!self.filter_history.is_empty(), |ui| {
+                    ui.add_enabled_ui(!self.view.filter_history.is_empty(), |ui| {
                         ui.menu_button(icon::CARET_DOWN, |ui| {
-                            for old in self.filter_history.clone() {
+                            for old in self.view.filter_history.clone() {
                                 if ui.button(&old).clicked() {
-                                    self.filter = old;
+                                    self.view.filter = old;
                                     ui.close_menu();
                                 }
                             }
@@ -823,22 +820,22 @@ impl TextureBrowserState {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.toggle_value(&mut self.show_opaque, "Opaque");
-                    ui.toggle_value(&mut self.show_self_illum, "Selfillum");
-                    ui.toggle_value(&mut self.show_errors, "Show errors")
+                    ui.toggle_value(&mut self.view.show_opaque, "Opaque");
+                    ui.toggle_value(&mut self.view.show_self_illum, "Selfillum");
+                    ui.toggle_value(&mut self.view.show_errors, "Show errors")
                         .on_hover_text("Materials whose texture cannot be found");
                 });
                 ui.end_row();
 
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.used_only, "Only used textures");
-                    ui.checkbox(&mut self.brush_only, "Brush materials")
+                    ui.checkbox(&mut self.view.used_only, "Only used textures");
+                    ui.checkbox(&mut self.view.brush_only, "Brush materials")
                         .on_hover_text("Hide model, particle, sprite and interface materials");
                 });
                 ui.horizontal(|ui| {
                     ui.label("Keywords");
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.keywords)
+                        egui::TextEdit::singleline(&mut self.view.keywords)
                             .hint_text("from %keywords")
                             .desired_width(150.0),
                     );
@@ -873,10 +870,10 @@ impl TextureBrowserState {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.toggle_value(&mut self.show_translucent, "Translucent");
-                    ui.toggle_value(&mut self.show_envmap, "EnvMask")
+                    ui.toggle_value(&mut self.view.show_translucent, "Translucent");
+                    ui.toggle_value(&mut self.view.show_envmap, "EnvMask")
                         .on_hover_text("Reflective materials, with an $envmap");
-                    ui.toggle_value(&mut self.show_alpha, "Show alpha")
+                    ui.toggle_value(&mut self.view.show_alpha, "Show alpha")
                         .on_hover_text("Draw a checkerboard behind textures so transparency shows");
                 });
                 ui.end_row();
@@ -891,6 +888,46 @@ impl TextureBrowserState {
             (None, _) => String::new(),
         };
         ui.label(RichText::new(status).small().color(MUTED));
+    }
+
+    /// Hides the sources the settings hide and drops a saved folder the game lacks, once
+    /// a listing arrives.
+    fn restore_view(&mut self, listing: &Listing) {
+        self.hidden_sources = listing
+            .sources
+            .iter()
+            .enumerate()
+            .filter(|(_, source)| self.view.hidden_sources.contains(&source.path))
+            .map(|(index, _)| index)
+            .collect();
+        if self
+            .view
+            .folder
+            .as_ref()
+            .is_some_and(|folder| !listing.per_folder.contains_key(folder))
+        {
+            self.view.folder = None;
+        }
+    }
+
+    /// Writes the filters and layout to the settings when they have changed, waiting
+    /// while a text box is being typed in so every key press does not save.
+    fn save_view(&mut self, ctx: &egui::Context, editor: &mut Editor) {
+        if let Some(listing) = &self.listing {
+            let mut hidden: Vec<PathBuf> = self
+                .hidden_sources
+                .iter()
+                .filter_map(|index| listing.sources.get(*index))
+                .map(|source| source.path.clone())
+                .collect();
+            hidden.sort();
+            self.view.hidden_sources = hidden;
+        }
+        if self.view == editor.config.texture_browser_view || ctx.wants_keyboard_input() {
+            return;
+        }
+        editor.config.texture_browser_view = self.view.clone();
+        editor.save_config();
     }
 
     /// Asks for a thumbnail if it is not loaded or loading.
