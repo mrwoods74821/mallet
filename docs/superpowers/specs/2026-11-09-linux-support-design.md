@@ -1,7 +1,12 @@
 # Mallet Linux support — design (short)
 
 Date: 2026-11-09
-Status: built and verified on this machine (commit on branch linux-support)
+Status: done, marked off 2026-11-09. Built and verified on this machine
+(branch linux-support, commits 0f52194, 2ce8c60, cd1562b, b57bccb): builds,
+tests 66/66 green, runs on Wayland, MCP answers on :7414, Windows paths
+untouched. Compile-to-BSP proven natively through the Tools++ Linux
+compilers (vbsp++/vvis++/vrad++ on PATH, auto-discovered): a map built in
+Mallet over MCP compiled to a valid VBSP v20, errors 0, no leak.
 
 ## Intent
 
