@@ -37,13 +37,15 @@ use crate::view2d::{Axis2D, Handle, View2D};
 use crate::view3d::Camera3D;
 use crate::{mcp, tools};
 
+/// How close, in pixels, a press has to be to a clip point to drag it.
+const CLIP_POINT_REACH_PIXELS: f32 = 6.0;
 /// How close, in pixels, a press has to be to the pivot to drag it.
 const PIVOT_REACH_PIXELS: f32 = 7.0;
 /// How long `send_input` waits for the window to handle its input.
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 29] = [
+const KEY_ACTIONS: [Action; 31] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -58,6 +60,8 @@ const KEY_ACTIONS: [Action; 29] = [
     Action::BlockTool,
     Action::EntityTool,
     Action::TextureTool,
+    Action::ClipTool,
+    Action::ClipThreePoint,
     Action::Properties,
     Action::Compile,
     Action::CompileAgain,
@@ -113,6 +117,8 @@ enum Drag {
         bounds: Bounds,
         handle: Handle,
     },
+    /// Placing or moving one of the clipping tool's points.
+    ClipPoint { view: usize, point: usize },
 }
 
 impl Drag {
@@ -126,7 +132,8 @@ impl Drag {
             | Self::Marquee { view, .. }
             | Self::NewBlock { view, .. }
             | Self::MoveBlock { view, .. }
-            | Self::ResizeBlock { view, .. } => view,
+            | Self::ResizeBlock { view, .. }
+            | Self::ClipPoint { view, .. } => view,
         }
     }
 }
@@ -416,6 +423,7 @@ impl MalletApp {
                         Action::TextureTool,
                         &mut chosen,
                     );
+                    menu_item(ui, &self.keymap, "Clipping Tool", Action::ClipTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Create Block", Action::CreateBlock, &mut chosen);
                     ui.separator();
                     menu_item(ui, &self.keymap, "Transform...", Action::Transform, &mut chosen);
@@ -707,7 +715,13 @@ impl MalletApp {
                     let hit = editor.scene.pick_face(origin, direction, &editor.models);
                     editor.texture_click(hit, pointer.modifiers);
                 }
-                Tool::Block => {}
+                Tool::Clip if editor.clipper.three_point => match editor.scene.surface_hit(origin, direction) {
+                    Some(point) => {
+                        editor.add_clip_point_3d(point);
+                    }
+                    None => editor.message = "Click on a brush face to place a clip point".to_owned(),
+                },
+                Tool::Block | Tool::Clip => {}
             }
         }
         if editor.tool == Tool::Select && !looking {
@@ -1070,7 +1084,7 @@ impl MalletApp {
                 start,
                 bounds,
             },
-            (Tool::Entity | Tool::Texture, ..) => Drag::Marquee { view: index, start },
+            (Tool::Entity | Tool::Texture | Tool::Clip, ..) => Drag::Marquee { view: index, start },
             (Tool::Block, ..) => Drag::NewBlock {
                 view: index,
                 start: snap(start, editor.grid),
@@ -1119,6 +1133,51 @@ impl MalletApp {
         box_contains(view.axis, &bounds, view.to_world(rect, pointer)).then_some(egui::CursorIcon::Move)
     }
 
+    /// Runs the clipping tool in one 2D view: a drag from empty space draws a new clip
+    /// line (or, with three-point clipping, places a point), a drag from a point moves
+    /// it, and a click places a three-point clip point.
+    fn use_clip_2d(
+        &mut self,
+        index: usize,
+        view: &View2D,
+        rect: Rect,
+        response: &Response,
+        editor: &mut Editor,
+        pointer: &PointerState,
+    ) {
+        let reach = f64::from(CLIP_POINT_REACH_PIXELS) / view.scale;
+        let begin = |editor: &mut Editor, at: Pos2| {
+            let world = view.to_world(rect, at);
+            match editor.clip_point_at(view.axis, world, reach) {
+                Some(point) => point,
+                None if editor.clipper.three_point => editor.add_clip_point_2d(view.axis, world),
+                None => editor.start_clip_line(view.axis, world),
+            }
+        };
+        if response.drag_started_by(PointerButton::Primary) {
+            if let Some(origin) = pointer.press_origin {
+                let point = begin(editor, origin);
+                self.drag = Some(Drag::ClipPoint { view: index, point });
+            }
+        }
+        if let Some(Drag::ClipPoint { view: dragged, point }) = self.drag {
+            if dragged == index {
+                if let Some(position) = pointer.position {
+                    editor.move_clip_point(point, view.axis, view.to_world(rect, position));
+                }
+                if response.drag_stopped() {
+                    self.drag = None;
+                }
+            }
+            return;
+        }
+        if response.clicked_by(PointerButton::Primary) && editor.clipper.three_point {
+            if let Some(position) = pointer.position {
+                begin(editor, position);
+            }
+        }
+    }
+
     /// Runs the active tool for a left-button click or drag in one 2D view.
     fn use_tool_2d(
         &mut self,
@@ -1141,6 +1200,10 @@ impl MalletApp {
                     editor.texture_click_2d(hit, pointer.modifiers);
                 }
             }
+            return;
+        }
+        if editor.tool == Tool::Clip {
+            self.use_clip_2d(index, view, rect, response, editor, pointer);
             return;
         }
         if editor.tool == Tool::Entity {
@@ -1225,6 +1288,7 @@ impl MalletApp {
                     editor.set_pivot(Some(pivot));
                 }
                 Drag::Marquee { start, .. } => editor.overlay.marquee = Some((view.axis, start, world)),
+                Drag::ClipPoint { point, .. } => editor.move_clip_point(point, view.axis, world),
                 Drag::NewBlock { start, .. } => {
                     editor.overlay.block = editor.block_from_drag(view.axis, start, snap(world, grid));
                 }
@@ -1284,7 +1348,7 @@ fn finish_drag(drag: Drag, editor: &mut Editor, modifiers: Modifiers) -> Result<
             }
             _ => Ok(()),
         },
-        Drag::Pivot { .. } => Ok(()),
+        Drag::Pivot { .. } | Drag::ClipPoint { .. } => Ok(()),
         Drag::Marquee { .. } => {
             if let Some((axis, a, b)) = editor.overlay.marquee.take() {
                 let owners = editor.scene.owners_inside(axis, a, b);
@@ -1887,9 +1951,15 @@ fn run(action: Action, editor: &mut Editor) {
         Action::BlockTool => editor.set_tool(Tool::Block),
         Action::EntityTool => editor.set_tool(Tool::Entity),
         Action::TextureTool => editor.set_tool(Tool::Texture),
+        Action::ClipTool if editor.tool == Tool::Clip => editor.cycle_clip_keep(),
+        Action::ClipTool => editor.set_tool(Tool::Clip),
+        Action::ClipThreePoint if editor.tool == Tool::Clip => editor.toggle_three_point_clip(),
+        Action::ClipThreePoint => {}
         Action::SelectAll => editor.select_all(),
         Action::ClearSelection => {
-            let pending = editor.overlay.block.take().is_some() | editor.overlay.entity.take().is_some();
+            let pending = editor.overlay.block.take().is_some()
+                | editor.overlay.entity.take().is_some()
+                | (editor.tool == Tool::Clip && editor.clear_clip_points());
             if editor.tool == Tool::Texture {
                 editor.clear_face_selection();
             } else if !pending {
@@ -1903,6 +1973,7 @@ fn run(action: Action, editor: &mut Editor) {
             let result = match editor.tool {
                 Tool::Block => editor.commit_block().map(|_| ()),
                 Tool::Entity => editor.commit_entity().map(|_| ()),
+                Tool::Clip => editor.apply_clip().map(|_| ()),
                 Tool::Select | Tool::Texture => Ok(()),
             };
             if let Err(error) = result {

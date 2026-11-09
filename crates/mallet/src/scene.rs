@@ -135,7 +135,7 @@ impl Remap {
 }
 
 /// Temporary shapes drawn on top of the map while a tool is in use.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Overlay {
     /// Where selected meshes are drawn while being moved or resized.
     pub transform: Option<Remap>,
@@ -153,6 +153,8 @@ pub struct Overlay {
     pub handle_mode: crate::transform::HandleMode,
     /// Where rotations turn around, when placed away from the selection's centre.
     pub pivot: Option<DVec3>,
+    /// The clipping tool's points, plane and the pieces it would keep.
+    pub clip: Option<crate::clipper::ClipOverlay>,
 }
 
 /// Half-size of the marker the entity tool draws where a new entity will go.

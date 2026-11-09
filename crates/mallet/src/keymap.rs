@@ -24,6 +24,10 @@ pub enum Action {
     BlockTool,
     EntityTool,
     TextureTool,
+    /// Switch to the Clipping tool, or with it active, cycle which halves it keeps.
+    ClipTool,
+    /// Toggle the Clipping tool between two-point and three-point clipping.
+    ClipThreePoint,
     Properties,
     /// Open the compile window (Hammer's Run Map).
     Compile,
@@ -187,6 +191,8 @@ impl KeyMap {
                 (Action::BlockTool, Chord::shift(Key::B)),
                 (Action::EntityTool, Chord::shift(Key::E)),
                 (Action::TextureTool, Chord::shift(Key::A)),
+                (Action::ClipTool, Chord::shift(Key::X)),
+                (Action::ClipThreePoint, Chord::key(Key::C)),
                 (Action::Properties, Chord::alt(Key::Enter)),
                 (Action::Compile, Chord::key(Key::F9)),
                 (Action::CompileAgain, Chord::shift(Key::F9)),

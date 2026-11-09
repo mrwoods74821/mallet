@@ -50,6 +50,8 @@ pub enum Tool {
     /// Hammer's Texture Application tool (Shift+A): pick faces and change their material
     /// and alignment.
     Texture,
+    /// Hammer's Clipping tool (Shift+X): cut brushes along a plane.
+    Clip,
 }
 
 /// Point entity classes offered by the entity tool's class list. Any other class name
@@ -323,6 +325,8 @@ pub struct Editor {
     pub pointfile: Option<Vec<DVec3>>,
     /// Brush faces the texture tool has selected, by side id.
     pub face_selection: BTreeSet<u32>,
+    /// The clipping tool's points and settings.
+    pub clipper: crate::clipper::Clipper,
     /// What a texture tool click does.
     pub texture_mode: crate::faces::TextureMode,
     /// The material and alignment last picked up from a face.
@@ -389,6 +393,7 @@ impl Default for Editor {
             active_view: 0,
             pointfile: None,
             face_selection: BTreeSet::new(),
+            clipper: crate::clipper::Clipper::default(),
             recent_materials: Vec::new(),
             texture_mode: crate::faces::TextureMode::default(),
             lifted: None,
@@ -551,6 +556,7 @@ impl Editor {
         self.pointfile = map.pointfile;
         self.face_selection = map.face_selection;
         self.scene.mark_faces(&self.face_selection);
+        self.clear_clip_points();
     }
 
     /// Opens a map and frames it in every viewport.
@@ -718,6 +724,7 @@ impl Editor {
             .collect();
         self.face_selection.retain(|side| sides.contains(side));
         self.scene.mark_faces(&self.face_selection);
+        self.refresh_clip_preview();
     }
 
     /// Every material of the game, listed on first use.
@@ -757,6 +764,7 @@ impl Editor {
         if self.selection != before {
             self.overlay.handle_mode = crate::transform::HandleMode::Scale;
             self.overlay.pivot = None;
+            self.refresh_clip_preview();
         }
         self.scene.mark_selected(&self.selection);
     }
@@ -845,7 +853,7 @@ impl Editor {
     pub fn handle_box(&self) -> Option<Bounds> {
         match self.tool {
             Tool::Block => self.overlay.block,
-            Tool::Entity | Tool::Texture => None,
+            Tool::Entity | Tool::Texture | Tool::Clip => None,
             Tool::Select => {
                 let bounds = self.scene.selection_bounds();
                 (!bounds.is_empty()).then(|| self.overlay.transform.map_or(bounds, |remap| remap.map_bounds(&bounds)))
@@ -863,7 +871,7 @@ impl Editor {
         Overlay {
             handles: self.handle_box(),
             handle_mode,
-            ..self.overlay
+            ..self.overlay.clone()
         }
     }
 

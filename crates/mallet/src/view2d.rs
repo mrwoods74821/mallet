@@ -5,6 +5,7 @@ use glam::{DMat4, DVec2, DVec3};
 use mallet_vmf::geometry::Bounds;
 
 use crate::canvas::Canvas;
+use crate::clipper::{ClipOverlay, CLIP_PLANE_COLOR};
 use crate::scene::{box_edges, entity_marker_edges, Overlay, Remap, Scene, HANDLE_HALF_SIZE};
 use crate::style;
 use crate::transform::HandleMode;
@@ -291,6 +292,11 @@ impl View2D {
         if let Some(point) = overlay.entity {
             self.draw_edges(canvas, rect, &entity_marker_edges(point), None, style.tool);
         }
+        if let Some(clip) = &overlay.clip {
+            for (edge, color) in clip.edges_2d() {
+                self.draw_edges(canvas, rect, &[edge], None, color);
+            }
+        }
         self.draw_overlay(canvas, rect, overlay, active);
     }
 
@@ -370,9 +376,34 @@ impl View2D {
                 canvas.lines(&segments, style.tool);
             }
         }
+        if let Some(clip) = &overlay.clip {
+            self.draw_clip_points(canvas, rect, clip);
+        }
 
         let label_color = if active { Color32::WHITE } else { Color32::GRAY };
         canvas.label(rect.left_top() + egui::vec2(6.0, 4.0), self.axis.label(), label_color);
+    }
+
+    /// Draws the clipping tool's points as handles, joined by the clip line in the view
+    /// it was drawn in. Three-point clipping shows its points in every view.
+    fn draw_clip_points(&self, canvas: &mut dyn Canvas, rect: Rect, clip: &ClipOverlay) {
+        if clip.axis.is_some_and(|axis| axis != self.axis) {
+            return;
+        }
+        let at: Vec<Pos2> = clip
+            .points
+            .iter()
+            .map(|point| self.to_screen(rect, self.axis.project(*point)))
+            .collect();
+        if let (Some(_), [a, b]) = (clip.axis, at.as_slice()) {
+            canvas.lines(&[[*a, *b]], CLIP_PLANE_COLOR);
+        }
+        for point in at {
+            canvas.fill(
+                Rect::from_center_size(point, egui::Vec2::splat(HANDLE_HALF_SIZE * 2.0)),
+                CLIP_PLANE_COLOR,
+            );
+        }
     }
 
     /// Screen positions of the eight resize handles of a box in this view.

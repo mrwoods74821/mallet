@@ -763,6 +763,11 @@ impl Renderer3D {
         if let Some(point) = overlay.entity {
             push_edges(&mut outline, &entity_marker_edges(point), None, look.tool);
         }
+        if let Some(clip) = &overlay.clip {
+            for (edge, color) in clip.edges_3d() {
+                push_edges(&mut outline, &[edge], None, color);
+            }
+        }
 
         let aspect = size[0] as f32 / size[1] as f32;
         let matrix = view_projection(camera, aspect);
@@ -1171,6 +1176,11 @@ impl Renderer3D {
         }
         if let Some(point) = overlay.entity {
             push_edges(&mut over, &entity_marker_edges(point), None, look.tool);
+        }
+        if let Some(clip) = &overlay.clip {
+            for (edge, color) in clip.edges_2d() {
+                push_edges(&mut over, &[edge], None, color);
+            }
         }
         let under = self.line_mesh(&under);
         let over = self.line_mesh(&over);

@@ -13,6 +13,7 @@
 mod app;
 mod branding;
 mod canvas;
+mod clipper;
 mod compile;
 mod config;
 mod document;

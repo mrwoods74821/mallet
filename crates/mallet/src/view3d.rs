@@ -400,6 +400,11 @@ impl Camera3D {
         if let Some(block) = &overlay.block {
             draw_edges(canvas, &box_edges(block), None, style.tool);
         }
+        if let Some(clip) = &overlay.clip {
+            for (edge, color) in clip.edges_3d() {
+                draw_edges(canvas, &[edge], None, color);
+            }
+        }
 
         let label_color = if active { Color32::WHITE } else { Color32::GRAY };
         canvas.label(

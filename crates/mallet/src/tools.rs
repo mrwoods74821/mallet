@@ -1344,6 +1344,7 @@ fn status_json(editor: &Editor) -> Value {
             Tool::Block => "block",
             Tool::Entity => "entity",
             Tool::Texture => "texture",
+            Tool::Clip => "clip",
         },
         "entity_class": editor.entity_class,
         "fgd": editor.game_data.as_deref().map(|data| json!({

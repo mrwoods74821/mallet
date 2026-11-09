@@ -235,6 +235,7 @@ impl Editor {
         if tool == Tool::Texture {
             self.select_faces_of_selection();
         }
+        self.clear_clip_points();
     }
 
     /// Remembers a material as used, for the texture browser's recent list.
