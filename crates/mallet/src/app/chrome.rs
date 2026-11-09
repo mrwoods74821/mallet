@@ -46,7 +46,7 @@ const PALETTE: [PaletteEntry; 9] = [
     (icon::STAMP, "Apply decals", None),
     (icon::STACK, "Overlays", None),
     (icon::SCISSORS, "Clipping tool", Some((Tool::Clip, Action::ClipTool))),
-    (icon::POLYGON, "Vertex tool", None),
+    (icon::POLYGON, "Vertex tool", Some((Tool::Vertex, Action::VertexTool))),
     (icon::PATH, "Path tool", None),
 ];
 

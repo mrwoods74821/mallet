@@ -34,6 +34,7 @@ mod shell;
 mod style;
 mod tools;
 mod transform;
+mod vertex_tool;
 mod view2d;
 mod view3d;
 

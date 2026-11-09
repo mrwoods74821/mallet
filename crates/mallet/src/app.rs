@@ -10,6 +10,7 @@ mod properties;
 mod texture_browser;
 mod texture_tool;
 mod transform_window;
+mod vertex_tool;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -45,7 +46,7 @@ const PIVOT_REACH_PIXELS: f32 = 7.0;
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 31] = [
+const KEY_ACTIONS: [Action; 33] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -62,6 +63,8 @@ const KEY_ACTIONS: [Action; 31] = [
     Action::TextureTool,
     Action::ClipTool,
     Action::ClipThreePoint,
+    Action::VertexTool,
+    Action::SplitFace,
     Action::Properties,
     Action::Compile,
     Action::CompileAgain,
@@ -183,6 +186,8 @@ pub struct MalletApp {
     gizmo_drag: Option<crate::gizmo::GizmoDrag>,
     /// The viewport right-click menu's remembered choices.
     context_menu: context_menu::ContextMenuState,
+    /// The vertex tool's drag in progress, if any.
+    vertex_drag: Option<vertex_tool::VertexPointer>,
 }
 
 impl MalletApp {
@@ -216,6 +221,7 @@ impl MalletApp {
             transform: transform_window::TransformState::default(),
             gizmo_drag: None,
             context_menu: context_menu::ContextMenuState::default(),
+            vertex_drag: None,
         };
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
@@ -424,6 +430,8 @@ impl MalletApp {
                         &mut chosen,
                     );
                     menu_item(ui, &self.keymap, "Clipping Tool", Action::ClipTool, &mut chosen);
+                    menu_item(ui, &self.keymap, "Vertex Tool", Action::VertexTool, &mut chosen);
+                    menu_item(ui, &self.keymap, "Split Face", Action::SplitFace, &mut chosen);
                     menu_item(ui, &self.keymap, "Create Block", Action::CreateBlock, &mut chosen);
                     ui.separator();
                     menu_item(ui, &self.keymap, "Transform...", Action::Transform, &mut chosen);
@@ -598,6 +606,7 @@ impl MalletApp {
 
     fn viewports(&mut self, ui: &mut egui::Ui, editor: &mut Editor, frame: &eframe::Frame) {
         let rects = editor::quad_rects(ui.available_rect_before_wrap(), VIEWPORT_GAP);
+        editor.sync_vertex_tool();
         editor.set_layout(rects, ui.ctx().pixels_per_point());
         let pointer = ui.input(|input| PointerState {
             position: input.pointer.latest_pos(),
@@ -683,7 +692,8 @@ impl MalletApp {
             }
         }
         let looking = editor.camera.mouse_look();
-        let gizmo_hot = self.use_gizmo(slot, rect, response, editor, pointer);
+        let gizmo_hot = self.use_gizmo(slot, rect, response, editor, pointer)
+            || self.vertex_tool_3d(slot, rect, response, editor, pointer);
         let clicked = if looking {
             ui.input(|input| input.pointer.primary_pressed())
         } else {
@@ -721,6 +731,11 @@ impl MalletApp {
                     }
                     None => editor.message = "Click on a brush face to place a clip point".to_owned(),
                 },
+                Tool::Vertex => {
+                    if let Some(owner) = editor.scene.pick_ray(origin, direction, &editor.models) {
+                        pick(editor, Some(owner), pointer.modifiers);
+                    }
+                }
                 Tool::Block | Tool::Clip => {}
             }
         }
@@ -766,6 +781,7 @@ impl MalletApp {
                 canvas.label(rect.left_top() + egui::vec2(6.0, 4.0), label, color);
                 Camera3D::draw_crosshair(&painter, rect);
                 self.draw_gizmo(&painter, slot, rect, response, editor);
+                vertex_tool::draw_vertex_3d(&painter, &editor.camera, rect, editor);
                 if style == CameraStyle::Lit {
                     lighting_notice(&painter, rect, editor);
                     let animated = editor.config.lighting.animate
@@ -972,6 +988,7 @@ impl MalletApp {
                 let full = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
                 painter.image(texture, rect, full, egui::Color32::WHITE);
                 view.draw_overlay(canvas, rect, &overlay, response.hovered());
+                vertex_tool::draw_vertex_2d(canvas, &view, rect, editor);
             }
             None => view.draw(canvas, rect, &editor.scene, editor.grid, response.hovered(), &overlay),
         }
@@ -1084,7 +1101,7 @@ impl MalletApp {
                 start,
                 bounds,
             },
-            (Tool::Entity | Tool::Texture | Tool::Clip, ..) => Drag::Marquee { view: index, start },
+            (Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex, ..) => Drag::Marquee { view: index, start },
             (Tool::Block, ..) => Drag::NewBlock {
                 view: index,
                 start: snap(start, editor.grid),
@@ -1189,6 +1206,10 @@ impl MalletApp {
         pointer: &PointerState,
     ) {
         let grid = editor.grid;
+        if editor.tool == Tool::Vertex {
+            self.vertex_tool_2d(index, view, rect, response, editor, pointer);
+            return;
+        }
         if editor.tool == Tool::Texture {
             // In 2D the texture tool picks whole brushes, as faces overlap in these views.
             if response.clicked_by(PointerButton::Primary) {
@@ -1408,6 +1429,7 @@ impl eframe::App for MalletApp {
         self.properties_window(ctx, &mut editor);
         self.compile_window(ctx, &mut editor);
         self.face_edit_window(ctx, &mut editor);
+        self.vertex_merge_window(ctx, &mut editor);
         self.texture_browser_window(ctx, &mut editor);
         self.options_window(ctx, &mut editor);
         self.about_window(ctx, &mut editor);
@@ -1955,6 +1977,15 @@ fn run(action: Action, editor: &mut Editor) {
         Action::ClipTool => editor.set_tool(Tool::Clip),
         Action::ClipThreePoint if editor.tool == Tool::Clip => editor.toggle_three_point_clip(),
         Action::ClipThreePoint => {}
+        Action::VertexTool => {
+            editor.set_tool(Tool::Vertex);
+            editor.message = if editor.selection.is_empty() {
+                "Vertex tool: select brushes to edit their vertices".to_owned()
+            } else {
+                "Vertex tool: drag corners and edges; Ctrl+F splits a face between two corners".to_owned()
+            };
+        }
+        Action::SplitFace => report(editor.split_vertex_face(), editor),
         Action::SelectAll => editor.select_all(),
         Action::ClearSelection => {
             let pending = editor.overlay.block.take().is_some()
@@ -1962,6 +1993,7 @@ fn run(action: Action, editor: &mut Editor) {
                 | (editor.tool == Tool::Clip && editor.clear_clip_points());
             if editor.tool == Tool::Texture {
                 editor.clear_face_selection();
+            } else if editor.tool == Tool::Vertex && (editor.vertex.merge_prompt || editor.clear_vertex_selection()) {
             } else if !pending {
                 editor.clear_selection();
             }
@@ -1974,7 +2006,7 @@ fn run(action: Action, editor: &mut Editor) {
                 Tool::Block => editor.commit_block().map(|_| ()),
                 Tool::Entity => editor.commit_entity().map(|_| ()),
                 Tool::Clip => editor.apply_clip().map(|_| ()),
-                Tool::Select | Tool::Texture => Ok(()),
+                Tool::Select | Tool::Texture | Tool::Vertex => Ok(()),
             };
             if let Err(error) = result {
                 editor.message = error;

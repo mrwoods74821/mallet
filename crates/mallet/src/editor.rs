@@ -52,6 +52,8 @@ pub enum Tool {
     Texture,
     /// Hammer's Clipping tool (Shift+X): cut brushes along a plane.
     Clip,
+    /// Hammer's Vertex tool (Shift+V): drag the corners and edges of the selected brushes.
+    Vertex,
 }
 
 /// Point entity classes offered by the entity tool's class list. Any other class name
@@ -343,6 +345,8 @@ pub struct Editor {
     /// The texture lights of the game's `lights.rad` and the map's own `.rad` file, for
     /// the lighting preview.
     pub texture_lights: Arc<TextureLights>,
+    /// The vertex tool's brushes and selected vertices.
+    pub vertex: crate::vertex_tool::VertexState,
     /// The last block created; new blocks reuse its depth.
     last_block: Bounds,
     /// Camera, top, front and side viewport rectangles from the latest window layout.
@@ -403,6 +407,7 @@ impl Default for Editor {
             window_shot: WindowShot::Idle,
             gpu: None,
             texture_lights: Arc::new(TextureLights::new()),
+            vertex: Default::default(),
             last_block: DEFAULT_BLOCK,
             viewport_rects: quad_rects(Rect::from_min_size(Pos2::ZERO, DEFAULT_AREA), VIEWPORT_GAP),
             pixels_per_point: 1.0,
@@ -853,7 +858,7 @@ impl Editor {
     pub fn handle_box(&self) -> Option<Bounds> {
         match self.tool {
             Tool::Block => self.overlay.block,
-            Tool::Entity | Tool::Texture | Tool::Clip => None,
+            Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex => None,
             Tool::Select => {
                 let bounds = self.scene.selection_bounds();
                 (!bounds.is_empty()).then(|| self.overlay.transform.map_or(bounds, |remap| remap.map_bounds(&bounds)))

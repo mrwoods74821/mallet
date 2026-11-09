@@ -1392,6 +1392,7 @@ fn status_json(editor: &Editor) -> Value {
             Tool::Entity => "entity",
             Tool::Texture => "texture",
             Tool::Clip => "clip",
+            Tool::Vertex => "vertex",
         },
         "clip": {
             "points": editor.clipper.points.iter().map(|point| point.to_array()).collect::<Vec<_>>(),

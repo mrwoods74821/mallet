@@ -135,9 +135,10 @@ impl BrushMesh {
     /// Whether any of `vertices` lies on another vertex, so building would merge them.
     pub fn overlaps(&self, vertices: &[usize]) -> bool {
         vertices.iter().any(|&vertex| {
-            self.points.iter().enumerate().any(|(other, point)| {
-                other != vertex && point.distance(self.points[vertex]) < WELD_DISTANCE
-            })
+            self.points
+                .iter()
+                .enumerate()
+                .any(|(other, point)| other != vertex && point.distance(self.points[vertex]) < WELD_DISTANCE)
         })
     }
 
@@ -357,15 +358,17 @@ impl BrushMesh {
         }
         let corners: Vec<DVec3> = faces.iter().flat_map(|face| face.vertices.iter().copied()).collect();
         let near = |a: &DVec3, list: &[DVec3]| list.iter().any(|b| a.distance(*b) <= MATCH_DISTANCE);
-        corners.iter().all(|corner| near(corner, &self.points))
-            && self.points.iter().all(|point| near(point, &corners))
+        corners.iter().all(|corner| near(corner, &self.points)) && self.points.iter().all(|point| near(point, &corners))
     }
 }
 
 /// The index of the point in `points` within weld distance of `point`, adding it first
 /// when there is none.
 fn weld_index(points: &mut Vec<DVec3>, point: DVec3) -> usize {
-    match points.iter().position(|existing| existing.distance(point) < WELD_DISTANCE) {
+    match points
+        .iter()
+        .position(|existing| existing.distance(point) < WELD_DISTANCE)
+    {
         Some(index) => index,
         None => {
             points.push(point);
@@ -427,7 +430,8 @@ fn plane_points(corners: &[DVec3], normal: DVec3) -> Option<[DVec3; 3]> {
 fn drop_precise_vertices(side: &mut Side) {
     let mut index = 0;
     while index < side.extra.len() {
-        let stale = matches!(&side.extra[index], Item::Block(block) if block.name.eq_ignore_ascii_case("vertices_plus"));
+        let stale =
+            matches!(&side.extra[index], Item::Block(block) if block.name.eq_ignore_ascii_case("vertices_plus"));
         if stale {
             side.extra.remove(index);
             if index < side.extra_slots.len() {
@@ -518,7 +522,10 @@ mod tests {
         let (solid, mut ids) = cube();
         let mesh = BrushMesh::from_solid(&solid).unwrap();
         let top = vertex(&mesh, DVec3::splat(64.0));
-        let (built, rebuilt) = mesh.moved(&[(top, DVec3::new(64.0, 64.0, 96.0))]).build(&solid, &mut ids).unwrap();
+        let (built, rebuilt) = mesh
+            .moved(&[(top, DVec3::new(64.0, 64.0, 96.0))])
+            .build(&solid, &mut ids)
+            .unwrap();
         assert!(corners(&built).contains(&DVec3::new(64.0, 64.0, 96.0)));
         assert_eq!(corners(&built).len(), 8);
         assert!(built.sides().count() > 6);
@@ -541,11 +548,20 @@ mod tests {
         let bottom = material_facing(&solid, DVec3::NEG_Z);
         let mesh = BrushMesh::from_solid(&solid).unwrap();
         let top = vertex(&mesh, DVec3::splat(64.0));
-        let (first, mesh) = mesh.moved(&[(top, DVec3::new(64.0, 64.0, 80.0))]).build(&solid, &mut ids).unwrap();
+        let (first, mesh) = mesh
+            .moved(&[(top, DVec3::new(64.0, 64.0, 80.0))])
+            .build(&solid, &mut ids)
+            .unwrap();
         let top = vertex(&mesh, DVec3::new(64.0, 64.0, 80.0));
-        let (second, _) = mesh.moved(&[(top, DVec3::new(64.0, 64.0, 96.0))]).build(&first, &mut ids).unwrap();
+        let (second, _) = mesh
+            .moved(&[(top, DVec3::new(64.0, 64.0, 96.0))])
+            .build(&first, &mut ids)
+            .unwrap();
         assert_eq!(material_facing(&second, DVec3::NEG_Z), bottom);
-        assert_eq!(material_facing(&second, DVec3::NEG_X), material_facing(&solid, DVec3::NEG_X));
+        assert_eq!(
+            material_facing(&second, DVec3::NEG_X),
+            material_facing(&solid, DVec3::NEG_X)
+        );
     }
 
     #[test]

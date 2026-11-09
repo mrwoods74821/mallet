@@ -28,6 +28,9 @@ pub enum Action {
     ClipTool,
     /// Toggle the Clipping tool between two-point and three-point clipping.
     ClipThreePoint,
+    VertexTool,
+    /// Split the face between the two selected vertices.
+    SplitFace,
     Properties,
     /// Open the compile window (Hammer's Run Map).
     Compile,
@@ -193,6 +196,8 @@ impl KeyMap {
                 (Action::TextureTool, Chord::shift(Key::A)),
                 (Action::ClipTool, Chord::shift(Key::X)),
                 (Action::ClipThreePoint, Chord::key(Key::C)),
+                (Action::VertexTool, Chord::shift(Key::V)),
+                (Action::SplitFace, Chord::ctrl(Key::F)),
                 (Action::Properties, Chord::alt(Key::Enter)),
                 (Action::Compile, Chord::key(Key::F9)),
                 (Action::CompileAgain, Chord::shift(Key::F9)),
