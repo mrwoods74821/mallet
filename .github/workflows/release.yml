@@ -1,0 +1,173 @@
+# Releases Mallet. Run it by hand from the Actions tab.
+#
+# The judge (tools/versioning/judge_version.py) reads every commit since the newest vMAJOR.MINOR.PATCH tag and asks
+# the Copilot CLI for one bump per commit. The largest bump becomes the new SemVer version. The job then commits the
+# version to Cargo.toml and Cargo.lock, tags it, pushes, builds the Windows executable and publishes a GitHub release.
+#
+# Run it with "preview" to see the next release notes in the run summary without releasing anything.
+#
+# Copilot is reached with the COPILOT_GITHUB_TOKEN secret when it is set: a fine-grained personal access token with the
+# "Copilot Requests" permission. Without it the CLI tries the workflow token. If Copilot cannot be reached, each commit
+# is judged from its subject instead, and the run summary says so in the "Judged by" column.
+#
+# Mallet is tested only on Windows, so every job runs on windows-latest.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Bump to apply instead of judging each commit (a major bump below 1.0.0 raises the minor version)"
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+        default: auto
+      preview:
+        description: "Only show the next release notes in the run summary; release nothing"
+        type: boolean
+        default: false
+      since:
+        description: "With preview, start from this older tag instead of the last release (such as v0.1.0)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  copilot-requests: write
+
+# Runs queue instead of cancelling, so every batch of commits is released once and in order.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Judge the commits, tag and publish
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      FORCED_BUMP: ${{ inputs.bump || 'auto' }}
+      PREVIEW: ${{ inputs.preview && 'true' || 'false' }}
+      SINCE: ${{ inputs.since || '' }}
+      JUDGE_MODEL: ${{ vars.VERSION_JUDGE_MODEL || 'auto' }}
+      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the Copilot CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global --no-fund --no-audit @github/copilot
+          # The npm command on Windows is a .cmd shim, which Python cannot start with an argument list.
+          # Run the package's loader with node instead.
+          loader="$(npm root -g | tr '\\' '/')/@github/copilot/npm-loader.js"
+          test -f "$loader"
+          echo "COPILOT_COMMAND=node $loader" >> "$GITHUB_ENV"
+
+      - name: Judge the commits and set the version
+        id: judge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            unset COPILOT_GITHUB_TOKEN
+          fi
+
+          workdir="$RUNNER_TEMP/copilot-workdir"
+          mkdir -p "$workdir"
+          notes="$RUNNER_TEMP/release-notes.md"
+          result="$RUNNER_TEMP/version-result.env"
+
+          judge=(
+            python tools/versioning/judge_version.py
+            --cargo-toml Cargo.toml
+            --notes "$notes"
+            --result "$result"
+            --model "$JUDGE_MODEL"
+            --workdir "$workdir"
+            --forced-bump "$FORCED_BUMP"
+          )
+          if [ -n "$SINCE" ]; then
+            judge+=(--since "$SINCE")
+          fi
+
+          if [ "$PREVIEW" = "true" ]; then
+            "${judge[@]}" --dry-run
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          "${judge[@]}"
+          source "$result"
+
+          if [ "$RELEASE" != "true" ]; then
+            echo "Nothing to release."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$SEED" != "true" ]; then
+            # Keep the lock file's version of Mallet in step with Cargo.toml, then commit both.
+            cargo update --workspace
+            git add Cargo.toml Cargo.lock
+            git commit -m "Release version $VERSION"
+          fi
+
+          git tag -a "$TAG" -m "Version $VERSION"
+          git push --atomic origin HEAD:refs/heads/main "refs/tags/$TAG"
+
+          {
+            echo "released=true"
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "notes=$notes"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build the Windows executable
+        if: steps.judge.outputs.released == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.judge.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cargo build --release -p mallet
+          exe="mallet-$TAG-windows-x64.exe"
+          cp target/release/mallet.exe "$exe"
+          sha256sum "$exe" > "$exe.sha256"
+
+      - name: Publish the GitHub release
+        if: steps.judge.outputs.released == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.judge.outputs.tag }}
+          VERSION: ${{ steps.judge.outputs.version }}
+          NOTES: ${{ steps.judge.outputs.notes }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            "mallet-$TAG-windows-x64.exe" \
+            "mallet-$TAG-windows-x64.exe.sha256" \
+            --verify-tag \
+            --title "Mallet $VERSION" \
+            --notes-file "$NOTES"
