@@ -10,6 +10,7 @@ use glam::{DMat4, DVec2, DVec3};
 use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::{faces_bounds, solid_faces, Bounds};
 use mallet_vmf::kv::{self, Block, Item};
+use mallet_vmf::sides::{CopiedSides, OtherFaces};
 use mallet_vmf::transform::{self, around, clean_vec3, TextureLock};
 use mallet_vmf::{format_vec3, parse_vec3, Entity, EntityItem, IdAllocator, Solid, SolidItem, Vmf};
 
@@ -225,6 +226,10 @@ impl Editor {
 
     /// Pastes the clipboard into the open map as one undo step and selects what was
     /// pasted. Returns how many objects were added.
+    ///
+    /// Overlays and other entities that list brush faces are pointed at the faces pasted
+    /// with them in the same copy. Faces that were not pasted are taken off their lists,
+    /// since the map pasted into may use those ids for unrelated faces.
     pub fn paste(&mut self, at: PasteAt, options: &PasteOptions) -> Result<usize, String> {
         if self.clipboard.is_empty() {
             return Err("the clipboard is empty; copy something first".to_owned());
@@ -269,9 +274,10 @@ impl Editor {
                 });
             }
             let renames = names.renames(&clipboard.entities, options);
+            let mut sides = CopiedSides::default();
             for source in &clipboard.solids {
                 let mut solid = source.clone();
-                solid.renumber(&mut ids);
+                sides.renumber_solid(&mut solid, &mut ids);
                 solid.apply_matrix(&matrix, lock);
                 set_group(solid_editor(&mut solid), group);
                 pasted.extend(solid.id().map(Owner::Solid));
@@ -281,10 +287,13 @@ impl Editor {
                     solid,
                 });
             }
-            for source in &clipboard.entities {
-                let mut entity = source.clone();
-                rename_entity(&mut entity, &renames);
-                entity.renumber(&mut ids);
+            let mut entities = clipboard.entities.clone();
+            for entity in &mut entities {
+                rename_entity(entity, &renames);
+                sides.renumber_entity(entity, &mut ids);
+            }
+            for mut entity in entities {
+                sides.remap_entity(&mut entity, OtherFaces::Drop);
                 transform_entity(&mut entity, &matrix, lock, turned);
                 set_group(entity_editor(&mut entity), group);
                 pasted.extend(entity.id().map(Owner::Entity));

@@ -200,7 +200,8 @@ pub fn definitions() -> Value {
              copies, each moved by offset and turned by rotation (degrees about X, Y, Z) more than the one \
              before, around the copies' centre or, with around_pivot, the pivot placed when they were copied; \
              prefix and suffix for entity names; unique_names numbers names no other entity has, with outputs \
-             between pasted entities following; group puts each copy in a group of its own.",
+             between pasted entities following; group puts each copy in a group of its own. An overlay pasted \
+             with its brushes lists the pasted faces in sides; faces that were not pasted leave the list.",
             json!({
                 "at": { "description": "\"original\" (default): where the objects were copied from; \"cursor\": \
                     under the mouse in a 2D view, or the middle of the 2D view used last, snapped to the grid; or \

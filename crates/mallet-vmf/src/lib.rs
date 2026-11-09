@@ -11,6 +11,7 @@ pub mod hull;
 pub mod light;
 pub mod lightmap;
 mod model;
+pub mod sides;
 pub mod texture;
 pub mod transform;
 pub mod vertex;
