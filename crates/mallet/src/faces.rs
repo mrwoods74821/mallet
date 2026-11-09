@@ -231,33 +231,30 @@ impl Editor {
         self.owner_sides(&self.selection).into_iter().collect()
     }
 
-    /// Selects every face of the selected brushes, as switching to the texture tool does
-    /// in Hammer.
-    pub fn select_faces_of_selection(&mut self) {
-        let sides = self.owner_sides(&self.selection);
-        self.select_faces(sides, SelectMode::Replace);
-    }
-
-    /// Keeps the texture tool's faces in step with the brush selection: brushes that join
-    /// the selection bring all their faces, and brushes that leave it take theirs away. A
-    /// replacing selection starts over with the faces of the new selection.
-    pub(crate) fn follow_selection(&mut self, before: &BTreeSet<Owner>, mode: SelectMode) {
-        if mode == SelectMode::Replace {
-            return self.select_faces_of_selection();
+    /// The texture tool's take on selecting brushes: every face of each brush or entity is
+    /// selected, added or removed instead. Toggling takes a brush's faces away when all of
+    /// them are selected and selects them all otherwise.
+    pub(crate) fn select_owner_faces(&mut self, owners: &[Owner], mode: SelectMode) {
+        if mode != SelectMode::Toggle {
+            let sides = self.owner_sides(owners);
+            return self.select_faces(sides, mode);
         }
-        let added: Vec<Owner> = self.selection.difference(before).copied().collect();
-        let removed: Vec<Owner> = before.difference(&self.selection).copied().collect();
-        let added = self.owner_sides(&added);
-        let removed = self.owner_sides(&removed);
-        self.face_selection.extend(added);
-        for side in removed {
-            self.face_selection.remove(&side);
+        for owner in owners {
+            let sides = self.owner_sides([owner]);
+            let all = sides.iter().all(|side| self.face_selection.contains(side));
+            for side in sides {
+                if all {
+                    self.face_selection.remove(&side);
+                } else {
+                    self.face_selection.insert(side);
+                }
+            }
         }
         self.scene.mark_faces(&self.face_selection);
     }
 
-    /// Switches tools. Like Hammer, the texture tool starts with the faces of the selected
-    /// brushes, and leaving it lets go of the faces; other tools drop pending previews.
+    /// Switches tools. Like Hammer, the texture tool trades the selected brushes for all of
+    /// their faces, and leaving it lets go of the faces; other tools drop pending previews.
     pub fn set_tool(&mut self, tool: Tool) {
         if self.tool == tool {
             return;
@@ -265,11 +262,15 @@ impl Editor {
         if self.tool == Tool::Texture {
             self.clear_face_selection();
         }
+        let sides = (tool == Tool::Texture).then(|| self.owner_sides(&self.selection));
+        if sides.is_some() {
+            self.clear_selection();
+        }
         self.tool = tool;
         self.overlay.block = None;
         self.overlay.entity = None;
-        if tool == Tool::Texture {
-            self.select_faces_of_selection();
+        if let Some(sides) = sides {
+            self.select_faces(sides, SelectMode::Replace);
         }
         self.clear_clip_points();
     }
