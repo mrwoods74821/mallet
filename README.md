@@ -236,6 +236,11 @@ each tool's options, add extra arguments, reorder steps, and keep as many preset
 you like; Fast, Normal, Final, Entities only and Cubemaps come built in. Custom steps
 can use `{map}`, `{vmf}`, `{bsp}`, `{mapdir}`, `{gamedir}`, `{gamemaps}` and `{bindir}`.
 
+Every option the game's own compile tools and the Hammer++ builds (`vbspplusplus`,
+`vvisplusplus`, `vradplusplus`, `bspzipplusplus`) accept is listed, with a search box.
+Mallet sees which build a step runs and hides the options that build does not
+understand; tick "Show Hammer++ options" (or "Show game tools options") to see them all.
+
 While it runs, the window shows each step's progress and time and the live output.
 Errors and warnings are collected on the Problems tab, with buttons that select the brush
 or show the place a message names. When the map leaks, the leak line is drawn in red in
