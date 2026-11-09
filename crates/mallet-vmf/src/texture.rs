@@ -516,12 +516,20 @@ side { "id" "6" "plane" "(128 0 0) (0 0 0) (0 0 32)" "material" "A" "uaxis" "[1 
         assert!(side.hotspot(&points, &[base, alternate], true, 3));
         assert!((corner(&side) - 256.0).abs() < 1e-6, "only the alternate is used");
         let small = DVec3::new(16.0, 16.0, 0.0);
-        let square = [points[0], points[0] + small * DVec3::X, points[0] + small, points[0] + small * DVec3::Y];
+        let square = [
+            points[0],
+            points[0] + small * DVec3::X,
+            points[0] + small,
+            points[0] + small * DVec3::Y,
+        ];
         let mut side = side_facing(DVec3::Z);
         assert!(side.hotspot(&square, &[base, alternate], false, 3));
         let top = square[3];
         let texel = top.dot(side.vaxis.axis) / side.vaxis.scale + side.vaxis.offset;
-        assert!(texel.abs() < 1e-6, "without alternates the alternate is skipped, though it fits better");
+        assert!(
+            texel.abs() < 1e-6,
+            "without alternates the alternate is skipped, though it fits better"
+        );
         let line = [DVec3::ZERO, DVec3::X * 64.0];
         assert!(
             !side.hotspot(&line, &[base], false, 0),
