@@ -15,12 +15,15 @@ pub use lit::{LightingInput, LightingStats};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 use eframe::wgpu::{self, util::DeviceExt};
 use glam::{DVec3, Mat4, Vec3, Vec4};
-use mallet_content::{parallel_map, AlphaMode, MaterialLoader, Materials, Surface};
+use mallet_content::vtf::{Encoding, Level, Mips};
+use mallet_content::{AlphaMode, Materials, Surface};
 
 use crate::lighting::TextureLights;
 use crate::scene::{
@@ -41,6 +44,23 @@ const SELECTION_TINT: f32 = 0.4;
 const WHITE_KEY: &str = "";
 /// Side length of the world cubes faces are grouped into for culling.
 const CHUNK_SIZE: f64 = 1024.0;
+/// Most texture bytes sent to the graphics card in one frame. A map's textures arrive
+/// over many frames, so the copies on their way to the card never add up to much memory.
+const UPLOAD_BYTES_PER_FRAME: usize = 24 << 20;
+/// Longest a frame spends sending textures to the graphics card.
+const UPLOAD_TIME_PER_FRAME: Duration = Duration::from_millis(6);
+/// How many loaded textures may wait to be sent to the graphics card. The loading threads
+/// pause while it is full, so decoded pictures never pile up in memory.
+const LOADED_QUEUE: usize = 16;
+/// Most threads loading textures at once.
+const MAX_LOADING_THREADS: usize = 8;
+/// Shortest time between swapping arrived textures into the picture while more load.
+const SWAP_INTERVAL: Duration = Duration::from_millis(200);
+/// Longest time between swapping arrived textures into the picture while more load.
+const MAX_SWAP_INTERVAL: Duration = Duration::from_secs(2);
+/// How many times longer than rebuilding the cached faces took the next swap waits, so
+/// rebuilding takes a small share of the time while a large map's textures stream in.
+const SWAP_COST_FACTOR: u32 = 8;
 
 /// One corner of a brush face on the GPU. The textured view shades it by its normal, as
 /// Hammer does; the lighting preview lights it.
@@ -310,12 +330,12 @@ pub struct RenderStats {
     pub models_drawn: usize,
 }
 
-/// A texture decoded and mip-mapped on a worker thread, ready to upload: the mip levels,
-/// the texture's nominal size and what its material is.
-type Prepared = (Vec<Image>, (f32, f32), MaterialFacts);
+/// A material loaded on a worker thread, by its key: its texture ready to upload and what
+/// the material is, or `None` when it has no texture that can be read.
+type Loaded = (String, Option<(Mips, MaterialFacts)>);
 
-/// A batch of textures being loaded in the background.
-type Incoming = mpsc::Receiver<Vec<(String, Option<Prepared>)>>;
+/// The materials of one request arriving from the loading threads, one at a time.
+type Incoming = mpsc::Receiver<Loaded>;
 
 /// Renders the camera viewport and the three 2D viewports with wgpu.
 pub struct Renderer3D {
@@ -338,9 +358,21 @@ pub struct Renderer3D {
     missing: GpuTexture,
     /// Flat grey stand-in drawn while a material's texture is still loading.
     loading_texture: GpuTexture,
-    /// Materials being loaded in the background, and the batches on their way.
+    /// Materials asked for whose textures are not drawn yet: still loading in the
+    /// background, or uploaded and waiting in [`Self::arrived`].
     loading: HashSet<String>,
+    /// The requests whose materials are still arriving.
     incoming: Vec<Incoming>,
+    /// Textures uploaded but not drawn yet. They are swapped in together a few times a
+    /// second, so the cached map faces are not rebuilt every frame while textures stream in.
+    arrived: Vec<(String, Option<GpuTexture>)>,
+    /// When arrived textures were last swapped in, and how long to wait before the next.
+    last_swap: Instant,
+    swap_interval: Duration,
+    /// Materials whose textures were swapped in since the cached map faces were built.
+    stale: HashSet<String>,
+    /// Whether the graphics card samples DXT blocks, so textures can stay compressed.
+    blocks: bool,
     /// Counts texture uploads, so cached viewport images know when to redraw.
     textures_version: u64,
     /// What each slot's image was last drawn from; an unchanged signature means the image
@@ -496,37 +528,17 @@ impl Renderer3D {
         let line_pipeline = lines(Depth::Ignore);
         let flat_line_pipeline = lines(Depth::None);
 
-        let upload = |image: &Image, width, height, facts| {
-            upload(
-                device,
-                queue,
-                &texture_layout,
-                &sampler,
-                &mip_chain(image),
-                (width, height),
-                facts,
-                None,
-            )
-        };
-        let missing = upload(
-            &checkerboard(),
-            MISSING_TEXTURE_SIZE,
-            MISSING_TEXTURE_SIZE,
-            MaterialFacts::opaque(),
-        );
+        let upload = |mips: Mips, facts| upload(device, queue, &texture_layout, &sampler, &mips, facts, None);
+        let missing = upload(checkerboard(), MaterialFacts::opaque());
         let white = upload(
-            &Image::solid(Color32::WHITE),
-            1.0,
-            1.0,
+            flat(Color32::WHITE, 1),
             MaterialFacts {
                 unlit: true,
                 ..MaterialFacts::opaque()
             },
         );
         let loading_texture = upload(
-            &Image::solid(Color32::from_gray(90)),
-            MISSING_TEXTURE_SIZE,
-            MISSING_TEXTURE_SIZE,
+            flat(Color32::from_gray(90), MISSING_TEXTURE_SIZE as u32),
             MaterialFacts::opaque(),
         );
         Self {
@@ -548,6 +560,11 @@ impl Renderer3D {
             loading_texture,
             loading: HashSet::new(),
             incoming: Vec::new(),
+            arrived: Vec::new(),
+            last_swap: Instant::now(),
+            swap_interval: SWAP_INTERVAL,
+            stale: HashSet::new(),
+            blocks: device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
             textures_version: 0,
             signatures: [None; 4],
             reused: [false; 4],
@@ -571,6 +588,8 @@ impl Renderer3D {
         self.gpu_models.clear();
         self.loading.clear();
         self.incoming.clear();
+        self.arrived.clear();
+        self.stale.clear();
         self.faces = None;
         self.textures_checked = 0;
         self.textures_version += 1;
@@ -586,11 +605,18 @@ impl Renderer3D {
     /// shows real textures instead of loading placeholders, and has the lighting preview
     /// draw all its small shadow maps in its next frame.
     pub fn finish_loading(&mut self) {
+        let mut waiting = 0;
         for batch in std::mem::take(&mut self.incoming) {
-            if let Ok(results) = batch.recv() {
-                self.upload_results(results);
+            while let Ok(loaded) = batch.recv() {
+                waiting += self.upload_loaded(loaded);
+                if waiting >= UPLOAD_BYTES_PER_FRAME {
+                    waiting = 0;
+                    self.queue.submit([]);
+                    let _ = self.device.poll(wgpu::Maintain::Poll);
+                }
             }
         }
+        self.swap_in();
         if let Some(lit) = &mut self.lit {
             lit.poll(&self.device, &self.queue, true);
             lit.draw_all_shadows();
@@ -628,42 +654,70 @@ impl Renderer3D {
         self.textures_version += 1;
     }
 
-    /// Uploads whatever background loads have finished, without waiting for the rest.
+    /// Uploads textures the background threads have finished, as many as one frame may
+    /// take, without waiting for the rest, and swaps what has arrived into the picture
+    /// when that is due.
     fn poll_loading(&mut self) {
+        let started = Instant::now();
+        let mut sent = 0;
         let mut pending = Vec::new();
         for batch in std::mem::take(&mut self.incoming) {
-            match batch.try_recv() {
-                Ok(results) => self.upload_results(results),
-                Err(mpsc::TryRecvError::Empty) => pending.push(batch),
-                Err(mpsc::TryRecvError::Disconnected) => {}
+            let mut open = true;
+            while sent < UPLOAD_BYTES_PER_FRAME && started.elapsed() < UPLOAD_TIME_PER_FRAME {
+                match batch.try_recv() {
+                    Ok(loaded) => sent += self.upload_loaded(loaded),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        open = false;
+                        break;
+                    }
+                }
+            }
+            if open {
+                pending.push(batch);
             }
         }
         self.incoming = pending;
-        if self.incoming.is_empty() {
-            self.loading.clear();
+        if self.incoming.is_empty() || self.last_swap.elapsed() >= self.swap_interval {
+            self.swap_in();
         }
     }
 
-    fn upload_results(&mut self, results: Vec<(String, Option<Prepared>)>) {
-        for (key, prepared) in results {
-            let emissive = self.texture_lights.get(&key).map(|light| light.hdr.max(light.ldr));
-            let texture = prepared.map(|(levels, size, facts)| {
-                upload(
-                    &self.device,
-                    &self.queue,
-                    &self.texture_layout,
-                    &self.sampler,
-                    &levels,
-                    size,
-                    facts,
-                    emissive,
-                )
-            });
-            self.loading.remove(&key);
-            self.textures.insert(key, texture);
+    /// Sends one loaded material's texture to the graphics card, where it waits in
+    /// [`Self::arrived`]. Returns how many bytes that took.
+    fn upload_loaded(&mut self, (key, loaded): Loaded) -> usize {
+        let emissive = self.texture_lights.get(&key).map(|light| light.hdr.max(light.ldr));
+        let bytes = loaded.as_ref().map_or(0, |(mips, _)| mips.bytes());
+        let texture = loaded.map(|(mips, facts)| {
+            upload(
+                &self.device,
+                &self.queue,
+                &self.texture_layout,
+                &self.sampler,
+                &mips,
+                facts,
+                emissive,
+            )
+        });
+        self.arrived.push((key, texture));
+        bytes
+    }
+
+    /// Starts drawing the textures that have arrived. Once nothing is on its way any
+    /// more, a material whose load was lost stops counting as loading.
+    fn swap_in(&mut self) {
+        if !self.arrived.is_empty() {
+            for (key, texture) in self.arrived.drain(..) {
+                self.loading.remove(&key);
+                self.stale.insert(key.clone());
+                self.textures.insert(key, texture);
+            }
+            self.textures_version += 1;
+            self.last_swap = Instant::now();
         }
-        self.faces = None;
-        self.textures_version += 1;
+        if self.incoming.is_empty() {
+            self.loading.clear();
+        }
     }
 
     /// Draws the scene from the camera into viewport slot `slot`'s image of `size`
@@ -743,6 +797,7 @@ impl Renderer3D {
                 self.load_textures(scene, materials, models);
                 self.textures_checked = scene.geometry_generation;
             }
+            self.refresh_stale_faces(scene);
             if self
                 .faces
                 .as_ref()
@@ -1304,8 +1359,10 @@ impl Renderer3D {
         Some((width, height, pixels))
     }
 
-    /// Starts loading, on a background thread, every material in the scene that has not
-    /// been seen yet. Faces show a grey stand-in until their texture arrives.
+    /// Starts loading, on background threads, every material in the scene that has not
+    /// been seen yet. Faces show a grey stand-in until their texture arrives. The threads
+    /// hand over one texture at a time and wait while [`LOADED_QUEUE`] of them are still
+    /// to be uploaded, so loading a large map never holds more than a few in memory.
     fn load_textures(&mut self, scene: &Scene, materials: Option<&mut Materials>, models: &ModelCache) {
         let model_materials = scene
             .meshes
@@ -1325,44 +1382,44 @@ impl Renderer3D {
         if wanted.is_empty() {
             return;
         }
-        let keys: Vec<String> = wanted.into_iter().filter(|key| !self.loading.contains(key)).collect();
+        let mut keys: Vec<String> = wanted.into_iter().filter(|key| !self.loading.contains(key)).collect();
         if keys.is_empty() {
             return;
         }
+        keys.sort();
         let Some(materials) = materials else {
             for key in keys {
                 self.textures.insert(key, None);
             }
             return;
         };
-        let loader: MaterialLoader = materials.loader();
         self.loading.extend(keys.iter().cloned());
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(LOADED_QUEUE);
         self.incoming.push(receiver);
-        std::thread::Builder::new()
-            .name("mallet textures".to_owned())
-            .spawn(move || {
-                let prepared = parallel_map(&keys, |key| {
-                    let material = loader.load(key);
-                    let facts = MaterialFacts {
-                        alpha: material.alpha,
-                        surface: material.surface,
-                        self_illum: material.self_illum,
-                        unlit: material.unlit,
-                    };
-                    let prepared = material.texture.as_ref().map(|image| {
-                        let pixels = Image {
-                            width: image.pixel_width,
-                            height: image.pixel_height,
-                            rgba: image.rgba.clone(),
+        let cores = std::thread::available_parallelism().map_or(4, usize::from);
+        let threads = cores.saturating_sub(1).clamp(1, MAX_LOADING_THREADS).min(keys.len());
+        let keys = Arc::new(keys);
+        let next = Arc::new(AtomicUsize::new(0));
+        for _ in 0..threads {
+            let (keys, next, sender) = (Arc::clone(&keys), Arc::clone(&next), sender.clone());
+            let (loader, blocks) = (materials.loader(), self.blocks);
+            let _ = std::thread::Builder::new()
+                .name("mallet textures".to_owned())
+                .spawn(move || {
+                    while let Some(key) = keys.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        let (material, mips) = loader.load_mips(key, blocks);
+                        let facts = MaterialFacts {
+                            alpha: material.alpha,
+                            surface: material.surface,
+                            self_illum: material.self_illum,
+                            unlit: material.unlit,
                         };
-                        (mip_chain(&pixels), (image.width as f32, image.height as f32), facts)
-                    });
-                    (key.clone(), prepared)
+                        if sender.send((key.clone(), mips.map(|mips| (mips, facts)))).is_err() {
+                            return;
+                        }
+                    }
                 });
-                let _ = sender.send(prepared);
-            })
-            .expect("texture loading thread could not start");
+        }
     }
 
     /// The loaded texture of a mesh's editor sprite; `None` while it loads, when it could
@@ -1452,23 +1509,7 @@ impl Renderer3D {
                     .filter_map(|at| scene.meshes.get(*at))
                     .map(|mesh| chunk_cell(&mesh.bounds))
                     .collect();
-                let rebuilt = self.cell_faces(
-                    scene
-                        .meshes
-                        .iter()
-                        .filter(|mesh| dirty.contains(&chunk_cell(&mesh.bounds))),
-                    None,
-                    0.0,
-                    true,
-                );
-                faces.cells.retain(|cell, _| !dirty.contains(cell));
-                faces.cells.extend(rebuilt);
-                faces.opaque = self.upload_cells(&faces.cells);
-                faces.translucent = faces
-                    .cells
-                    .values()
-                    .flat_map(|cell| cell.translucent.iter().cloned())
-                    .collect();
+                self.rebuild_cells(&mut faces, scene, &dirty);
                 faces.generation = scene.geometry_generation;
                 self.faces = Some(faces);
                 return;
@@ -1486,6 +1527,69 @@ impl Renderer3D {
             translucent,
             cells,
         });
+    }
+
+    /// Triangulates the chunks in `dirty` again and uploads the cached map faces anew.
+    fn rebuild_cells(&self, faces: &mut StaticFaces, scene: &Scene, dirty: &HashSet<[i32; 3]>) {
+        let rebuilt = self.cell_faces(
+            scene
+                .meshes
+                .iter()
+                .filter(|mesh| dirty.contains(&chunk_cell(&mesh.bounds))),
+            None,
+            0.0,
+            true,
+        );
+        faces.cells.retain(|cell, _| !dirty.contains(cell));
+        faces.cells.extend(rebuilt);
+        faces.opaque = self.upload_cells(&faces.cells);
+        faces.translucent = faces
+            .cells
+            .values()
+            .flat_map(|cell| cell.translucent.iter().cloned())
+            .collect();
+    }
+
+    /// Brings the cached map faces up to the textures swapped in since they were built:
+    /// a texture's size and the way its material uses alpha are baked into the faces
+    /// drawn with it. Only the chunks using those materials are rebuilt while the cache
+    /// still matches the map; otherwise it is dropped to be built anew. The next swap
+    /// waits longer the longer this took.
+    fn refresh_stale_faces(&mut self, scene: &Scene) {
+        if self.stale.is_empty() {
+            return;
+        }
+        let started = Instant::now();
+        let stale = std::mem::take(&mut self.stale);
+        self.drag_faces = None;
+        let current = self
+            .faces
+            .take()
+            .filter(|faces| faces.generation == scene.geometry_generation);
+        let Some(mut faces) = current else {
+            return;
+        };
+        let uses_stale = |cell: &CellFaces| {
+            cell.by_texture.keys().any(|key| stale.contains(key))
+                || cell.translucent.iter().any(|face| stale.contains(&face.key))
+        };
+        let mut dirty: HashSet<[i32; 3]> = faces
+            .cells
+            .iter()
+            .filter(|(_, cell)| uses_stale(cell))
+            .map(|(at, _)| *at)
+            .collect();
+        let sprites = scene.meshes.iter().filter(|mesh| {
+            mesh.sprite
+                .as_deref()
+                .is_some_and(|sprite| stale.contains(&material_key(sprite)))
+        });
+        dirty.extend(sprites.map(|mesh| chunk_cell(&mesh.bounds)));
+        if !dirty.is_empty() {
+            self.rebuild_cells(&mut faces, scene, &dirty);
+        }
+        self.faces = Some(faces);
+        self.swap_interval = (started.elapsed() * SWAP_COST_FACTOR).clamp(SWAP_INTERVAL, MAX_SWAP_INTERVAL);
     }
 
     /// Keeps [`Self::drag_faces`] matching the scene while a drag hides the selection's
@@ -1850,38 +1954,37 @@ fn orthographic(view: &View2D, points: Vec2) -> Mat4 {
     Mat4::from_cols_array_2d(&columns)
 }
 
-/// Plain RGBA pixels.
-struct Image {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
-}
-
-impl Image {
-    fn solid(color: Color32) -> Self {
-        Self {
+/// A one-pixel picture of a single colour, for a texture `size` units wide and high.
+fn flat(color: Color32, size: u32) -> Mips {
+    Mips::from_rgba(
+        (size, size),
+        Level {
             width: 1,
             height: 1,
-            rgba: color.to_array().to_vec(),
-        }
-    }
+            data: color.to_array().to_vec(),
+        },
+    )
 }
 
-/// Uploads a texture's mip levels, largest first. `width` and `height` are the texture's
-/// nominal size, used for texture coordinates; `emissive` is the light it gives off when
-/// `lights.rad` lists its material.
-#[allow(clippy::too_many_arguments)]
+/// Uploads a texture's mip levels, as RGBA pixels or as the DXT blocks its file stores.
+/// `emissive` is the light it gives off when `lights.rad` lists its material.
 fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
-    levels: &[Image],
-    (width, height): (f32, f32),
+    mips: &Mips,
     facts: MaterialFacts,
     emissive: Option<DVec3>,
 ) -> GpuTexture {
-    let image = &levels[0];
+    let (format, block_side, block_bytes) = match mips.encoding {
+        Encoding::Rgba => (COLOR_FORMAT, 1, 4),
+        Encoding::Bc1 => (wgpu::TextureFormat::Bc1RgbaUnormSrgb, 4, 8),
+        Encoding::Bc2 => (wgpu::TextureFormat::Bc2RgbaUnormSrgb, 4, 16),
+        Encoding::Bc3 => (wgpu::TextureFormat::Bc3RgbaUnormSrgb, 4, 16),
+    };
+    let (width, height) = (mips.width as f32, mips.height as f32);
+    let image = &mips.levels[0];
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("mallet material"),
         size: wgpu::Extent3d {
@@ -1889,14 +1992,15 @@ fn upload(
             height: image.height,
             depth_or_array_layers: 1,
         },
-        mip_level_count: levels.len() as u32,
+        mip_level_count: mips.levels.len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: COLOR_FORMAT,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    for (level, mip) in levels.iter().enumerate() {
+    for (level, mip) in mips.levels.iter().enumerate() {
+        let (columns, rows) = (mip.width.div_ceil(block_side), mip.height.div_ceil(block_side));
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -1904,15 +2008,15 @@ fn upload(
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &mip.rgba,
+            &mip.data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(mip.width * 4),
-                rows_per_image: Some(mip.height),
+                bytes_per_row: Some(columns * block_bytes),
+                rows_per_image: Some(rows),
             },
             wgpu::Extent3d {
-                width: mip.width,
-                height: mip.height,
+                width: columns * block_side,
+                height: rows * block_side,
                 depth_or_array_layers: 1,
             },
         );
@@ -1953,10 +2057,10 @@ fn upload(
 }
 
 /// Hammer's pink and black checkerboard for missing textures.
-fn checkerboard() -> Image {
+fn checkerboard() -> Mips {
     const SIDE: u32 = 64;
     const CELL: u32 = 16;
-    let rgba = (0..SIDE * SIDE)
+    let data = (0..SIDE * SIDE)
         .flat_map(|index| {
             let (x, y) = (index % SIDE, index / SIDE);
             if (x / CELL + y / CELL).is_multiple_of(2) {
@@ -1966,42 +2070,15 @@ fn checkerboard() -> Image {
             }
         })
         .collect();
-    Image {
-        width: SIDE,
-        height: SIDE,
-        rgba,
-    }
-}
-
-/// Halves the image repeatedly with a 2×2 box filter until it is one pixel wide and high.
-fn mip_chain(image: &Image) -> Vec<Image> {
-    let mut levels = vec![Image {
-        width: image.width,
-        height: image.height,
-        rgba: image.rgba.clone(),
-    }];
-    while let Some(last) = levels.last() {
-        if last.width == 1 && last.height == 1 {
-            break;
-        }
-        let (width, height) = ((last.width / 2).max(1), (last.height / 2).max(1));
-        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-        for y in 0..height {
-            for x in 0..width {
-                for channel in 0..4 {
-                    let mut sum = 0u32;
-                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                        let sx = (x * 2 + dx).min(last.width - 1);
-                        let sy = (y * 2 + dy).min(last.height - 1);
-                        sum += u32::from(last.rgba[((sy * last.width + sx) * 4 + channel) as usize]);
-                    }
-                    rgba.push((sum / 4) as u8);
-                }
-            }
-        }
-        levels.push(Image { width, height, rgba });
-    }
-    levels
+    let size = MISSING_TEXTURE_SIZE as u32;
+    Mips::from_rgba(
+        (size, size),
+        Level {
+            width: SIDE,
+            height: SIDE,
+            data,
+        },
+    )
 }
 
 /// Fans a convex face into triangles wound counter-clockwise as seen from outside, so
