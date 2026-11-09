@@ -767,19 +767,24 @@ impl Renderer3D {
         let aspect = size[0] as f32 / size[1] as f32;
         let matrix = view_projection(camera, aspect);
         let planes = frustum_planes(matrix);
+        let helpers = !lit || lighting.options.entity_boxes;
+        let sprites = if textured && helpers {
+            self.sprite_faces(scene, overlay, camera)
+        } else {
+            Vec::new()
+        };
         let translucent = match (&self.faces, textured) {
             (Some(faces), true) => {
                 let unselected = faces
                     .translucent
                     .iter()
                     .filter(|face| face.owner.is_none_or(|owner| !selected_owners.contains(&owner)));
-                self.sorted_translucent(unselected.chain(&tinted_translucent), camera, &planes)
+                self.sorted_translucent(unselected.chain(&tinted_translucent).chain(&sprites), camera, &planes)
             }
             _ => None,
         };
         let mut stats = RenderStats::default();
         let instances = if textured {
-            let helpers = !lit || lighting.options.entity_boxes;
             self.model_instances(scene, overlay, &planes, helpers, &mut stats)
         } else {
             None
@@ -1263,6 +1268,7 @@ impl Renderer3D {
             .flat_map(|mesh| &mesh.faces)
             .filter_map(|face| face.material.as_deref())
             .chain(model_materials)
+            .chain(scene.meshes.iter().filter_map(|mesh| mesh.sprite.as_deref()))
             .map(material_key)
             .filter(|key| !self.textures.contains_key(key))
             .collect();
@@ -1307,6 +1313,64 @@ impl Renderer3D {
                 let _ = sender.send(prepared);
             })
             .expect("texture loading thread could not start");
+    }
+
+    /// The loaded texture of a mesh's editor sprite; `None` while it loads, when it could
+    /// not be found, or when the mesh has no sprite, so the entity keeps its box.
+    fn sprite_texture(&self, mesh: &WireMesh) -> Option<&GpuTexture> {
+        let key = material_key(mesh.sprite.as_deref()?);
+        if self.loading.contains(&key) {
+            return None;
+        }
+        self.textures.get(&key)?.as_ref()
+    }
+
+    /// Builds the editor sprites of point entities as quads facing the camera, parallel
+    /// to the view plane as Hammer draws them. Each sprite is as tall as the entity's box
+    /// and keeps its texture's shape; selected ones are tinted and follow a move drag.
+    /// They are blended by the texture's alpha and face the textured view's light, so
+    /// they are drawn at full brightness.
+    fn sprite_faces(&self, scene: &Scene, overlay: &Overlay, camera: &Camera3D) -> Vec<TranslucentFace> {
+        let forward = camera.forward();
+        let right = camera.right();
+        let up = right.cross(forward).normalize_or(DVec3::Z);
+        let normal = Vec3::new(0.3, 0.5, 1.0).normalize().to_array();
+        scene
+            .meshes
+            .iter()
+            .filter_map(|mesh| {
+                let texture = self.sprite_texture(mesh)?;
+                let (_, remap) = mesh.appearance(overlay);
+                let bounds = mesh.mapped_bounds(remap.as_ref());
+                let center = bounds.center();
+                let half_height = bounds.size().max_element() * 0.5;
+                let half_width = half_height * f64::from(texture.width / texture.height.max(1.0));
+                let highlight = if mesh.selected { SELECTION_TINT } else { 0.0 };
+                let corner = |x: f64, y: f64| FaceVertex {
+                    position: (center + right * (x * half_width) + up * (y * half_height))
+                        .as_vec3()
+                        .to_array(),
+                    normal,
+                    uv: [((x + 1.0) * 0.5) as f32, ((1.0 - y) * 0.5) as f32],
+                    color: [1.0; 4],
+                    highlight,
+                    alpha: [0.0, 1.0],
+                    face: NO_FACE,
+                };
+                let quad = [
+                    corner(-1.0, -1.0),
+                    corner(1.0, -1.0),
+                    corner(1.0, 1.0),
+                    corner(-1.0, 1.0),
+                ];
+                Some(TranslucentFace {
+                    center: center.as_vec3(),
+                    key: material_key(mesh.sprite.as_deref()?),
+                    vertices: vec![quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]],
+                    owner: mesh.owner,
+                })
+            })
+            .collect()
     }
 
     fn texture_for(&self, key: &str) -> &GpuTexture {
@@ -1409,6 +1473,9 @@ impl Renderer3D {
             });
             chunk.min = chunk.min.min(bounds.min.as_vec3());
             chunk.max = chunk.max.max(bounds.max.as_vec3());
+            if self.sprite_texture(mesh).is_some() {
+                continue;
+            }
             let tint = if mesh.faces.iter().any(|face| face.material.is_none()) {
                 let [r, g, b, _] = egui::Rgba::from(mesh.color).to_array();
                 [r, g, b]

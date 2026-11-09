@@ -294,6 +294,7 @@ impl Editor {
             owner: None,
             selected: false,
             model: None,
+            sprite: None,
             first_face: None,
         });
         self.scene.geometry_generation = next_generation();

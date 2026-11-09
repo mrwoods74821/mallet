@@ -30,6 +30,19 @@ pub fn entity_model<'a>(entity: &'a Entity, class: Option<&'a EntityClass>) -> O
         .or_else(|| class?.studio.as_deref())
 }
 
+/// The editor sprite the 3D view shows for a point entity, as a material path without
+/// its extension: the icon its FGD class names with `iconsprite("...")`, such as the
+/// bulb of `light` or the speaker of `ambient_generic`.
+pub fn entity_sprite(class: Option<&EntityClass>) -> Option<String> {
+    let icon = class?.icon.as_deref()?.trim().replace('\\', "/");
+    let icon = icon.strip_prefix("materials/").unwrap_or(&icon);
+    let icon = icon
+        .strip_suffix(".vmt")
+        .or_else(|| icon.strip_suffix(".spr"))
+        .unwrap_or(icon);
+    (!icon.is_empty()).then(|| icon.to_ascii_lowercase())
+}
+
 /// The box of a point entity without an FGD size, relative to its origin, as the
 /// Half-Life 2 FGD gives it:
 /// the standing player hull for spawn points and NPCs, a small cube otherwise.
@@ -248,6 +261,10 @@ pub struct WireMesh {
     pub selected: bool,
     /// The prop model drawn for this entity in the 3D view, instead of `faces`.
     pub model: Option<ModelInstance>,
+    /// The editor sprite drawn for this point entity in the 3D view, as a material path
+    /// such as `editor/light`. Once its texture loads, the sprite replaces the entity's
+    /// flat box, the way Hammer shows lights, sounds and cube maps.
+    pub sprite: Option<String>,
     /// The number of the first of `faces` among all the scene's faces, counting mesh by
     /// mesh, so a renderer can keep data for each face; `None` for meshes made outside
     /// [`Scene::build`].
@@ -359,6 +376,7 @@ impl Scene {
                         casts_shadows: own_model && !shadows_off,
                         helper: !own_model,
                     }),
+                    sprite: None,
                     first_face: None,
                 };
                 scene.bounds.add_bounds(&mesh.bounds);
@@ -381,6 +399,7 @@ impl Scene {
                     owner: entity_owner,
                     selected: false,
                     model: None,
+                    sprite: entity_sprite(class),
                     first_face: None,
                 };
                 scene.bounds.add_bounds(&mesh.bounds);
@@ -767,6 +786,7 @@ fn brush_mesh(solid: &Solid, color: Color32, owner: Option<Owner>) -> Option<Wir
         owner,
         selected: false,
         model: None,
+        sprite: None,
         first_face: None,
     })
 }
@@ -887,6 +907,7 @@ mod tests {
             owner: Some(owner),
             selected: false,
             model: None,
+            sprite: None,
             first_face: None,
         }
     }
