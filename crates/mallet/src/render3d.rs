@@ -1772,37 +1772,49 @@ impl Renderer3D {
         chunks
     }
 
-    /// Puts every chunk's triangles into one vertex buffer, batched by texture.
+    /// Puts every chunk's triangles into one vertex buffer, batched by texture. They are
+    /// written straight into the buffer, so a large map's faces are not copied once more
+    /// in memory on the way.
     fn upload_cells(&self, cells: &HashMap<[i32; 3], CellFaces>) -> FaceMesh {
-        let mut all = Vec::new();
-        let mut built = Vec::with_capacity(cells.len());
-        for (at, cell) in cells {
-            let mut keys: Vec<&String> = cell.by_texture.keys().collect();
-            keys.sort();
-            let mut batches = Vec::with_capacity(keys.len());
-            let first = all.len();
-            for key in keys {
-                let start = all.len() as u32;
-                all.extend_from_slice(&cell.by_texture[key]);
-                batches.push((key.clone(), start..all.len() as u32));
-            }
-            built.push(Chunk {
-                cell: *at,
-                min: cell.min,
-                max: cell.max,
-                batches,
-                triangles: (all.len() - first) / 3,
-            });
-        }
-        let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        const VERTEX_SIZE: usize = std::mem::size_of::<FaceVertex>();
+        let count: usize = cells
+            .values()
+            .flat_map(|cell| cell.by_texture.values())
+            .map(Vec::len)
+            .sum();
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mallet faces"),
-            contents: if all.is_empty() {
-                &[0u8; 4]
-            } else {
-                bytemuck::cast_slice(&all)
-            },
+            size: (count.max(1) * VERTEX_SIZE) as u64,
             usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: true,
         });
+        let mut built = Vec::with_capacity(cells.len());
+        {
+            let mut mapped = buffer.slice(..).get_mapped_range_mut();
+            let mut written = 0;
+            for (at, cell) in cells {
+                let mut keys: Vec<&String> = cell.by_texture.keys().collect();
+                keys.sort();
+                let mut batches = Vec::with_capacity(keys.len());
+                let first = written;
+                for key in keys {
+                    let bytes: &[u8] = bytemuck::cast_slice(&cell.by_texture[key]);
+                    let start = written * VERTEX_SIZE;
+                    mapped[start..start + bytes.len()].copy_from_slice(bytes);
+                    let end = written + bytes.len() / VERTEX_SIZE;
+                    batches.push((key.clone(), written as u32..end as u32));
+                    written = end;
+                }
+                built.push(Chunk {
+                    cell: *at,
+                    min: cell.min,
+                    max: cell.max,
+                    batches,
+                    triangles: (written - first) / 3,
+                });
+            }
+        }
+        buffer.unmap();
         FaceMesh { buffer, chunks: built }
     }
 
