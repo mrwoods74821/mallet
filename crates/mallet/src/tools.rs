@@ -161,7 +161,7 @@ pub fn definitions() -> Value {
         tool(
             "clone_selection",
             "Copy the selection with fresh ids, move the copies by offset and select them, like Shift-dragging \
-             in Hammer. Undoable.",
+             in Hammer. An overlay cloned with its brushes lists the clones' faces in sides. Undoable.",
             json!({ "offset": vec3 }),
             &["offset"],
         ),

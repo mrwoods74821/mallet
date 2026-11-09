@@ -13,6 +13,7 @@ use glam::{DVec2, DVec3};
 use mallet_vmf::build::box_solid;
 use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
+use mallet_vmf::sides::{CopiedSides, OtherFaces};
 use mallet_vmf::{format_vec3, Entity, IdAllocator, SavedCamera, Solid, Vmf};
 
 use std::sync::Arc;
@@ -943,6 +944,9 @@ impl Editor {
     }
 
     /// Copies the selection with fresh ids, moves the copies by `offset` and selects them.
+    ///
+    /// A cloned overlay, or other entity that lists brush faces, names the clones of the
+    /// faces cloned with it, and keeps the faces that were not cloned.
     pub fn clone_selection(&mut self, offset: DVec3) -> Result<(), String> {
         let vmf = &self.document.as_ref().ok_or("no map is open")?.vmf;
         if self.selection.is_empty() {
@@ -951,6 +955,7 @@ impl Editor {
         let world = vmf.world().ok_or("the map has no world")?;
         let world_id = world.id().ok_or("the world has no id")?;
         let mut ids = IdAllocator::for_map(vmf);
+        let mut sides = CopiedSides::default();
         let mut edits = Vec::new();
         let mut copies = Vec::new();
         for owner in &self.selection {
@@ -961,7 +966,7 @@ impl Editor {
                         .find(|solid| solid.id() == Some(id))
                         .ok_or_else(|| format!("no world brush has id {id}"))?
                         .clone();
-                    solid.renumber(&mut ids);
+                    sides.renumber_solid(&mut solid, &mut ids);
                     solid.translate(offset);
                     copies.extend(solid.id().map(Owner::Solid));
                     edits.push(Edit::AddSolid {
@@ -972,11 +977,16 @@ impl Editor {
                 }
                 Owner::Entity(id) => {
                     let mut entity = find_entity(vmf, id)?.clone();
-                    entity.renumber(&mut ids);
+                    sides.renumber_entity(&mut entity, &mut ids);
                     entity.translate(offset);
                     copies.extend(entity.id().map(Owner::Entity));
                     edits.push(Edit::AddEntity { index: None, entity });
                 }
+            }
+        }
+        for edit in &mut edits {
+            if let Edit::AddEntity { entity, .. } = edit {
+                sides.remap_entity(entity, OtherFaces::Keep);
             }
         }
         self.apply_edit(&Edit::Batch(edits))?;
