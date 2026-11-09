@@ -152,7 +152,15 @@ directory trees are read up front). After them come the games Garry's Mod lists 
 `cfg/mount.cfg`, each folder with every `*_dir.vpk` in it, unless Mallet Options turns
 them off. Every mount belongs to a `Source` (a game VPK or folder, a mounted game, an
 addon or downloads), and listings say which source each file is read from, so the texture
-browser can filter by them. `Materials` turns a material name into the texture
+browser can filter by them.
+
+A game with its addons and mounted games is a hundred or more mounts listing hundreds of
+thousands of files, and a map looks thousands of files up, so lookups are kept cheap. A
+mounted folder remembers which of its directories exist and is skipped without touching
+the disk when it lacks the file's directory; a directory found missing is looked for
+again after five seconds, so content added while Mallet runs shows up.
+
+`Materials` turns a material name into the texture
 Hammer shows: `%tooltexture` first, then `$basetexture`, following `patch` materials. A
 VTF keeps its picture at many sizes, smallest first, and only its header and the sizes no
 bigger than 512 pixels are read from the file (`GameFs::open` reads a file a part at a
