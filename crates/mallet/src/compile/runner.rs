@@ -435,19 +435,17 @@ fn run_program(
     // Linux compile tools load their engine libraries (libtier0.so and friends)
     // from their own folder; without this they die with a loader error before
     // main. Windows resolves these from the exe folder by default.
+    #[cfg(not(windows))]
     if let Some(folder) = command.program.parent() {
-        #[cfg(not(windows))]
-        {
-            use std::ffi::OsString;
-            let mut paths = vec![folder.to_path_buf()];
-            if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
-                paths.push(PathBuf::from(OsString::from(existing)));
-            }
-            process.env(
-                "LD_LIBRARY_PATH",
-                std::env::join_paths(paths).unwrap_or_default(),
-            );
+        use std::ffi::OsString;
+        let mut paths = vec![folder.to_path_buf()];
+        if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+            paths.push(PathBuf::from(OsString::from(existing)));
         }
+        process.env(
+            "LD_LIBRARY_PATH",
+            std::env::join_paths(paths).unwrap_or_default(),
+        );
     }
     hide_window(&mut process, low_priority);
     let mut child = process
