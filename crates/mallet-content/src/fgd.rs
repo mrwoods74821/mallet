@@ -76,6 +76,9 @@ pub struct EntityClass {
     pub studio_from_model: bool,
     /// The sprite `iconsprite("...")` shows, as a material path.
     pub icon: Option<String>,
+    /// Whether the model comes from `lightprop()`, which Hammer turns to point where the
+    /// light shines, taking the pitch from the `pitch` key as the compiler does.
+    pub light_prop: bool,
 }
 
 impl EntityClass {
@@ -278,6 +281,7 @@ fn merge_bases(written: &Written, class: &mut EntityClass, visiting: &mut Vec<St
         if class.studio.is_none() && !class.studio_from_model {
             class.studio = base.studio;
             class.studio_from_model = base.studio_from_model;
+            class.light_prop = base.light_prop;
         }
         if class.icon.is_none() {
             class.icon = base.icon;
@@ -513,6 +517,7 @@ impl Parser {
             studio: None,
             studio_from_model: false,
             icon: None,
+            light_prop: false,
         };
         // Helpers up to '='.
         while !self.is_punct('=') {
@@ -550,10 +555,13 @@ impl Parser {
                         class.color = Some([values[0] as u8, values[1] as u8, values[2] as u8]);
                     }
                 }
-                "studio" | "studioprop" => match arguments.first().and_then(|group| group.first()) {
-                    Some(path) => class.studio = Some(path.clone()),
-                    None => class.studio_from_model = true,
-                },
+                "studio" | "studioprop" | "lightprop" => {
+                    class.light_prop = helper == "lightprop";
+                    match arguments.first().and_then(|group| group.first()) {
+                        Some(path) => class.studio = Some(path.clone()),
+                        None => class.studio_from_model = true,
+                    }
+                }
                 "iconsprite" => class.icon = arguments.first().and_then(|group| group.first()).cloned(),
                 _ => {}
             }

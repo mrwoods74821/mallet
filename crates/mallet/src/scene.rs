@@ -345,7 +345,11 @@ impl Scene {
                 .map(model_key)
                 .and_then(|key| Some((models.get(&key)?.clone()?, key)));
             if let (Some(origin), Some((model, key))) = (entity.origin(), loaded) {
-                let transform = entity_transform(origin, entity);
+                let transform = if class.is_some_and(|class| class.light_prop) {
+                    light_prop_transform(origin, entity)
+                } else {
+                    entity_transform(origin, entity)
+                };
                 let local = Bounds {
                     min: DVec3::from_array(model.min.map(f64::from)),
                     max: DVec3::from_array(model.max.map(f64::from)),
@@ -864,6 +868,21 @@ fn entity_transform(origin: DVec3, entity: &Entity) -> DMat4 {
         .unwrap_or(1.0);
     let rotation = DMat3::from_rotation_z(yaw) * DMat3::from_rotation_y(pitch) * DMat3::from_rotation_x(roll);
     DMat4::from_translation(origin) * DMat4::from_mat3(rotation) * DMat4::from_scale(DVec3::splat(scale))
+}
+
+/// Model space to world for a `lightprop()` model, such as light_spot's lamp: turned so
+/// its front points the way the light shines, as the compiler reads `angles`, `angle`
+/// and `pitch`, keeping the roll from `angles`.
+fn light_prop_transform(origin: DVec3, entity: &Entity) -> DMat4 {
+    let direction = mallet_vmf::light::vrad_direction(entity);
+    let roll = entity
+        .get("angles")
+        .and_then(parse_vec3)
+        .map_or(0.0, |angles| angles.z.to_radians());
+    let yaw = direction.y.atan2(direction.x);
+    let pitch = -direction.z.clamp(-1.0, 1.0).asin();
+    let rotation = DMat3::from_rotation_z(yaw) * DMat3::from_rotation_y(pitch) * DMat3::from_rotation_x(roll);
+    DMat4::from_translation(origin) * DMat4::from_mat3(rotation)
 }
 
 static GENERATION: AtomicU64 = AtomicU64::new(1);
