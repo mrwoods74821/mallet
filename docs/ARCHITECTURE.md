@@ -387,8 +387,9 @@ changes, never for selection changes or camera moves:
   stand-in, so opening a large map does not stall. Memory stays level however many
   materials a map has: the threads hand over one texture at a time and pause while a few
   wait to be uploaded, a frame uploads a bounded amount, and what has arrived is swapped
-  into the picture a few times a second, rebuilding only the chunks that use it. MCP
-  screenshots wait for the loads to finish.
+  into the picture a few times a second, rebuilding only the chunks that use it. A texture
+  the graphics card refuses, as when its memory is full, shows as missing. MCP screenshots
+  wait for the loads to finish.
 - The camera has a draw distance (default 8192 units) that sets the projection's far
   plane, so frustum culling also drops everything beyond it. Chunks are 1024 units.
 - The selection, its red outline and tool previews are small and rebuilt every frame so

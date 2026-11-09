@@ -13,10 +13,12 @@ mod lit;
 pub use lit::{LightingInput, LightingStats};
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
@@ -703,19 +705,36 @@ impl Renderer3D {
     fn upload_loaded(&mut self, (key, loaded): Loaded) -> usize {
         let emissive = self.texture_lights.get(&key).map(|light| light.hdr.max(light.ldr));
         let bytes = loaded.as_ref().map_or(0, |(mips, _)| mips.bytes());
-        let texture = loaded.map(|(mips, facts)| {
-            upload(
-                &self.device,
-                &self.queue,
-                &self.texture_layout,
-                &self.sampler,
-                &mips,
-                facts,
-                emissive,
-            )
-        });
+        let texture = loaded.and_then(|(mips, facts)| self.upload_guarded(&mips, facts, emissive));
         self.arrived.push((key, texture));
         bytes
+    }
+
+    /// Uploads a texture, or gives `None` when the graphics card refuses it, as it does
+    /// when its memory is full. The material then shows as missing; without the error
+    /// scopes wgpu would stop the editor instead.
+    fn upload_guarded(&self, mips: &Mips, facts: MaterialFacts, emissive: Option<DVec3>) -> Option<GpuTexture> {
+        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let texture = upload(
+            &self.device,
+            &self.queue,
+            &self.texture_layout,
+            &self.sampler,
+            mips,
+            facts,
+            emissive,
+        );
+        let refused = [self.device.pop_error_scope(), self.device.pop_error_scope()]
+            .into_iter()
+            .find_map(|scope| ready(scope).flatten());
+        match refused {
+            Some(error) => {
+                eprintln!("texture upload failed: {error}");
+                None
+            }
+            None => Some(texture),
+        }
     }
 
     /// Starts drawing the textures that have arrived. Once nothing is on its way any
@@ -1800,6 +1819,15 @@ impl Renderer3D {
             buffer,
             count: vertices.len() as u32,
         })
+    }
+}
+
+/// The value of a future that is ready at once, as wgpu's are outside a browser.
+fn ready<T>(future: impl Future<Output = T>) -> Option<T> {
+    let mut future = std::pin::pin!(future);
+    match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(value) => Some(value),
+        Poll::Pending => None,
     }
 }
 
