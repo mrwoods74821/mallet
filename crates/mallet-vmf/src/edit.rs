@@ -10,6 +10,7 @@ use std::fmt;
 use glam::{DMat4, DVec3};
 
 use crate::geometry::Bounds;
+use crate::kv::Block;
 use crate::transform::{self, TextureLock};
 use crate::{Connection, Entity, EntityItem, Solid, TopLevel, Vmf};
 
@@ -68,6 +69,23 @@ pub enum Edit {
         /// Entity id.
         entity: u32,
     },
+    /// Adds a block other than a brush, such as a world `group`, to the world or an entity.
+    AddBlock {
+        /// Owning entity id; use the world's id for world blocks.
+        entity: u32,
+        /// Position among the entity's items, or `None` to add it after the last item.
+        index: Option<usize>,
+        /// The block.
+        block: Block,
+    },
+    /// Removes the block at `index` among an entity's items. The item there must be a
+    /// block other than a brush.
+    RemoveBlock {
+        /// Owning entity id.
+        entity: u32,
+        /// Position among the entity's items.
+        index: usize,
+    },
     /// Moves brushes with texture lock. Entity origins are moved with [`Edit::SetKey`].
     Translate {
         /// Brush ids.
@@ -125,6 +143,13 @@ pub enum EditError {
     InvalidResize,
     /// A transform would flatten the brushes or is not a finite number.
     InvalidTransform,
+    /// The entity has no block other than a brush at this position.
+    NoSuchBlock {
+        /// Owning entity id.
+        entity: u32,
+        /// Position among the entity's items.
+        index: usize,
+    },
 }
 
 impl fmt::Display for EditError {
@@ -140,6 +165,7 @@ impl fmt::Display for EditError {
                 "the new size must be larger than zero along every axis the selection spans"
             ),
             Self::InvalidTransform => write!(f, "the transform would flatten the selection"),
+            Self::NoSuchBlock { entity, index } => write!(f, "entity {entity} has no block at position {index}"),
         }
     }
 }
@@ -237,6 +263,33 @@ impl Edit {
                 Ok(Self::AddEntity {
                     index: Some(index),
                     entity: removed,
+                })
+            }
+            Self::AddBlock { entity, index, block } => {
+                let target = entity_mut(vmf, *entity)?;
+                let at = index.unwrap_or(target.items.len()).min(target.items.len());
+                target.items.insert(at, EntityItem::Other(block.clone()));
+                Ok(Self::RemoveBlock {
+                    entity: *entity,
+                    index: at,
+                })
+            }
+            Self::RemoveBlock { entity, index } => {
+                let target = entity_mut(vmf, *entity)?;
+                let missing = EditError::NoSuchBlock {
+                    entity: *entity,
+                    index: *index,
+                };
+                if !matches!(target.items.get(*index), Some(EntityItem::Other(_))) {
+                    return Err(missing);
+                }
+                let EntityItem::Other(block) = target.items.remove(*index) else {
+                    return Err(missing);
+                };
+                Ok(Self::AddBlock {
+                    entity: *entity,
+                    index: Some(*index),
+                    block,
                 })
             }
             Self::Translate { solids, offset } => {
