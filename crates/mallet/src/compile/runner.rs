@@ -436,6 +436,7 @@ fn run_program(
     let mut child = process
         .spawn()
         .map_err(|error| format!("Could not start {}: {error}", command.program.display()))?;
+    lower_priority(&child, low_priority);
 
     let (sender, receiver) = mpsc::channel::<(usize, Vec<u8>)>();
     let pipes: [Option<Box<dyn Read + Send>>; 2] = [
@@ -520,8 +521,24 @@ fn hide_window(process: &mut Command, low_priority: bool) {
     process.creation_flags(CREATE_NO_WINDOW | priority);
 }
 
+/// Nothing to hide on Unix: the compile window spawns compilers without a
+/// console of their own. Low priority is applied after spawn instead, on the
+/// child itself, so cancelling still kills the compiler directly.
 #[cfg(not(windows))]
 fn hide_window(_process: &mut Command, _low_priority: bool) {}
+
+#[cfg(not(windows))]
+fn lower_priority(child: &std::process::Child, low_priority: bool) {
+    if low_priority {
+        // renice-style niceness +10, the same intent as BELOW_NORMAL on Windows.
+        unsafe {
+            libc::setpriority(libc::PRIO_PROCESS, child.id(), 10);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn lower_priority(_child: &std::process::Child, _low_priority: bool) {}
 
 /// Starts a program without waiting for it, such as the game.
 fn launch(command: &CommandLine) -> Result<Option<String>, String> {

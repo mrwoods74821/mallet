@@ -22,10 +22,25 @@ screenshots. It is a work in progress: displacements are next.
 cargo run --release -p mallet -- path/to/map.vmf
 ```
 
+On Linux you need the usual wgpu system libraries first:
+`libxkbcommon`, `libx11`-and-friends (X11 development packages), `libwayland`,
+and the Vulkan loader — on Debian/Ubuntu:
+`sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libvulkan-dev`.
+Both X11 and Wayland are supported.
+
 The 3D view shows textures from a Source game. On first start Mallet looks for Garry's
 Mod, Half-Life 2, the Source SDK Base 2013 games or Counter-Strike: Source in your Steam
 libraries; choose another with Tools > Game Folder... (the folder that contains
-`gameinfo.txt`). The choice is saved in `%APPDATA%\Mallet\config.json`.
+`gameinfo.txt`). Steam itself is found at `C:\Program Files (x86)\Steam` on Windows, or
+`~/.steam/steam` (then `~/.local/share/Steam`) on Linux, together with every library in
+its `libraryfolders.vdf`. The choice is saved in `%APPDATA%\Mallet\config.json` on
+Windows and `~/.config/Mallet/config.json` on Linux.
+
+Compiling uses the game's own tools: on Windows the usual `bin/win64` exes (and the
+Hammer++ builds), on Linux the extensionless `vbsp`/`vvis`/`vrad` binaries under the
+game's `bin` or `bin/linux64` folders — the Source SDK ships these; GMod's Linux install
+does not, so point Mallet Options > Compile tools at a copy, or install the
+Source SDK Base 2013 tools for free.
 
 Prop entities with a `model` key show their model in the 3D view, textured with the
 default skin and placed by `origin`, `angles` and `modelscale`. Models the game does not
@@ -49,9 +64,10 @@ compiling a `.mallet` map first writes a VMF copy to a `mallet_compile` folder b
 
 Edit > Mallet Options > Files chooses the format Save As offers first for new maps, and
 sets up Windows for your account: `.mallet` files open in Mallet with its icon, and VMF
-files can list Mallet under "Open with" while Hammer stays their default. Opening a map
-from Explorer while Mallet runs adds it as a tab in that window instead of starting a
-second Mallet, as Hammer does.
+files can list Mallet under "Open with" while Hammer stays their default. (This file-type
+setup is Windows-only; the section hides itself elsewhere.) Opening a map from Explorer
+while Mallet runs adds it as a tab in that window instead of starting a second Mallet, as
+Hammer does.
 
 ## Layout
 
@@ -287,11 +303,13 @@ as you change it:
 - **Keyboard** and **AI agents**: the key bindings, and whether the MCP server runs and on
   which port.
 
-Settings are saved in `%APPDATA%\Mallet\config.json`.
+Settings are saved in `%APPDATA%\Mallet\config.json` on Windows and
+`~/.config/Mallet/config.json` on Linux (`$XDG_CONFIG_HOME` is honoured).
 
 Where you leave the main window and every panel (Face Edit, the texture browser, Compile,
 Options and the rest), and their sizes, are remembered between runs in
-`%APPDATA%\Mallet\data`. Set `MALLET_PROFILE` to keep a separate layout, as test copies do.
+`%APPDATA%\Mallet\data` on Windows or `~/.config/Mallet/data` on Linux. Set
+`MALLET_PROFILE` to keep a separate layout, as test copies do.
 
 ## AI agents
 

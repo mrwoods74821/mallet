@@ -14,8 +14,53 @@ const KNOWN_GAMES: [&str; 5] = [
     "Source SDK Base 2013 Multiplayer/hl2mp",
     "Counter-Strike Source/cstrike",
 ];
+
 /// Where Steam is installed unless Mallet Options says otherwise.
+///
+/// Per platform: Windows keeps the standard install folder; Linux tries
+/// `~/.steam/steam` (the distro-created symlink, e.g. to
+/// `~/.steam/debian-installation` on Ubuntu) and the manual-install
+/// location Steam's own docs name.
+#[cfg(windows)]
 pub const DEFAULT_STEAM_DIR: &str = "C:/Program Files (x86)/Steam";
+
+/// The Steam folders tried on this platform, in order, when `steam_dir` is not set.
+#[cfg(windows)]
+pub fn default_steam_dirs() -> Vec<PathBuf> {
+    vec![PathBuf::from(DEFAULT_STEAM_DIR)]
+}
+
+#[cfg(not(windows))]
+pub const DEFAULT_STEAM_DIR: &str = "~/.steam/steam";
+
+#[cfg(not(windows))]
+pub fn default_steam_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".steam/steam"));
+        dirs.push(home.join(".local/share/Steam"));
+    }
+    dirs
+}
+
+/// Mallet's settings/logs folder for this platform: `%APPDATA%` on Windows,
+/// the XDG config home (`$XDG_CONFIG_HOME` or `~/.config`) elsewhere, both
+/// with `MALLET_PROFILE` honoured through `app_folder()`.
+#[cfg(windows)]
+fn platform_data_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|appdata| PathBuf::from(appdata))
+}
+
+#[cfg(not(windows))]
+fn platform_data_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config"))
+}
 
 /// Settings kept between runs. Missing fields take their defaults, so older files load.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -710,7 +755,7 @@ impl Config {
             return Self::load_from(&path);
         }
         // A new profile starts from the main settings, without their map history.
-        let main = std::env::var_os("APPDATA").map(|appdata| Path::new(&appdata).join("Mallet").join("config.json"));
+        let main = platform_data_dir().map(|dir| dir.join("Mallet").join("config.json"));
         let mut config = main.map_or_else(Self::default, |main| Self::load_from(&main));
         config.recent_maps.clear();
         config
@@ -736,7 +781,7 @@ impl Config {
 
     /// Writes the settings, creating the folder if needed.
     pub fn save(&self) -> Result<(), String> {
-        let path = config_path().ok_or("APPDATA is not set, so settings cannot be saved")?;
+        let path = config_path().ok_or("Mallet's settings folder is unavailable, so settings cannot be saved")?;
         self.save_to(&path)
     }
 
@@ -769,9 +814,9 @@ pub fn app_folder() -> String {
     }
 }
 
-/// Mallet's folder in `%APPDATA%`, holding settings, presets and compile logs.
+/// Mallet's folder holding settings, presets and compile logs.
 pub fn data_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|appdata| Path::new(&appdata).join(app_folder()))
+    platform_data_dir().map(|dir| dir.join(app_folder()))
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -857,23 +902,35 @@ impl ToolKind {
             ToolKind::SourceCubemap => {
                 for folder in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
                     add(folder.join("sourcecubemap.exe"));
+                    // Linux builds install the bare name onto PATH; the extra
+                    // candidate is skipped where it does not exist.
+                    add(folder.join("sourcecubemap"));
                 }
-                if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                    add(Path::new(&local).join("Programs/SourceCubemap/sourcecubemap.exe"));
-                }
-                for program_files in ["ProgramFiles", "ProgramFiles(x86)"] {
-                    if let Some(folder) = std::env::var_os(program_files) {
-                        add(Path::new(&folder).join("SourceCubemap/sourcecubemap.exe"));
+                #[cfg(windows)]
+                {
+                    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                        add(Path::new(&local).join("Programs/SourceCubemap/sourcecubemap.exe"));
+                    }
+                    for program_files in ["ProgramFiles", "ProgramFiles(x86)"] {
+                        if let Some(folder) = std::env::var_os(program_files) {
+                            add(Path::new(&folder).join("SourceCubemap/sourcecubemap.exe"));
+                        }
+                    }
+                    if let Some(home) = std::env::var_os("USERPROFILE") {
+                        add(Path::new(&home).join("SourceCubemap/sourcecubemap.exe"));
+                    }
+                    for drive in ["C:", "D:", "E:"] {
+                        add(PathBuf::from(format!(
+                            "{drive}/Github/SourceCubemap/build/release/sourcecubemap.exe"
+                        )));
+                        add(PathBuf::from(format!("{drive}/SourceCubemap/sourcecubemap.exe")));
                     }
                 }
-                if let Some(home) = std::env::var_os("USERPROFILE") {
-                    add(Path::new(&home).join("SourceCubemap/sourcecubemap.exe"));
-                }
-                for drive in ["C:", "D:", "E:"] {
-                    add(PathBuf::from(format!(
-                        "{drive}/Github/SourceCubemap/build/release/sourcecubemap.exe"
-                    )));
-                    add(PathBuf::from(format!("{drive}/SourceCubemap/sourcecubemap.exe")));
+                #[cfg(not(windows))]
+                if let Some(home) = std::env::var_os("HOME") {
+                    let home = Path::new(&home);
+                    add(home.join(".local/bin/sourcecubemap"));
+                    add(home.join("SourceCubemap/sourcecubemap"));
                 }
             }
             ToolKind::Game => {
@@ -884,6 +941,8 @@ impl ToolKind {
                 if let Some(game) = game_dir.and_then(Path::file_name) {
                     add(root.join(format!("{}.exe", game.to_string_lossy())));
                 }
+                // Linux: Source games launch through their shell script.
+                add(root.join("hl2.sh"));
             }
             _ => {
                 let Some(root) = root else { return found };
@@ -893,6 +952,11 @@ impl ToolKind {
                 }
                 for folder in ["bin/win64", "bin"] {
                     add(root.join(folder).join(format!("{name}plusplus.exe")));
+                }
+                // Linux compilers ship extensionless in bin/linux64 (the SDK's
+                // own project layout) or the game's bin folder.
+                for folder in ["bin/linux64", "bin"] {
+                    add(root.join(folder).join(format!("{name}")));
                 }
             }
         }
@@ -904,9 +968,15 @@ impl ToolKind {
 /// libraries listed by the Steam install at `steam_dir`, or in the usual place, in the
 /// order Steam lists them.
 pub fn detect_game_dir(steam_dir: Option<&Path>) -> Option<PathBuf> {
-    let steam = steam_dir.map_or_else(|| PathBuf::from(DEFAULT_STEAM_DIR), Path::to_path_buf);
-    let mut libraries = vec![steam.clone()];
-    let listing = fs::read_to_string(steam.join("steamapps").join("libraryfolders.vdf")).unwrap_or_default();
+    let libraries = match steam_dir {
+        Some(steam) => vec![steam.to_path_buf()],
+        None => default_steam_dirs(),
+    };
+    let mut libraries = libraries;
+    let listing = libraries
+        .first()
+        .and_then(|steam| fs::read_to_string(steam.join("steamapps").join("libraryfolders.vdf")).ok())
+        .unwrap_or_default();
     libraries.extend(
         listing
             .lines()
