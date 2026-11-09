@@ -153,9 +153,13 @@ directory trees are read up front). After them come the games Garry's Mod lists 
 them off. Every mount belongs to a `Source` (a game VPK or folder, a mounted game, an
 addon or downloads), and listings say which source each file is read from, so the texture
 browser can filter by them. `Materials` turns a material name into the texture
-Hammer shows: `%tooltexture` first, then `$basetexture`, following `patch` materials. VTF
-images are decoded at the largest mip level no bigger than 512 pixels, and loading runs on
-every CPU core. Materials that cannot be found render as Hammer's pink and black checkers.
+Hammer shows: `%tooltexture` first, then `$basetexture`, following `patch` materials. A
+VTF keeps its picture at many sizes, smallest first, and only its header and the sizes no
+bigger than 512 pixels are read from the file (`GameFs::open` reads a file a part at a
+time). DXT pictures go to the graphics card as the file stores them when it can sample
+them, which takes a quarter to an eighth of the memory of decoded pixels; other formats
+are decoded, and a texture stored without small sizes is scaled down to fit. Materials
+that cannot be found render as Hammer's pink and black checkers.
 
 `load_model` reads a studio model's `.mdl`, `.dx90.vtx` and `.vvd` through `vmdl` and keeps
 the first level of detail with skin 0. Each mesh's material is resolved against the

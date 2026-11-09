@@ -93,25 +93,36 @@ impl VpkArchive {
 
     /// Reads a file, or returns `None` when the archive does not hold it.
     pub fn read(&self, path: &str) -> Result<Option<Vec<u8>>, ContentError> {
+        self.read_range(path, 0, u64::MAX)
+    }
+
+    /// Reads `length` bytes of a file from `start`, or fewer when the file ends first, or
+    /// returns `None` when the archive does not hold it. A file is its preloaded bytes in
+    /// the directory file followed by the rest in a data file.
+    pub fn read_range(&self, path: &str, start: u64, length: u64) -> Result<Option<Vec<u8>>, ContentError> {
         let Some(entry) = self.entries.get(&normalize(path)) else {
             return Ok(None);
         };
-        let mut data = Vec::with_capacity(usize::from(entry.preload_length) + entry.length as usize);
-        if entry.preload_length > 0 {
+        let preload = u64::from(entry.preload_length);
+        let end = start.saturating_add(length).min(preload + u64::from(entry.length));
+        let mut data = Vec::with_capacity(end.saturating_sub(start) as usize);
+        let preload_end = end.min(preload);
+        if start < preload_end {
             read_range(
                 &self.dir_path,
-                entry.preload_offset,
-                u64::from(entry.preload_length),
+                entry.preload_offset + start,
+                preload_end - start,
                 &mut data,
             )?;
         }
-        if entry.length > 0 {
-            let (path, start) = if entry.archive == IN_DIRECTORY_FILE {
+        let body_start = start.max(preload);
+        if body_start < end {
+            let (path, base) = if entry.archive == IN_DIRECTORY_FILE {
                 (self.dir_path.clone(), self.data_start + u64::from(entry.offset))
             } else {
                 (self.archive_path(entry.archive), u64::from(entry.offset))
             };
-            read_range(&path, start, u64::from(entry.length), &mut data)?;
+            read_range(&path, base + body_start - preload, end - body_start, &mut data)?;
         }
         Ok(Some(data))
     }

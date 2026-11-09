@@ -2,6 +2,7 @@
 //! for Garry's Mod, the other games listed in `cfg/mount.cfg`.
 
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use mallet_kv::{Block, Item};
@@ -190,6 +191,16 @@ impl GameFs {
         })
     }
 
+    /// Opens a game file from the first mount that has it, to read only the parts of it
+    /// that are needed. Paths ignore case and may use either slash.
+    pub fn open(&self, path: &str) -> Option<GameFile<'_>> {
+        let path = normalize(path);
+        self.mounts.iter().find_map(|mount| match &mount.place {
+            Place::Folder(folder) => fs::File::open(folder.join(&path)).ok().map(GameFile::Loose),
+            Place::Vpk(archive) => archive.contains(&path).then(|| GameFile::Packed(archive, path.clone())),
+        })
+    }
+
     /// Where a game file lies on disk, when it is a loose file rather than in a VPK.
     pub fn locate(&self, path: &str) -> Option<PathBuf> {
         let path = normalize(path);
@@ -318,6 +329,34 @@ impl GameFs {
             }
         }
         self.mounts.push(Mount { place, source });
+    }
+}
+
+/// A game file opened with [`GameFs::open`], read a part at a time. A texture file holds
+/// its picture at many sizes and a viewport shows only the small ones, so reading parts
+/// keeps most of a large file off the disk and out of memory.
+#[derive(Debug)]
+pub enum GameFile<'a> {
+    /// A loose file in a folder.
+    Loose(fs::File),
+    /// A file in a VPK archive, by its path there.
+    Packed(&'a VpkArchive, String),
+}
+
+impl GameFile<'_> {
+    /// Reads `length` bytes from `start`, or fewer when the file ends first.
+    pub fn read(&self, start: u64, length: u64) -> Option<Vec<u8>> {
+        match self {
+            Self::Loose(file) => {
+                let mut file: &fs::File = file;
+                let size = file.metadata().ok()?.len();
+                let mut data = Vec::with_capacity(size.saturating_sub(start).min(length) as usize);
+                file.seek(SeekFrom::Start(start)).ok()?;
+                file.take(length).read_to_end(&mut data).ok()?;
+                Some(data)
+            }
+            Self::Packed(archive, path) => archive.read_range(path, start, length).ok().flatten(),
+        }
     }
 }
 

@@ -5,11 +5,12 @@ use std::sync::Arc;
 
 use mallet_kv::{Block, Item};
 
+use crate::filesystem::GameFile;
 use crate::vpk::normalize;
-use crate::vtf::{self, Image};
+use crate::vtf::{self, Image, Mips};
 use crate::GameFs;
 
-/// Largest side, in pixels, of the mip level decoded for viewports.
+/// Largest side, in pixels, of the textures viewports show.
 const MAX_TEXTURE_SIDE: u32 = 512;
 /// How many `patch` materials may include each other before giving up.
 const MAX_PATCH_DEPTH: usize = 8;
@@ -227,6 +228,25 @@ impl Properties {
             AlphaMode::Opaque
         }
     }
+
+    /// What the editor needs to draw the material, without its texture.
+    fn material(&self) -> Material {
+        let unlit = self
+            .shader
+            .as_deref()
+            .is_some_and(|shader| matches!(shader, "unlitgeneric" | "unlittwotexture" | "sky" | "sprite"));
+        Material {
+            texture: None,
+            alpha: self.alpha_mode(),
+            surface: self.surface.unwrap_or_default(),
+            self_illum: self
+                .self_illum
+                .unwrap_or(false)
+                .then(|| self.self_illum_tint.unwrap_or([1.0; 3])),
+            unlit,
+            decal_scale: self.decal_scale.unwrap_or(1.0),
+        }
+    }
 }
 
 /// Rewrites the pixels of a modulating decal so that blending them by alpha looks like
@@ -322,32 +342,47 @@ impl MaterialLoader {
         let Some(properties) = self.properties(&key, 0) else {
             return Material::missing();
         };
-        let texture = properties
-            .texture
-            .as_ref()
-            .and_then(|name| self.filesystem.read(&format!("materials/{name}.vtf")))
-            .and_then(|data| vtf::decode(&data, MAX_TEXTURE_SIDE).ok())
-            .map(|mut image| {
-                if properties.modulates() {
-                    modulate_to_blend(&mut image.rgba);
-                }
-                Arc::new(image)
-            });
-        let unlit = properties
-            .shader
-            .as_deref()
-            .is_some_and(|shader| matches!(shader, "unlitgeneric" | "unlittwotexture" | "sky" | "sprite"));
         Material {
-            texture,
-            alpha: properties.alpha_mode(),
-            surface: properties.surface.unwrap_or_default(),
-            self_illum: properties
-                .self_illum
-                .unwrap_or(false)
-                .then(|| properties.self_illum_tint.unwrap_or([1.0; 3])),
-            unlit,
-            decal_scale: properties.decal_scale.unwrap_or(1.0),
+            texture: self.image(&properties).map(Arc::new),
+            ..properties.material()
         }
+    }
+
+    /// Loads a material for a graphics card: what it is, with no texture of its own, and
+    /// its texture at every size a viewport shows. With `blocks`, DXT textures stay
+    /// compressed as their files store them, for cards that sample them that way.
+    pub fn load_mips(&self, material: &str, blocks: bool) -> (Material, Option<Mips>) {
+        let key = material_key(material);
+        let Some(properties) = self.properties(&key, 0) else {
+            return (Material::missing(), None);
+        };
+        let mips = if properties.modulates() {
+            self.image(&properties).map(Mips::from_image)
+        } else {
+            properties
+                .texture
+                .as_ref()
+                .and_then(|name| self.texture_file(name))
+                .and_then(|file| {
+                    vtf::load_mips(|start, length| file.read(start, length), MAX_TEXTURE_SIDE, blocks).ok()
+                })
+        };
+        (properties.material(), mips)
+    }
+
+    /// A material's texture as the viewports show it, decoded.
+    fn image(&self, properties: &Properties) -> Option<Image> {
+        let file = self.texture_file(properties.texture.as_ref()?)?;
+        let mut image = vtf::load(|start, length| file.read(start, length), MAX_TEXTURE_SIDE).ok()?;
+        if properties.modulates() {
+            modulate_to_blend(&mut image.rgba);
+        }
+        Some(image)
+    }
+
+    /// Opens a texture's VTF file, named without `materials/` or its extension.
+    fn texture_file(&self, name: &str) -> Option<GameFile<'_>> {
+        self.filesystem.open(&format!("materials/{name}.vtf"))
     }
 
     /// Loads a texture by its own name, such as `effects/flashlight001`, as projected
@@ -356,16 +391,16 @@ impl MaterialLoader {
         let name = normalize(texture);
         let name = name.strip_prefix("materials/").unwrap_or(&name);
         let name = name.strip_suffix(".vtf").unwrap_or(name);
-        let data = self.filesystem.read(&format!("materials/{name}.vtf"))?;
-        vtf::decode(&data, max_side).ok()
+        let file = self.texture_file(name)?;
+        vtf::load(|start, length| file.read(start, length), max_side).ok()
     }
 
     /// Loads a material's texture at most `max_side` pixels across, for thumbnails.
     pub fn thumbnail(&self, material: &str, max_side: u32) -> Option<Image> {
         let key = material_key(material);
         let name = self.properties(&key, 0)?.texture?;
-        let data = self.filesystem.read(&format!("materials/{name}.vtf"))?;
-        vtf::decode(&data, max_side).ok()
+        let file = self.texture_file(&name)?;
+        vtf::load(|start, length| file.read(start, length), max_side).ok()
     }
 
     /// Every material in the game, such as `brick/brickwall001a`: the `.vmt` files under
