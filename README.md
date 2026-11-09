@@ -75,6 +75,7 @@ These follow Hammer++'s default keybindings.
 | Ctrl+X / Ctrl+C / Ctrl+V | Cut / copy / paste the selection; Shift+Delete, Ctrl+Insert and Shift+Insert work too. Paste centres the objects under the cursor in a 2D view, snapped to the grid, or in the 2D view used last |
 | Ctrl+Shift+V | Paste Special: several copies, each moved and turned from the one before, renamed or grouped |
 | Shift+S / Shift+B / Shift+E / Shift+A | Selection tool / Block tool / Entity tool / Texture application |
+| Shift+C | Camera tool: drag with the left button in a 3D view to turn the camera where you look, and with the right button to slide it across the view. In a 2D view, left-click zooms in and right-click zooms out, around the cursor |
 | Alt+Enter or double-click | Object Properties for the selection: keyvalues, outputs, inputs and flags from the game's FGD |
 | F9 / Shift+F9 | Open the compile window / compile again with the preset used last |
 | Click | In 2D, click a brush's centre × or its outline to select it; in 3D, click it (or aim the crosshair at it in mouselook). Props are hit where their model is, so clicks through gaps reach what is behind; only when nothing else is hit does a prop's box count. Entities are selected whole; Ctrl+click toggles |

@@ -1,6 +1,7 @@
 //! Top-level editor window: menus, Hammer's four-viewport layout and the status bar. The
 //! toolbar, map tabs, tool palette and side panel are in `chrome`.
 
+mod camera_tool;
 mod chrome;
 mod compile_window;
 mod context_menu;
@@ -48,7 +49,7 @@ const PIVOT_REACH_PIXELS: f32 = 7.0;
 const INPUT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Actions checked against the keyboard every frame.
-const KEY_ACTIONS: [Action; 41] = [
+const KEY_ACTIONS: [Action; 42] = [
     Action::NewFile,
     Action::CloseTab,
     Action::NextTab,
@@ -64,6 +65,7 @@ const KEY_ACTIONS: [Action; 41] = [
     Action::GridSmaller,
     Action::GridLarger,
     Action::SelectionTool,
+    Action::CameraTool,
     Action::BlockTool,
     Action::EntityTool,
     Action::TextureTool,
@@ -469,6 +471,7 @@ impl MalletApp {
                     }
                     ui.separator();
                     menu_item(ui, &self.keymap, "Selection Tool", Action::SelectionTool, &mut chosen);
+                    menu_item(ui, &self.keymap, "Camera Tool", Action::CameraTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Block Tool", Action::BlockTool, &mut chosen);
                     menu_item(ui, &self.keymap, "Entity Tool", Action::EntityTool, &mut chosen);
                     menu_item(
@@ -870,8 +873,11 @@ impl MalletApp {
                 }
                 Tool::Overlay => editor.overlay_tool_click(origin, direction, pointer.modifiers.ctrl),
                 Tool::Decal => editor.decal_tool_click(origin, direction),
-                Tool::Block | Tool::Clip => {}
+                Tool::Block | Tool::Clip | Tool::Camera => {}
             }
+        }
+        if editor.tool == Tool::Camera && !looking {
+            self.camera_tool_3d(response, editor);
         }
         if editor.tool == Tool::Select && !looking {
             let hit = match (response.secondary_clicked(), pointer.position) {
@@ -1093,6 +1099,10 @@ impl MalletApp {
         if !editor.camera.mouse_look() {
             let zoom_step = editor.config.view.zoom_step;
             editor.views[view_index].handle_input(ui, response, rect, zoom_step);
+            // Zooming here, before the view is cloned below, lets this frame draw the new zoom.
+            if editor.tool == Tool::Camera && !space_held {
+                editor.views[view_index].handle_click_zoom(response, rect, zoom_step);
+            }
         }
         let view = editor.views[view_index].clone();
         if response.hovered() && !editor.camera.mouse_look() {
@@ -1239,9 +1249,10 @@ impl MalletApp {
                 start,
                 bounds,
             },
-            (Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex | Tool::Overlay | Tool::Decal, ..) => {
-                Drag::Marquee { view: index, start }
-            }
+            (
+                Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex | Tool::Overlay | Tool::Decal | Tool::Camera,
+                ..,
+            ) => Drag::Marquee { view: index, start },
             (Tool::Block, ..) => Drag::NewBlock {
                 view: index,
                 start: snap(start, editor.grid),
@@ -1346,6 +1357,10 @@ impl MalletApp {
         pointer: &PointerState,
     ) {
         let grid = editor.grid;
+        if editor.tool == Tool::Camera {
+            // The Camera tool's clicks zoom the view, which view_slot handled already.
+            return;
+        }
         if editor.tool == Tool::Vertex {
             self.vertex_tool_2d(index, view, rect, response, editor, pointer);
             return;
@@ -2125,6 +2140,12 @@ fn run(action: Action, editor: &mut Editor) {
         Action::GridSmaller => editor.change_grid(0.5),
         Action::GridLarger => editor.change_grid(2.0),
         Action::SelectionTool => editor.set_tool(Tool::Select),
+        Action::CameraTool => {
+            editor.set_tool(Tool::Camera);
+            editor.message =
+                "Camera tool: drag in a 3D view to look (left) or move (right); click a 2D view to zoom in, right-click to zoom out"
+                    .to_owned();
+        }
         Action::BlockTool => editor.set_tool(Tool::Block),
         Action::EntityTool => editor.set_tool(Tool::Entity),
         Action::TextureTool => editor.set_tool(Tool::Texture),
@@ -2171,7 +2192,7 @@ fn run(action: Action, editor: &mut Editor) {
                 Tool::Block => editor.commit_block().map(|_| ()),
                 Tool::Entity => editor.commit_entity().map(|_| ()),
                 Tool::Clip => editor.apply_clip().map(|_| ()),
-                Tool::Select | Tool::Texture | Tool::Vertex | Tool::Overlay | Tool::Decal => Ok(()),
+                Tool::Select | Tool::Texture | Tool::Vertex | Tool::Overlay | Tool::Decal | Tool::Camera => Ok(()),
             };
             if let Err(error) = result {
                 editor.message = error;

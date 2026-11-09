@@ -52,6 +52,9 @@ const DEFAULT_BLOCK: Bounds = Bounds {
 pub enum Tool {
     /// Hammer's Selection tool (Shift+S).
     Select,
+    /// Hammer's Camera tool (Shift+C): drag in a 3D view to look around or move the
+    /// camera, and click in a 2D view to zoom in, or right-click to zoom out.
+    Camera,
     /// Hammer's Block tool (Shift+B).
     Block,
     /// Hammer's Entity tool (Shift+E).
@@ -972,7 +975,9 @@ impl Editor {
     pub fn handle_box(&self) -> Option<Bounds> {
         match self.tool {
             Tool::Block => self.overlay.block,
-            Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex | Tool::Overlay | Tool::Decal => None,
+            Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex | Tool::Overlay | Tool::Decal | Tool::Camera => {
+                None
+            }
             Tool::Select => {
                 let bounds = self.scene.selection_bounds();
                 (!bounds.is_empty()).then(|| self.overlay.transform.map_or(bounds, |remap| remap.map_bounds(&bounds)))

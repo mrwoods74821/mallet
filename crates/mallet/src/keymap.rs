@@ -29,6 +29,8 @@ pub enum Action {
     GridSmaller,
     GridLarger,
     SelectionTool,
+    /// Switch to the Camera tool.
+    CameraTool,
     BlockTool,
     EntityTool,
     TextureTool,
@@ -241,6 +243,7 @@ impl KeyMap {
                 (Action::GridSmaller, Chord::key(Key::Minus)),
                 (Action::GridLarger, Chord::key(Key::Plus)),
                 (Action::SelectionTool, Chord::shift(Key::S)),
+                (Action::CameraTool, Chord::shift(Key::C)),
                 (Action::BlockTool, Chord::shift(Key::B)),
                 (Action::EntityTool, Chord::shift(Key::E)),
                 (Action::TextureTool, Chord::shift(Key::A)),

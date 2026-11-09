@@ -22,6 +22,8 @@ pub const DEFAULT_LOOK_SENSITIVITY: f64 = 0.2;
 /// Default world units the camera moves per mouse wheel notch.
 pub const DEFAULT_WHEEL_STEP: f64 = 64.0;
 const POINTS_PER_NOTCH: f64 = 50.0;
+/// World units the Camera tool's right drag slides the camera per point of mouse movement.
+const PAN_UNITS_PER_POINT: f64 = 1.0;
 /// Default for how quickly the camera reaches its target speed, per second; higher is
 /// snappier.
 pub const DEFAULT_ACCELERATION: f64 = 14.0;
@@ -329,6 +331,22 @@ impl Camera3D {
         self.mouse_look
     }
 
+    /// Turns the camera by a mouse drag of `delta` points, at the mouselook sensitivity.
+    /// The Camera tool's left drag uses this.
+    pub fn look_by(&mut self, delta: egui::Vec2) {
+        self.yaw = (self.yaw - f64::from(delta.x) * self.look_sensitivity).rem_euclid(360.0);
+        self.pitch = (self.pitch - f64::from(delta.y) * self.look_sensitivity).clamp(-MAX_PITCH, MAX_PITCH);
+    }
+
+    /// Slides the camera across its view by a mouse drag of `delta` points, so the scene
+    /// moves with the mouse: dragging right moves the camera left. The Camera tool's right
+    /// drag uses this.
+    pub fn pan_by(&mut self, delta: egui::Vec2) {
+        let up = self.right().cross(self.forward());
+        let step = up * f64::from(delta.y) - self.right() * f64::from(delta.x);
+        self.position += step * PAN_UNITS_PER_POINT;
+    }
+
     /// Focal length in pixels for a viewport of this size.
     pub fn focal(&self, rect: Rect) -> f64 {
         f64::from(rect.width()) * 0.5 / (self.fov.to_radians() * 0.5).tan()
@@ -433,5 +451,49 @@ impl Camera3D {
             "camera (wireframe)",
             label_color,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::vec2;
+
+    use super::*;
+
+    #[test]
+    fn dragging_right_turns_the_camera_right() {
+        let mut camera = Camera3D::new();
+        let yaw = camera.yaw;
+        camera.look_by(vec2(10.0, 0.0));
+        assert!(camera.yaw < yaw, "a right turn lowers the yaw, as mouselook does");
+    }
+
+    #[test]
+    fn looking_clamps_the_pitch() {
+        let mut camera = Camera3D::new();
+        camera.look_by(vec2(0.0, -100_000.0));
+        assert_eq!(camera.pitch, MAX_PITCH);
+    }
+
+    #[test]
+    fn dragging_right_slides_the_camera_left() {
+        let mut camera = Camera3D::new();
+        camera.yaw = 0.0;
+        camera.pitch = 0.0;
+        let before = camera.position;
+        camera.pan_by(vec2(8.0, 0.0));
+        let moved = camera.position - before;
+        assert!((moved.dot(camera.right()) + 8.0 * PAN_UNITS_PER_POINT).abs() < 1e-9, "{moved:?}");
+        assert!(moved.z.abs() < 1e-9, "a sideways drag keeps the height: {moved:?}");
+    }
+
+    #[test]
+    fn dragging_down_slides_the_camera_up() {
+        let mut camera = Camera3D::new();
+        camera.yaw = 0.0;
+        camera.pitch = 0.0;
+        let before = camera.position;
+        camera.pan_by(vec2(0.0, 8.0));
+        assert!((camera.position - before).z > 0.0);
     }
 }
