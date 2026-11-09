@@ -12,7 +12,7 @@ use glam::DVec3;
 
 use super::MalletApp;
 use crate::compile::runner::{JobState, LineKind, Severity, StepStatus};
-use crate::compile::{default_presets, plan_step, Context, OptionSpec, Preset, Step, StepKind, VARIABLES};
+use crate::compile::{default_presets, plan_step, Build, Context, OptionSpec, Preset, Step, StepKind, VARIABLES};
 use crate::config::{self, ToolKind};
 use crate::editor::{Editor, SelectMode};
 use crate::scene::Owner;
@@ -738,17 +738,81 @@ fn step_editor(
 
     let specs = step.kind.options();
     if !specs.is_empty() {
-        ui.label(RichText::new("Options").strong());
+        let build = step.kind.tool().and_then(|tool| {
+            step.program
+                .clone()
+                .filter(|path| !path.as_os_str().is_empty())
+                .or_else(|| facts.tool(tool))
+                .map(|path| Build::of(&path))
+        });
+        let filter_id = ui.id().with("step_option_filter");
+        let all_id = ui.id().with("step_option_show_all");
+        let mut filter: String = ui.data_mut(|data| data.get_temp(filter_id).unwrap_or_default());
+        let mut show_all: bool = ui.data_mut(|data| data.get_temp(all_id).unwrap_or(false));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Options").strong());
+            ui.add(
+                egui::TextEdit::singleline(&mut filter)
+                    .hint_text(format!("{} Search options", icon::MAGNIFYING_GLASS))
+                    .desired_width(180.0),
+            );
+            if let Some(build) = build.filter(|build| specs.iter().any(|spec| !build.supports(spec.build))) {
+                let other = match build {
+                    Build::PlusPlus => "game tools",
+                    _ => "Hammer++",
+                };
+                ui.checkbox(&mut show_all, format!("Show {other} options"))
+                    .on_hover_text("Options the program this step runs does not understand");
+            }
+        });
+        let needle = filter.trim().to_ascii_lowercase();
+        let shown: Vec<&OptionSpec> = specs
+            .iter()
+            .filter(|spec| {
+                show_all
+                    || step.option(spec.flag).is_some()
+                    || build.is_none_or(|build| build.supports(spec.build))
+            })
+            .filter(|spec| {
+                needle.is_empty()
+                    || [spec.flag, spec.name, spec.description]
+                        .iter()
+                        .any(|text| text.to_ascii_lowercase().contains(&needle))
+            })
+            .collect();
+        ui.data_mut(|data| {
+            data.insert_temp(filter_id, filter);
+            data.insert_temp(all_id, show_all);
+        });
         egui::Grid::new("step_options")
             .num_columns(3)
             .striped(true)
             .spacing([10.0, 4.0])
             .show(ui, |ui| {
-                for spec in specs {
-                    option_row(ui, step, spec, changed);
+                for spec in shown {
+                    option_row(ui, step, spec, build, changed);
                     ui.end_row();
                 }
             });
+        let unknown: Vec<String> = step
+            .options
+            .iter()
+            .filter(|option| !specs.iter().any(|spec| spec.flag == option.flag))
+            .map(|option| option.flag.clone())
+            .collect();
+        for flag in unknown {
+            ui.horizontal(|ui| {
+                let mut on = true;
+                if ui
+                    .checkbox(&mut on, RichText::new(&flag).monospace())
+                    .on_hover_text("An option Mallet no longer lists. Untick it to remove it.")
+                    .changed()
+                {
+                    step.options.retain(|option| option.flag != flag);
+                    *changed = true;
+                }
+            });
+        }
         ui.add_space(6.0);
     }
 
@@ -818,9 +882,12 @@ fn step_editor(
 }
 
 /// One option: a checkbox, its value when it takes one, and its warning.
-fn option_row(ui: &mut egui::Ui, step: &mut Step, spec: &OptionSpec, changed: &mut bool) {
+fn option_row(ui: &mut egui::Ui, step: &mut Step, spec: &OptionSpec, build: Option<Build>, changed: &mut bool) {
     let mut on = step.option(spec.flag).is_some();
-    let hover = format!("{}\n\n{}", spec.flag, spec.description);
+    let hover = match spec.build {
+        Build::Any => format!("{}\n\n{}", spec.flag, spec.description),
+        only => format!("{}\n\n{}\n\n{}", spec.flag, spec.description, only.requirement()),
+    };
     if ui.checkbox(&mut on, spec.name).on_hover_text(&hover).changed() {
         step.set_option(spec.flag, on);
         *changed = true;
@@ -841,15 +908,28 @@ fn option_row(ui: &mut egui::Ui, step: &mut Step, spec: &OptionSpec, changed: &m
             ui.label("");
         }
     }
-    let note = ui.label(RichText::new(spec.flag).monospace().small().color(MUTED));
-    if !spec.warning.is_empty() && on {
-        note.on_hover_text(spec.warning);
-        ui.label(
-            RichText::new(format!("{} {}", icon::WARNING, spec.warning))
-                .small()
-                .color(WARNING),
-        );
-    }
+    let unsupported = build.is_some_and(|build| !build.supports(spec.build));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(spec.flag).monospace().small().color(MUTED));
+        if spec.build != Build::Any {
+            let color = if unsupported { WARNING } else { MUTED };
+            ui.label(RichText::new(spec.build.tag()).small().color(color))
+                .on_hover_text(spec.build.requirement());
+        }
+        if on && unsupported {
+            ui.label(
+                RichText::new(format!("{} This program does not understand it", icon::WARNING))
+                    .small()
+                    .color(WARNING),
+            );
+        } else if on && !spec.warning.is_empty() {
+            ui.label(
+                RichText::new(format!("{} {}", icon::WARNING, spec.warning))
+                    .small()
+                    .color(WARNING),
+            );
+        }
+    });
 }
 
 fn output_tab(ui: &mut egui::Ui, state: &mut CompileWindowState, facts: &Facts) {
