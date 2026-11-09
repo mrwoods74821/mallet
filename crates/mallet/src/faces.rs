@@ -202,12 +202,10 @@ impl Editor {
         }
     }
 
-    /// Selects every face of the selected brushes, as switching to the texture tool does
-    /// in Hammer.
-    pub fn select_faces_of_selection(&mut self) {
-        let solids: Vec<u32> = self
-            .selection
-            .iter()
+    /// Every face of these brushes and of the brushes these entities own.
+    pub fn owner_sides<'a>(&self, owners: impl IntoIterator<Item = &'a Owner>) -> Vec<u32> {
+        let solids: Vec<u32> = owners
+            .into_iter()
             .flat_map(|owner| match owner {
                 Owner::Solid(id) => vec![*id],
                 Owner::Entity(id) => self
@@ -216,8 +214,44 @@ impl Editor {
                     .unwrap_or_default(),
             })
             .collect();
-        let sides: Vec<u32> = self.brush_faces(&solids).iter().map(|face| face.side.id).collect();
+        if solids.is_empty() {
+            return Vec::new();
+        }
+        self.brush_faces(&solids).iter().map(|face| face.side.id).collect()
+    }
+
+    /// The faces texture changes go to: the faces the texture tool selected, or else every
+    /// face of the selected brushes, so a texture picked with brushes selected covers them.
+    pub fn texture_targets(&self) -> BTreeSet<u32> {
+        if !self.face_selection.is_empty() {
+            return self.face_selection.clone();
+        }
+        self.owner_sides(&self.selection).into_iter().collect()
+    }
+
+    /// Selects every face of the selected brushes, as switching to the texture tool does
+    /// in Hammer.
+    pub fn select_faces_of_selection(&mut self) {
+        let sides = self.owner_sides(&self.selection);
         self.select_faces(sides, SelectMode::Replace);
+    }
+
+    /// Keeps the texture tool's faces in step with the brush selection: brushes that join
+    /// the selection bring all their faces, and brushes that leave it take theirs away. A
+    /// replacing selection starts over with the faces of the new selection.
+    pub(crate) fn follow_selection(&mut self, before: &BTreeSet<Owner>, mode: SelectMode) {
+        if mode == SelectMode::Replace {
+            return self.select_faces_of_selection();
+        }
+        let added: Vec<Owner> = self.selection.difference(before).copied().collect();
+        let removed: Vec<Owner> = before.difference(&self.selection).copied().collect();
+        let added = self.owner_sides(&added);
+        let removed = self.owner_sides(&removed);
+        self.face_selection.extend(added);
+        for side in removed {
+            self.face_selection.remove(&side);
+        }
+        self.scene.mark_faces(&self.face_selection);
     }
 
     /// Switches tools. Like Hammer, the texture tool starts with the faces of the selected

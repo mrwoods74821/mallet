@@ -493,8 +493,8 @@ pub fn definitions() -> Value {
         tool(
             "set_faces",
             "Change brush faces like Face Edit: material, scale, shift, rotation, lightmap scale, alignment to \
-             world or face, and justify (left, right, top, bottom, center, fit). Applies to the given sides or the \
-             selected faces. Undoable.",
+             world or face, and justify (left, right, top, bottom, center, fit). Applies to the given sides, the \
+             selected faces, or every face of the selected brushes. Undoable.",
             json!({
                 "sides": { "type": "array", "items": { "type": "integer" } },
                 "material": { "type": "string" },
@@ -1035,10 +1035,10 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
         "set_faces" => {
             let mut sides: std::collections::BTreeSet<u32> = id_list(args, "sides")?.into_iter().collect();
             if sides.is_empty() {
-                sides = editor.face_selection.clone();
+                sides = editor.texture_targets();
             }
             if sides.is_empty() {
-                return Err("pass sides, or select faces first".to_owned());
+                return Err("pass sides, or select faces or brushes first".to_owned());
             }
             let align = match optional_string(args, "align")? {
                 None => None,

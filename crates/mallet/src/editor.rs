@@ -792,6 +792,9 @@ impl Editor {
             self.refresh_clip_preview();
         }
         self.scene.mark_selected(&self.selection);
+        if self.tool == Tool::Texture {
+            self.follow_selection(&before, mode);
+        }
     }
 
     pub fn clear_selection(&mut self) {

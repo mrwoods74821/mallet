@@ -232,8 +232,8 @@ impl MalletApp {
                     match self.texture_browser.pick {
                         Pick::Current => {
                             editor.material = material.clone();
-                            if confirm && !editor.face_selection.is_empty() {
-                                let faces = editor.face_selection.clone();
+                            let faces = editor.texture_targets();
+                            if confirm && !faces.is_empty() {
                                 if let Err(error) = editor.apply_material(&faces, &material) {
                                     editor.message = error;
                                 }

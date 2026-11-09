@@ -15,7 +15,6 @@ use super::texture_browser::Pick;
 use super::MalletApp;
 use crate::editor::{Editor, Tool};
 use crate::faces::{FaceInfo, FaceValues, ReplaceAction, ReplaceOptions, TextureMode};
-use crate::scene::Owner;
 
 const MUTED: Color32 = Color32::from_gray(140);
 const MIXED: Color32 = Color32::from_rgb(230, 170, 60);
@@ -183,7 +182,7 @@ impl MalletApp {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     if ui.button(RichText::new("OK").strong()).clicked() {
-                        let within = state.marked_only.then(|| marked_faces(editor));
+                        let within = state.marked_only.then(|| editor.texture_targets());
                         let options = ReplaceOptions {
                             action: state.action,
                             within,
@@ -220,26 +219,6 @@ impl MalletApp {
             self.face_edit.find = find.to_owned();
         }
     }
-}
-
-/// The faces Replace Textures works on when it is limited to the selection: the faces the
-/// texture tool picked, or else every face of the selected brushes.
-fn marked_faces(editor: &Editor) -> BTreeSet<u32> {
-    if !editor.face_selection.is_empty() {
-        return editor.face_selection.clone();
-    }
-    let solids: Vec<u32> = editor
-        .selection
-        .iter()
-        .flat_map(|owner| match owner {
-            Owner::Solid(id) => vec![*id],
-            Owner::Entity(id) => editor
-                .entity(*id)
-                .map(|entity| entity.solids().filter_map(mallet_vmf::Solid::id).collect())
-                .unwrap_or_default(),
-        })
-        .collect();
-    editor.brush_faces(&solids).iter().map(|face| face.side.id).collect()
 }
 
 /// A square texture preview.
