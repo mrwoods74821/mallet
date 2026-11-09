@@ -478,6 +478,10 @@ pub struct AgentOptions {
     pub enabled: bool,
     /// The port it listens on, on 127.0.0.1. Takes effect on restart.
     pub port: u16,
+    /// Give agents their own tab, camera, views, grid, selection and tools, and refuse
+    /// the tools that drive the window, so the user can keep working while an agent
+    /// edits. Takes effect at once.
+    pub own_view: bool,
 }
 
 impl Default for AgentOptions {
@@ -485,6 +489,7 @@ impl Default for AgentOptions {
         Self {
             enabled: true,
             port: crate::mcp::DEFAULT_PORT,
+            own_view: true,
         }
     }
 }

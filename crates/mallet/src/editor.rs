@@ -30,7 +30,10 @@ use crate::scene::{entity_model, model_key, ModelCache, Overlay, Owner, Scene};
 use crate::view2d::{Axis2D, View2D};
 use crate::view3d::Camera3D;
 
+mod agent;
 mod clipboard;
+
+pub use agent::AgentView;
 
 pub use clipboard::{Clipboard, PasteAt, PasteOptions, MAX_COPIES};
 
@@ -372,7 +375,15 @@ pub struct Editor {
     /// One entry per open map tab: `None` for the active tab, whose state is held in the
     /// fields above, and the parked state of every other tab.
     tabs: Vec<Option<MapState>>,
+    /// A lasting id for each tab in [`Self::tabs`], so a tab can be found again after
+    /// tabs before it open or close.
+    tab_ids: Vec<u64>,
+    next_tab_id: u64,
     active_tab: usize,
+    /// The tab, camera, selection and tools of an MCP agent working in its own view.
+    agent: Option<AgentView>,
+    /// The tab the window shows, while a tool call runs in the agent's view.
+    window_tab: Option<usize>,
 }
 
 impl Default for Editor {
@@ -433,7 +444,11 @@ impl Default for Editor {
             pixels_per_point: 1.0,
             refit_on_layout: false,
             tabs: vec![None],
+            tab_ids: vec![0],
+            next_tab_id: 1,
             active_tab: 0,
+            agent: None,
+            window_tab: None,
         }
     }
 }
@@ -482,13 +497,21 @@ impl Editor {
         if index == self.active_tab {
             return Ok(());
         }
+        self.bring_to_front(index);
+        self.message = format!("Switched to {}", self.tabs()[index].title);
+        Ok(())
+    }
+
+    /// Makes another tab the one being edited, parking the current one.
+    fn bring_to_front(&mut self, index: usize) {
+        if index == self.active_tab {
+            return;
+        }
         let current = self.take_map();
         self.tabs[self.active_tab] = Some(current);
         let next = self.tabs[index].take().expect("background tabs hold their state");
         self.put_map(next);
         self.active_tab = index;
-        self.message = format!("Switched to {}", self.tabs()[index].title);
-        Ok(())
     }
 
     /// Opens a new tab with an empty map, after the current one.
@@ -497,6 +520,8 @@ impl Editor {
         self.tabs[self.active_tab] = Some(current);
         self.active_tab += 1;
         self.tabs.insert(self.active_tab, None);
+        self.tab_ids.insert(self.active_tab, self.next_tab_id);
+        self.next_tab_id += 1;
         self.new_map();
     }
 
@@ -512,12 +537,14 @@ impl Editor {
         }
         if index != self.active_tab {
             self.tabs.remove(index);
+            self.tab_ids.remove(index);
             if index < self.active_tab {
                 self.active_tab -= 1;
             }
             return Ok(());
         }
         self.tabs.remove(index);
+        self.tab_ids.remove(index);
         self.active_tab = index.min(self.tabs.len() - 1);
         let next = self.tabs[self.active_tab]
             .take()
@@ -529,12 +556,7 @@ impl Editor {
     /// Opens a map in a new tab, or in the current one when it is an untouched empty map.
     /// A map that is already open is brought to the front instead of opened twice.
     pub fn open_in_tab(&mut self, path: &Path) -> Result<(), String> {
-        let wanted = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
-        let already_open = self.tabs().iter().position(|tab| {
-            let open = Path::new(&tab.path);
-            std::fs::canonicalize(open).is_ok_and(|open| open == wanted)
-        });
-        if let Some(index) = already_open {
+        if let Some(index) = self.tab_of_path(path) {
             return self.switch_tab(index);
         }
         let reuse = self
@@ -552,6 +574,15 @@ impl Editor {
             self.message = failure;
         }
         result
+    }
+
+    /// The tab that has the map at `path` open, if any.
+    fn tab_of_path(&self, path: &Path) -> Option<usize> {
+        let wanted = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        self.tabs().iter().position(|tab| {
+            let open = Path::new(&tab.path);
+            std::fs::canonicalize(open).is_ok_and(|open| open == wanted)
+        })
     }
 
     fn take_map(&mut self) -> MapState {
@@ -737,6 +768,12 @@ impl Editor {
         } else {
             self.scene = Scene::default();
         }
+        self.sync_selection();
+    }
+
+    /// Drops selected brushes, entities and faces that are no longer in the map, and
+    /// marks the rest as selected in the scene.
+    fn sync_selection(&mut self) {
         let scene = &self.scene;
         self.selection.retain(|owner| scene.contains(*owner));
         self.scene.mark_selected(&self.selection);

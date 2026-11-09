@@ -103,6 +103,26 @@ impl Camera3D {
         }
     }
 
+    /// A still camera at the same place, aim, field of view, draw distance and speeds as
+    /// `other`, without its movement in progress.
+    pub fn looking_like(other: &Self) -> Self {
+        Self {
+            position: other.position,
+            yaw: other.yaw,
+            pitch: other.pitch,
+            fov: other.fov,
+            far: other.far,
+            move_speed: other.move_speed,
+            look_sensitivity: other.look_sensitivity,
+            turn_speed: other.turn_speed,
+            acceleration: other.acceleration,
+            wheel_step: other.wheel_step,
+            crouch_speed: other.crouch_speed,
+            look_frames: other.look_frames,
+            ..Self::new()
+        }
+    }
+
     pub fn forward(&self) -> DVec3 {
         let (yaw, pitch) = (self.yaw.to_radians(), self.pitch.to_radians());
         DVec3::new(pitch.cos() * yaw.cos(), pitch.cos() * yaw.sin(), pitch.sin())

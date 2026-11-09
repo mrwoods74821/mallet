@@ -1530,6 +1530,14 @@ fn agents_section(ui: &mut egui::Ui, editor: &mut Editor, mcp_url: Option<&str>,
         )
         .color(MUTED),
     );
+    ui.add_space(6.0);
+    *dirty |= ui
+        .checkbox(&mut agents.own_view, "Agents work in their own view")
+        .on_hover_text(
+            "Agents get their own tab, camera, views, grid, selection and tools, and cannot click, type or open \
+             windows, so you can keep looking around while they edit. Their edits to the map still show at once.",
+        )
+        .changed();
     let url = mcp_url
         .map(str::to_owned)
         .unwrap_or_else(|| format!("http://127.0.0.1:{}/mcp", agents.port));

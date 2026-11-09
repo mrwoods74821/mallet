@@ -24,7 +24,10 @@ const MAX_BODY_BYTES: u64 = 16 * 1024 * 1024;
 
 const INSTRUCTIONS: &str = "Mallet is a Hammer-style editor for Source engine VMF maps. \
 Use get_status first to see which map is open. Edits made through these tools are undoable \
-in the editor. Use screenshot to see the camera, top, front and side viewports.";
+in the editor. Use screenshot to see the camera, top, front and side viewports. \
+Unless the user turns it off in Mallet Options > AI agents, you work in your own view: \
+your tab, camera, 2D views, grid, selection and tools are yours, the map is shared, and \
+tools that would drive the window (send_input and the show_ tools) are refused.";
 
 /// One piece of a tool result.
 pub enum Content {

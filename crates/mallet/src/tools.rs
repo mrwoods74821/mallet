@@ -685,8 +685,94 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 }
 
 /// Runs one tool call. Failures come back as error results the agent can read.
+///
+/// While Mallet Options keeps agents in their own view the call runs there, apart from
+/// the window. A map handed over by a second copy of Mallet (`open_map` with `focus`)
+/// is the user's own and always opens in the window.
 pub fn run(editor: &mut Editor, name: &str, args: &Value) -> ToolResult {
-    run_checked(editor, name, args).unwrap_or_else(ToolResult::error)
+    let handed_over = name == "open_map" && args.get("focus").and_then(Value::as_bool) == Some(true);
+    let result = if editor.config.agents.own_view && !handed_over {
+        run_in_own_view(editor, name, args)
+    } else {
+        run_checked(editor, name, args)
+    };
+    result.unwrap_or_else(ToolResult::error)
+}
+
+/// Tools that drive the window, which an agent in its own view may not use.
+const WINDOW_TOOLS: [&str; 6] = [
+    "send_input",
+    "show_compile",
+    "show_options",
+    "show_about",
+    "show_properties",
+    "show_texture_browser",
+];
+
+/// Runs a tool call in the agent's own view. Tab tools move only the agent between
+/// tabs, and tools that would drive the window are refused.
+fn run_in_own_view(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResult, String> {
+    if WINDOW_TOOLS.contains(&name) {
+        return Err(format!(
+            "{name} would take over the user's window, and Mallet Options > AI agents keeps agents in their own view; ask the user to turn off \"Agents work in their own view\" if this is needed"
+        ));
+    }
+    match name {
+        "new_map" => {
+            editor.agent_new_tab();
+            Ok(ToolResult::json(&editor.with_agent_view(|editor| status_json(editor))))
+        }
+        "open_map" => {
+            editor.agent_open(&PathBuf::from(string_arg(args, "path")?))?;
+            Ok(ToolResult::json(&editor.with_agent_view(|editor| status_json(editor))))
+        }
+        "list_tabs" => Ok(ToolResult::json(&tabs_json(editor))),
+        "switch_tab" => {
+            let index = args
+                .get("index")
+                .and_then(Value::as_u64)
+                .ok_or("\"index\" must be a whole number")?;
+            editor.agent_switch_tab(index as usize)?;
+            Ok(ToolResult::json(&tabs_json(editor)))
+        }
+        "close_tab" => {
+            let index = args
+                .get("index")
+                .and_then(Value::as_u64)
+                .map_or(editor.agent_tab(), |index| index as usize);
+            check_discard(editor, index, args)?;
+            editor.agent_close_tab(index)?;
+            Ok(ToolResult::json(&tabs_json(editor)))
+        }
+        "set_settings" if changes_agent_settings(args) => Err(
+            "the AI agents settings are the user's to change in Mallet Options while agents work in their own view"
+                .to_owned(),
+        ),
+        _ => editor.with_agent_view(|editor| run_checked(editor, name, args)),
+    }
+}
+
+/// Whether a `set_settings` call touches the AI agents section.
+fn changes_agent_settings(args: &Value) -> bool {
+    args.get("settings")
+        .and_then(|settings| settings.get("agents"))
+        .is_some()
+}
+
+/// Refuses to close a tab with unsaved changes unless the call passes `discard`.
+fn check_discard(editor: &Editor, index: usize, args: &Value) -> Result<(), String> {
+    let discard = args.get("discard").and_then(Value::as_bool).unwrap_or(false);
+    let dirty = editor
+        .tabs()
+        .get(index)
+        .ok_or_else(|| format!("there is no tab {index}"))?
+        .dirty;
+    if dirty && !discard {
+        return Err(format!(
+            "tab {index} has unsaved changes; save it first or pass discard: true"
+        ));
+    }
+    Ok(())
 }
 
 fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResult, String> {
@@ -722,17 +808,7 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
                 .get("index")
                 .and_then(Value::as_u64)
                 .map_or(editor.active_tab(), |index| index as usize);
-            let discard = args.get("discard").and_then(Value::as_bool).unwrap_or(false);
-            let dirty = editor
-                .tabs()
-                .get(index)
-                .ok_or_else(|| format!("there is no tab {index}"))?
-                .dirty;
-            if dirty && !discard {
-                return Err(format!(
-                    "tab {index} has unsaved changes; save it first or pass discard: true"
-                ));
-            }
+            check_discard(editor, index, args)?;
             editor.close_tab(index)?;
             Ok(ToolResult::json(&tabs_json(editor)))
         }
@@ -1414,6 +1490,8 @@ fn status_json(editor: &Editor) -> Value {
         "viewports": layout_json(editor),
         "tab": editor.active_tab(),
         "tab_count": editor.tabs().len(),
+        "own_view": editor.in_agent_view(),
+        "window_tab": editor.window_tab(),
         "timings_ms": {
             "update": editor.timings.update_ms,
             "camera": editor.timings.camera_ms,
@@ -1536,7 +1614,8 @@ fn tabs_json(editor: &Editor) -> Value {
         .into_iter()
         .map(|tab| json!({ "title": tab.title, "path": tab.path, "unsaved": tab.dirty }))
         .collect();
-    json!({ "active": editor.active_tab(), "tabs": tabs })
+    let agent = editor.config.agents.own_view.then(|| editor.agent_tab());
+    json!({ "active": editor.window_tab(), "agent": agent, "tabs": tabs })
 }
 
 fn layout_json(editor: &Editor) -> Value {
