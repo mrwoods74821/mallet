@@ -13,6 +13,7 @@ pub mod lightmap;
 mod model;
 pub mod texture;
 pub mod transform;
+pub mod vertex;
 mod view;
 
 pub use mallet_kv as kv;
