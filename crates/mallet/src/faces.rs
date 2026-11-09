@@ -373,10 +373,8 @@ impl Editor {
     pub fn texture_size(&mut self, material: &str) -> [f64; 2] {
         self.materials
             .as_mut()
-            .and_then(|materials| materials.texture(material))
-            .map_or([DEFAULT_TEXTURE_SIZE; 2], |image| {
-                [f64::from(image.width), f64::from(image.height)]
-            })
+            .and_then(|materials| materials.size(material))
+            .map_or([DEFAULT_TEXTURE_SIZE; 2], |size| size.map(f64::from))
     }
 
     /// Changes the sides with these ids through `change`, which gets each side and its

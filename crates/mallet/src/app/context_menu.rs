@@ -1,6 +1,6 @@
-//! The menu that opens on a right-click in a viewport with the selection tool, like
+//! The menus that open on a right-click in a viewport. With the selection tool, like
 //! Hammer's: what can be done to the selection, the clipboard, plus Mesh to Geometry for
-//! props.
+//! props. With the block tool: creating or cancelling the box being drawn.
 
 use eframe::egui::{self, Response};
 
@@ -102,6 +102,28 @@ impl MalletApp {
                 editor.message = error;
             }
         }
+        if let Some(action) = chosen {
+            self.dispatch(action, editor);
+        }
+    }
+
+    /// Opens the block tool's menu on a right-click in a 2D view, before the box is made:
+    /// Create Geometry makes the pending box (as Enter does) and Cancel Box drops it (as
+    /// Escape does). Both need a box drawn first.
+    pub(super) fn block_context_menu(&mut self, response: &Response, editor: &mut Editor) {
+        let pending = editor.overlay.block.is_some();
+        let mut chosen = None;
+        let keymap = &self.keymap;
+        response.context_menu(|ui| {
+            ui.set_min_width(180.0);
+            ui.add_enabled_ui(pending, |ui| {
+                menu_item(ui, keymap, "Create Geometry", Action::CreateBlock, &mut chosen);
+                menu_item(ui, keymap, "Cancel Box", Action::ClearSelection, &mut chosen);
+            });
+            if !pending {
+                ui.label("Drag out a box in a 2D view first.");
+            }
+        });
         if let Some(action) = chosen {
             self.dispatch(action, editor);
         }

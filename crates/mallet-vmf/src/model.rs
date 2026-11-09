@@ -326,6 +326,7 @@ impl Entity {
     }
 
     /// Moves the entity's brushes and origin, keeping textures in place on the brushes.
+    /// An overlay's plane and corners move with it.
     pub fn translate(&mut self, offset: DVec3) {
         for solid in self.solids_mut() {
             solid.translate(offset);
@@ -333,6 +334,7 @@ impl Entity {
         if let Some(origin) = self.origin() {
             self.set("origin", format_vec3(origin + offset));
         }
+        crate::overlay::transform_entity(self, &glam::DMat4::from_translation(offset));
     }
 
     /// The entity's outputs, from its `connections` blocks, in file order.

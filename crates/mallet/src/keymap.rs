@@ -29,6 +29,8 @@ pub enum Action {
     GridSmaller,
     GridLarger,
     SelectionTool,
+    /// Switch to the Camera tool.
+    CameraTool,
     BlockTool,
     EntityTool,
     TextureTool,
@@ -37,6 +39,10 @@ pub enum Action {
     /// Toggle the Clipping tool between two-point and three-point clipping.
     ClipThreePoint,
     VertexTool,
+    /// Switch to the Overlay tool.
+    OverlayTool,
+    /// Switch to the Decal tool.
+    DecalTool,
     /// Split the face between the two selected vertices.
     SplitFace,
     Properties,
@@ -237,12 +243,15 @@ impl KeyMap {
                 (Action::GridSmaller, Chord::key(Key::Minus)),
                 (Action::GridLarger, Chord::key(Key::Plus)),
                 (Action::SelectionTool, Chord::shift(Key::S)),
+                (Action::CameraTool, Chord::shift(Key::C)),
                 (Action::BlockTool, Chord::shift(Key::B)),
                 (Action::EntityTool, Chord::shift(Key::E)),
                 (Action::TextureTool, Chord::shift(Key::A)),
                 (Action::ClipTool, Chord::shift(Key::X)),
                 (Action::ClipThreePoint, Chord::key(Key::C)),
                 (Action::VertexTool, Chord::shift(Key::V)),
+                (Action::OverlayTool, Chord::shift(Key::O)),
+                (Action::DecalTool, Chord::shift(Key::D)),
                 (Action::SplitFace, Chord::ctrl(Key::F)),
                 (Action::Properties, Chord::alt(Key::Enter)),
                 (Action::Compile, Chord::key(Key::F9)),

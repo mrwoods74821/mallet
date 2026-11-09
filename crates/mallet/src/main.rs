@@ -16,6 +16,7 @@ mod canvas;
 mod clipper;
 mod compile;
 mod config;
+mod decals;
 mod document;
 mod editor;
 mod faces;
@@ -43,6 +44,7 @@ use std::path::PathBuf;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    report_crashes();
     let path = std::env::args_os().nth(1).map(PathBuf::from);
     let settings = config::Config::load();
     // A map opened from Explorer while Mallet runs goes to that Mallet, as in Hammer.
@@ -79,6 +81,7 @@ fn main() -> eframe::Result {
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             present_mode,
             desired_maximum_frame_latency: latency,
+            wgpu_setup: render3d::wgpu_setup(),
             ..Default::default()
         },
         ..Default::default()
@@ -88,4 +91,22 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| Ok(Box::new(app::MalletApp::new(cc, path)))),
     )
+}
+
+/// Has Mallet write what went wrong to `crash.log` in its `%APPDATA%` folder when an
+/// error stops it, as its window otherwise just closes without a word. Only an error on
+/// the main thread stops Mallet; the worker threads' are recovered from and left out.
+fn report_crashes() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let folder = config::data_dir().filter(|_| std::thread::current().name() == Some("main"));
+        if let Some(folder) = folder {
+            let version = env!("CARGO_PKG_VERSION");
+            let trace = std::backtrace::Backtrace::force_capture();
+            let _ = std::fs::create_dir_all(&folder);
+            let report = format!("Mallet {version} stopped: {info}\n\n{trace}\n");
+            let _ = std::fs::write(folder.join("crash.log"), report);
+        }
+        previous(info);
+    }));
 }

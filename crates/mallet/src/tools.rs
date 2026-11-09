@@ -154,7 +154,8 @@ pub fn definitions() -> Value {
         tool("clear_selection", "Deselect everything.", json!({}), &[]),
         tool(
             "move_selection",
-            "Move the selection with texture lock. Entity origins move too. Undoable.",
+            "Move the selection with texture lock. Entity origins move too, and while texture lock is on, so do \
+             overlays whose faces are all on the moved brushes. Undoable.",
             json!({ "offset": vec3 }),
             &["offset"],
         ),
@@ -329,6 +330,31 @@ pub fn definitions() -> Value {
                 }
             }),
             &["classname", "origin"],
+        ),
+        tool(
+            "create_overlay",
+            "Place an info_overlay, a picture such as a poster, stain or road marking, on a brush face and \
+             select it. It is centred on point, pushed onto the face, upright on walls and with its top to the \
+             north on floors. Its sides list the face and the faces in the same plane the picture reaches, and \
+             its basis keys are filled in, so it compiles as placed. Moving, rotating or resizing the selection \
+             carries overlays along. Undoable. Returns the new entity id and the sides it lists.",
+            json!({
+                "point": { "allOf": [vec3], "description": "Where the overlay's centre goes, on or near the face." },
+                "side": { "type": "integer", "description": "Side id of the face, from get_faces or pick_face; default: the brush face nearest to point, within 8 units." },
+                "material": { "type": "string", "description": "The overlay's material, such as decals/decal_posters001a; default is the editor's current material." },
+                "size": { "allOf": [vec2], "description": "Width and height in units; default is the texture's size at 0.25 units per texel." }
+            }),
+            &["point"],
+        ),
+        tool(
+            "create_decal",
+            "Place an infodecal at a point on a brush face and select it. The game projects its texture onto \
+             that face at the texture's own size, upright on walls. Undoable. Returns the new entity id.",
+            json!({
+                "point": { "allOf": [vec3], "description": "A point on a brush face, or within 8 units of one." },
+                "material": { "type": "string", "description": "The decal's texture, such as decals/decalgraffiti001c; default is the editor's current material." }
+            }),
+            &["point"],
         ),
         tool(
             "set_entity_outputs",
@@ -1387,6 +1413,43 @@ fn run_checked(editor: &mut Editor, name: &str, args: &Value) -> Result<ToolResu
             let id = editor.create_entity(&classname, origin, &keys)?;
             Ok(ToolResult::json(&json!({ "entity": id })))
         }
+        "create_overlay" => {
+            let point = required_vec3(args, "point")?;
+            let side = match args.get("side") {
+                None | Some(Value::Null) => {
+                    editor
+                        .scene
+                        .nearest_face(point, mallet_vmf::overlay::DECAL_REACH)
+                        .ok_or("no brush face is within 8 units of that point; pass a side id")?
+                        .0
+                }
+                Some(value) => value
+                    .as_u64()
+                    .and_then(|side| u32::try_from(side).ok())
+                    .ok_or("\"side\" must be a side id")?,
+            };
+            let material = optional_string(args, "material")?.map_or_else(|| editor.material.clone(), str::to_owned);
+            let size = optional_numbers::<2>(args, "size")?.map(glam::DVec2::from_array);
+            let id = editor.create_overlay(side, point, &material, size)?;
+            let sides = editor
+                .entity(id)
+                .and_then(|entity| entity.get("sides"))
+                .unwrap_or_default()
+                .split_whitespace()
+                .filter_map(|word| word.parse::<u32>().ok())
+                .collect::<Vec<_>>();
+            Ok(ToolResult::json(&json!({ "entity": id, "sides": sides })))
+        }
+        "create_decal" => {
+            let point = required_vec3(args, "point")?;
+            let material = optional_string(args, "material")?.map_or_else(|| editor.material.clone(), str::to_owned);
+            let on_face = editor
+                .scene
+                .nearest_face(point, mallet_vmf::overlay::DECAL_REACH)
+                .map_or(point, |(_, nearest, _)| nearest);
+            let id = editor.create_decal(on_face, &material)?;
+            Ok(ToolResult::json(&json!({ "entity": id })))
+        }
         "send_input" => {
             let actions = args
                 .get("actions")
@@ -1520,11 +1583,14 @@ fn status_json(editor: &Editor) -> Value {
         },
         "tool": match editor.tool {
             Tool::Select => "selection",
+            Tool::Camera => "camera",
             Tool::Block => "block",
             Tool::Entity => "entity",
             Tool::Texture => "texture",
             Tool::Clip => "clip",
             Tool::Vertex => "vertex",
+            Tool::Overlay => "overlay",
+            Tool::Decal => "decal",
         },
         "clip": {
             "points": editor.clipper.points.iter().map(|point| point.to_array()).collect::<Vec<_>>(),

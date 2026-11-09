@@ -13,7 +13,9 @@ use glam::{DVec2, DVec3};
 use mallet_vmf::build::box_solid;
 use mallet_vmf::edit::Edit;
 use mallet_vmf::geometry::Bounds;
+use mallet_vmf::overlay::DECAL_CLASS;
 use mallet_vmf::sides::{CopiedSides, OtherFaces};
+use mallet_vmf::transform::TextureLock;
 use mallet_vmf::{format_vec3, Entity, IdAllocator, SavedCamera, Solid, Vmf};
 
 use std::sync::Arc;
@@ -27,7 +29,7 @@ use crate::document::Document;
 use crate::input::InputFrame;
 use crate::lighting::{load_texture_lights, TextureLights};
 use crate::render3d::{CameraStyle, LightingInput, Renderer3D};
-use crate::scene::{entity_model, model_key, ModelCache, Overlay, Owner, Scene};
+use crate::scene::{decal_key, entity_model, model_key, DecalSizes, ModelCache, Overlay, Owner, Scene};
 use crate::view2d::{Axis2D, View2D};
 use crate::view3d::Camera3D;
 
@@ -51,6 +53,9 @@ const DEFAULT_BLOCK: Bounds = Bounds {
 pub enum Tool {
     /// Hammer's Selection tool (Shift+S).
     Select,
+    /// Hammer's Camera tool (Shift+C): drag in a 3D view to look around or move the
+    /// camera, and click in a 2D view to zoom in, or right-click to zoom out.
+    Camera,
     /// Hammer's Block tool (Shift+B).
     Block,
     /// Hammer's Entity tool (Shift+E).
@@ -62,6 +67,11 @@ pub enum Tool {
     Clip,
     /// Hammer's Vertex tool (Shift+V): drag the corners and edges of the selected brushes.
     Vertex,
+    /// Hammer's Overlay tool (Shift+O): place overlays on brush faces and drag their
+    /// corners.
+    Overlay,
+    /// Hammer's Decal tool (Shift+D): place decals on brush faces.
+    Decal,
 }
 
 /// Point entity classes offered by the entity tool's class list. Any other class name
@@ -300,6 +310,9 @@ pub struct Editor {
     pub materials: Option<Materials>,
     /// Prop models loaded so far, shared by every tab.
     pub models: ModelCache,
+    /// The size of the picture each decal texture seen so far projects, shared by every
+    /// tab.
+    pub decal_sizes: DecalSizes,
     /// Entity classes from the game's FGD files, when they could be read.
     pub game_data: Option<Arc<GameData>>,
     /// A screenshot of the whole window asked for by the MCP `screenshot` tool.
@@ -408,6 +421,7 @@ impl Default for Editor {
             gpu_info: String::new(),
             materials: None,
             models: ModelCache::new(),
+            decal_sizes: DecalSizes::new(),
             model_errors: HashMap::new(),
             game_data: None,
             properties_open: false,
@@ -649,7 +663,13 @@ impl Editor {
 
     fn set_document(&mut self, document: Document) {
         self.ensure_models(&document.vmf);
-        self.scene = Scene::build(&document.vmf, &self.models, self.game_data.as_deref());
+        self.ensure_decal_sizes(&document.vmf);
+        self.scene = Scene::build(
+            &document.vmf,
+            &self.models,
+            self.game_data.as_deref(),
+            &self.decal_sizes,
+        );
         self.document = Some(document);
         self.selection.clear();
         self.overlay = Overlay::default();
@@ -735,6 +755,19 @@ impl Editor {
         Ok(())
     }
 
+    /// Applies an edit that continues the previous one when both have the same `group`,
+    /// as each step of a drag does, so the whole drag undoes at once.
+    pub fn apply_edit_grouped(&mut self, edit: &Edit, group: u64) -> Result<(), String> {
+        let document = self.document.as_mut().ok_or("no map is open")?;
+        document
+            .history
+            .apply_grouped(&mut document.vmf, edit, group)
+            .map_err(|error| error.to_string())?;
+        document.dirty = true;
+        self.rebuild_scene();
+        Ok(())
+    }
+
     /// Undoes or redoes one step. Returns whether anything changed.
     pub fn step_history(&mut self, redo: bool) -> Result<bool, String> {
         let document = self.document.as_mut().ok_or("no map is open")?;
@@ -763,7 +796,13 @@ impl Editor {
     pub fn rebuild_scene(&mut self) {
         if let Some(document) = self.document.take() {
             self.ensure_models(&document.vmf);
-            self.scene = Scene::build(&document.vmf, &self.models, self.game_data.as_deref());
+            self.ensure_decal_sizes(&document.vmf);
+            self.scene = Scene::build(
+                &document.vmf,
+                &self.models,
+                self.game_data.as_deref(),
+                &self.decal_sizes,
+            );
             self.document = Some(document);
             self.add_pointfile_to_scene();
         } else {
@@ -857,19 +896,28 @@ impl Editor {
         Some(format!("{count} {noun} selected, {}w {}l {}h", size.x, size.y, size.z))
     }
 
-    /// Moves the selection, with texture lock. Entity origins move with it.
+    /// Moves the selection, with texture lock. Entity origins move with it, and so do
+    /// overlays lying on the moved brushes while texture lock is on.
     pub fn move_selection(&mut self, offset: DVec3) -> Result<(), String> {
         let (solids, origins) = self.selection_parts()?;
+        let riding = if self.config.transform.texture_lock {
+            let moved = (solids.clone(), glam::DMat4::from_translation(offset), TextureLock::Full);
+            self.riding_overlay_edits(&[moved])
+        } else {
+            Vec::new()
+        };
         let mut edits = vec![if self.config.transform.texture_lock {
             Edit::Translate { solids, offset }
         } else {
             Edit::Transform {
                 solids,
                 matrix: glam::DMat4::from_translation(offset),
-                lock: mallet_vmf::transform::TextureLock::Off,
+                lock: TextureLock::Off,
             }
         }];
         edits.extend(origin_edits(origins, |origin| origin + offset));
+        edits.extend(self.selected_overlay_edits(&glam::DMat4::from_translation(offset)));
+        edits.extend(riding);
         self.apply_edit(&Edit::Batch(edits))?;
         if let Some(pivot) = self.overlay.pivot {
             self.overlay.pivot = Some(pivot + offset);
@@ -892,6 +940,22 @@ impl Editor {
         let size = to.size();
         self.message = format!("Resized selection to {}w {}l {}h", size.x, size.y, size.z);
         Ok(())
+    }
+
+    /// Key edits that carry every selected overlay's plane and corners through a
+    /// transform, to apply after the edits that move entity origins.
+    pub(crate) fn selected_overlay_edits(&self, matrix: &glam::DMat4) -> Vec<Edit> {
+        let Some(document) = &self.document else {
+            return Vec::new();
+        };
+        self.selection
+            .iter()
+            .filter_map(|owner| match owner {
+                Owner::Entity(id) => find_entity(&document.vmf, *id).ok(),
+                Owner::Solid(_) => None,
+            })
+            .flat_map(|entity| overlay_edits(entity, matrix))
+            .collect()
     }
 
     /// The brush ids and entity origins that moving or resizing the selection affects.
@@ -920,7 +984,9 @@ impl Editor {
     pub fn handle_box(&self) -> Option<Bounds> {
         match self.tool {
             Tool::Block => self.overlay.block,
-            Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex => None,
+            Tool::Entity | Tool::Texture | Tool::Clip | Tool::Vertex | Tool::Overlay | Tool::Decal | Tool::Camera => {
+                None
+            }
             Tool::Select => {
                 let bounds = self.scene.selection_bounds();
                 (!bounds.is_empty()).then(|| self.overlay.transform.map_or(bounds, |remap| remap.map_bounds(&bounds)))
@@ -1170,6 +1236,7 @@ impl Editor {
         let mounts = filesystem.mounts().len();
         self.materials = Some(Materials::new(filesystem));
         self.models.clear();
+        self.decal_sizes.clear();
         self.model_errors.clear();
         if let Some(gpu) = &mut self.gpu {
             gpu.clear_textures();
@@ -1279,6 +1346,34 @@ impl Editor {
                 }
             }
         }
+    }
+
+    /// Looks up the size of every decal texture in the map that has not been seen yet,
+    /// so the scene can draw each `infodecal` as large as the game does: the texture's
+    /// size times the material's `$decalscale`.
+    fn ensure_decal_sizes(&mut self, vmf: &Vmf) {
+        let Some(materials) = &mut self.materials else {
+            return;
+        };
+        let mut missing: Vec<String> = vmf
+            .entities()
+            .filter(|entity| entity.classname().eq_ignore_ascii_case(DECAL_CLASS))
+            .filter_map(|entity| entity.get("texture"))
+            .map(decal_key)
+            .filter(|key| !key.is_empty() && !self.decal_sizes.contains_key(key))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        if missing.is_empty() {
+            return;
+        }
+        let names: Vec<&str> = missing.iter().map(String::as_str).collect();
+        let sizes: Vec<Option<DVec2>> = materials
+            .materials(&names)
+            .iter()
+            .map(|material| picture_size(material, f64::from(material.decal_scale)))
+            .collect();
+        self.decal_sizes.extend(missing.into_iter().zip(sizes));
     }
 
     /// The mounted game folder, if any.
@@ -1456,6 +1551,29 @@ fn origin_edits(origins: EntityOrigins, map: impl Fn(DVec3) -> DVec3) -> impl It
         key: "origin".to_owned(),
         value: format_vec3(map(origin)),
     })
+}
+
+/// The size of a material's picture at `scale` world units per texel, or `None` when it
+/// has no texture.
+pub(crate) fn picture_size(material: &mallet_content::Material, scale: f64) -> Option<DVec2> {
+    let [width, height] = material.size?;
+    Some(DVec2::new(f64::from(width), f64::from(height)) * scale)
+}
+
+/// Key edits that carry one entity's overlay through a transform. Entities that are not
+/// placed overlays give none.
+pub(crate) fn overlay_edits(entity: &Entity, matrix: &glam::DMat4) -> Vec<Edit> {
+    let Some(id) = entity.id() else {
+        return Vec::new();
+    };
+    mallet_vmf::overlay::transform_keys(entity, matrix)
+        .into_iter()
+        .map(|(key, value)| Edit::SetKey {
+            entity: id,
+            key: key.to_owned(),
+            value,
+        })
+        .collect()
 }
 
 pub(crate) fn find_entity(vmf: &Vmf, id: u32) -> Result<&Entity, String> {

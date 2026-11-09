@@ -1,8 +1,12 @@
 //! A game's virtual file system, built from the search paths in its `gameinfo.txt` and,
 //! for Garry's Mod, the other games listed in `cfg/mount.cfg`.
 
+use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{PoisonError, RwLock};
+use std::time::{Duration, Instant};
 
 use mallet_kv::{Block, Item};
 
@@ -18,8 +22,76 @@ struct Mount {
 
 #[derive(Debug)]
 enum Place {
-    Folder(PathBuf),
+    Folder(Folder),
     Vpk(VpkArchive),
+}
+
+/// How long a directory that was not found in a mounted folder is taken to be missing
+/// still. Short, so content added while Mallet runs shows up.
+const MISSING_FOR: Duration = Duration::from_secs(5);
+
+/// A mounted folder. It remembers which of its directories exist, so looking a file up in
+/// the many folders that cannot hold it costs no disk access: Garry's Mod mounts a folder
+/// for every addon, and most have no `materials` or `models` at all.
+#[derive(Debug)]
+struct Folder {
+    root: PathBuf,
+    /// The directories looked for so far, by path below `root`.
+    directories: RwLock<HashMap<String, Known>>,
+}
+
+/// What a [`Folder`] found out about one of its directories.
+#[derive(Debug, Clone, Copy)]
+enum Known {
+    Present,
+    /// Not there when it was looked for at this time.
+    Missing(Instant),
+}
+
+impl Folder {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            directories: RwLock::default(),
+        }
+    }
+
+    /// Where a game file would lie in this folder, or `None` when the directory it would
+    /// be in is not there. `path` is lower case with forward slashes.
+    fn file(&self, path: &str) -> Option<PathBuf> {
+        let directory = path.rsplit_once('/').map_or("", |(directory, _)| directory);
+        let top = directory.split('/').next().unwrap_or_default();
+        let found = directory.is_empty() || (self.has(top) && (top == directory || self.has(directory)));
+        found.then(|| self.root.join(path))
+    }
+
+    /// Whether the folder has a directory, asking the disk only when that is not known
+    /// yet or when it was last found missing more than [`MISSING_FOR`] ago.
+    fn has(&self, directory: &str) -> bool {
+        let known = self
+            .directories
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(directory)
+            .copied();
+        match known {
+            Some(Known::Present) => true,
+            Some(Known::Missing(since)) if since.elapsed() < MISSING_FOR => false,
+            _ => {
+                let exists = self.root.join(directory).is_dir();
+                let known = if exists {
+                    Known::Present
+                } else {
+                    Known::Missing(Instant::now())
+                };
+                self.directories
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(directory.to_owned(), known);
+                exists
+            }
+        }
+    }
 }
 
 /// What kind of content a source is, for grouping in the texture browser.
@@ -102,7 +174,7 @@ impl GameFs {
         self.mounts
             .iter()
             .map(|mount| match &mount.place {
-                Place::Folder(path) => format!("folder {}", path.display()),
+                Place::Folder(folder) => format!("folder {}", folder.root.display()),
                 Place::Vpk(archive) => format!("vpk ({} files)", archive.len()),
             })
             .collect()
@@ -117,7 +189,7 @@ impl GameFs {
     pub fn exists(&self, path: &str) -> bool {
         let path = normalize(path);
         self.mounts.iter().any(|mount| match &mount.place {
-            Place::Folder(folder) => folder.join(&path).is_file(),
+            Place::Folder(folder) => folder.file(&path).is_some_and(|file| file.is_file()),
             Place::Vpk(archive) => archive.contains(&path),
         })
     }
@@ -148,14 +220,12 @@ impl GameFs {
         for mount in &self.mounts {
             match &mount.place {
                 Place::Vpk(archive) => {
-                    for path in archive
-                        .paths()
-                        .filter(|path| path.starts_with(folder) && path.ends_with(&extension))
-                    {
-                        note(path.to_owned(), mount.source);
+                    for path in archive.paths_matching(folder, &extension) {
+                        note(path, mount.source);
                     }
                 }
-                Place::Folder(root) => {
+                Place::Folder(mounted) => {
+                    let root = &mounted.root;
                     let mut pending = vec![root.join(folder)];
                     while let Some(directory) = pending.pop() {
                         let Ok(children) = fs::read_dir(&directory) else {
@@ -185,8 +255,21 @@ impl GameFs {
     pub fn read(&self, path: &str) -> Option<Vec<u8>> {
         let path = normalize(path);
         self.mounts.iter().find_map(|mount| match &mount.place {
-            Place::Folder(folder) => fs::read(folder.join(&path)).ok(),
+            Place::Folder(folder) => folder.file(&path).and_then(|file| fs::read(file).ok()),
             Place::Vpk(archive) => archive.read(&path).ok().flatten(),
+        })
+    }
+
+    /// Opens a game file from the first mount that has it, to read only the parts of it
+    /// that are needed. Paths ignore case and may use either slash.
+    pub fn open(&self, path: &str) -> Option<GameFile<'_>> {
+        let path = normalize(path);
+        self.mounts.iter().find_map(|mount| match &mount.place {
+            Place::Folder(folder) => folder
+                .file(&path)
+                .and_then(|file| fs::File::open(file).ok())
+                .map(GameFile::Loose),
+            Place::Vpk(archive) => archive.contains(&path).then(|| GameFile::Packed(archive, path.clone())),
         })
     }
 
@@ -196,8 +279,7 @@ impl GameFs {
         for mount in &self.mounts {
             match &mount.place {
                 Place::Folder(folder) => {
-                    let file = folder.join(&path);
-                    if file.is_file() {
+                    if let Some(file) = folder.file(&path).filter(|file| file.is_file()) {
                         return Some(file);
                     }
                 }
@@ -242,7 +324,7 @@ impl GameFs {
                     .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
                 let kind = if addons { SourceKind::Addon } else { SourceKind::Game };
                 let source = self.source(&name, kind, &folder);
-                self.add(Place::Folder(folder), source);
+                self.add(Place::Folder(Folder::new(folder)), source);
             }
         } else if let Some(stem) = text.strip_suffix(".vpk") {
             let dir_file = PathBuf::from(format!("{stem}_dir.vpk"));
@@ -264,7 +346,7 @@ impl GameFs {
                 SourceKind::Game
             };
             let source = self.source(&name, kind, &folder);
-            self.add(Place::Folder(folder), source);
+            self.add(Place::Folder(Folder::new(folder)), source);
         }
     }
 
@@ -275,7 +357,7 @@ impl GameFs {
             return;
         }
         let source = self.source(name, SourceKind::MountedGame, folder);
-        self.add(Place::Folder(folder.components().collect()), source);
+        self.add(Place::Folder(Folder::new(folder.components().collect())), source);
         let Ok(children) = fs::read_dir(folder) else { return };
         let mut archives: Vec<PathBuf> = children
             .filter_map(Result::ok)
@@ -309,15 +391,42 @@ impl GameFs {
 
     fn add(&mut self, place: Place, source: usize) {
         if let Place::Folder(new) = &place {
-            let duplicate = self
-                .mounts
-                .iter()
-                .any(|existing| matches!(&existing.place, Place::Folder(folder) if same_folder(folder, new)));
+            let duplicate = self.mounts.iter().any(
+                |existing| matches!(&existing.place, Place::Folder(folder) if same_folder(&folder.root, &new.root)),
+            );
             if duplicate {
                 return;
             }
         }
         self.mounts.push(Mount { place, source });
+    }
+}
+
+/// A game file opened with [`GameFs::open`], read a part at a time. A texture file holds
+/// its picture at many sizes and a viewport shows only the small ones, so reading parts
+/// keeps most of a large file off the disk and out of memory.
+#[derive(Debug)]
+pub enum GameFile<'a> {
+    /// A loose file in a folder.
+    Loose(fs::File),
+    /// A file in a VPK archive, by its path there.
+    Packed(&'a VpkArchive, String),
+}
+
+impl GameFile<'_> {
+    /// Reads `length` bytes from `start`, or fewer when the file ends first.
+    pub fn read(&self, start: u64, length: u64) -> Option<Vec<u8>> {
+        match self {
+            Self::Loose(file) => {
+                let mut file: &fs::File = file;
+                let size = file.metadata().ok()?.len();
+                let mut data = Vec::with_capacity(size.saturating_sub(start).min(length) as usize);
+                file.seek(SeekFrom::Start(start)).ok()?;
+                file.take(length).read_to_end(&mut data).ok()?;
+                Some(data)
+            }
+            Self::Packed(archive, path) => archive.read_range(path, start, length).ok().flatten(),
+        }
     }
 }
 

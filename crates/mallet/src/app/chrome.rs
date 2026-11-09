@@ -30,12 +30,13 @@ type PaletteEntry = (&'static str, &'static str, Option<(Tool, Action)>);
 
 /// Hammer's tool palette, top to bottom. Tools Mallet does not have yet are shown greyed
 /// out so the layout already matches.
-const PALETTE: [PaletteEntry; 9] = [
+const PALETTE: [PaletteEntry; 10] = [
     (
         icon::CURSOR,
         "Selection tool",
         Some((Tool::Select, Action::SelectionTool)),
     ),
+    (icon::CAMERA, "Camera tool", Some((Tool::Camera, Action::CameraTool))),
     (icon::LIGHTBULB, "Entity tool", Some((Tool::Entity, Action::EntityTool))),
     (icon::CUBE, "Block tool", Some((Tool::Block, Action::BlockTool))),
     (
@@ -43,8 +44,8 @@ const PALETTE: [PaletteEntry; 9] = [
         "Texture application",
         Some((Tool::Texture, Action::TextureTool)),
     ),
-    (icon::STAMP, "Apply decals", None),
-    (icon::STACK, "Overlays", None),
+    (icon::STAMP, "Apply decals", Some((Tool::Decal, Action::DecalTool))),
+    (icon::STACK, "Overlays", Some((Tool::Overlay, Action::OverlayTool))),
     (icon::SCISSORS, "Clipping tool", Some((Tool::Clip, Action::ClipTool))),
     (icon::POLYGON, "Vertex tool", Some((Tool::Vertex, Action::VertexTool))),
     (icon::PATH, "Path tool", None),

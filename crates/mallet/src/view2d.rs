@@ -25,6 +25,15 @@ const POINTS_PER_NOTCH: f64 = 50.0;
 /// Default zoom factor of one mouse wheel notch.
 pub const DEFAULT_ZOOM_STEP: f64 = 1.2;
 
+/// The zoom factor per step, kept to a sensible range; anything not finite is the default.
+fn clamp_zoom_step(zoom_step: f64) -> f64 {
+    if zoom_step.is_finite() {
+        zoom_step.clamp(1.01, 4.0)
+    } else {
+        DEFAULT_ZOOM_STEP
+    }
+}
+
 /// Which pair of world axes a 2D viewport shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axis2D {
@@ -244,13 +253,27 @@ impl View2D {
         let Some(pointer) = response.hover_pos().filter(|_| scroll != 0.0) else {
             return;
         };
-        let anchor = self.to_world(rect, pointer);
-        let zoom_step = if zoom_step.is_finite() {
-            zoom_step.clamp(1.01, 4.0)
-        } else {
-            DEFAULT_ZOOM_STEP
+        let factor = clamp_zoom_step(zoom_step).powf(f64::from(scroll) / POINTS_PER_NOTCH);
+        self.zoom_at(rect, pointer, factor);
+    }
+
+    /// The Camera tool's zoom: a left click zooms in one step around the cursor, and a
+    /// right click zooms out.
+    pub fn handle_click_zoom(&mut self, response: &Response, rect: Rect, zoom_step: f64) {
+        let Some(pointer) = response.hover_pos() else {
+            return;
         };
-        let factor = zoom_step.powf(f64::from(scroll) / POINTS_PER_NOTCH);
+        let step = clamp_zoom_step(zoom_step);
+        if response.clicked_by(PointerButton::Primary) {
+            self.zoom_at(rect, pointer, step);
+        } else if response.clicked_by(PointerButton::Secondary) {
+            self.zoom_at(rect, pointer, 1.0 / step);
+        }
+    }
+
+    /// Multiplies the zoom by `factor`, keeping the world point under `pointer` in place.
+    pub fn zoom_at(&mut self, rect: Rect, pointer: Pos2, factor: f64) {
+        let anchor = self.to_world(rect, pointer);
         self.scale = (self.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
         let center = rect.center();
         self.center.x = anchor.x - f64::from(pointer.x - center.x) / self.scale;
@@ -494,5 +517,25 @@ impl View2D {
             }
         }
         lines
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::egui::{pos2, Rect};
+
+    use super::*;
+
+    #[test]
+    fn zooming_keeps_the_point_under_the_cursor() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), eframe::egui::vec2(800.0, 600.0));
+        let mut view = View2D::new(Axis2D::Top);
+        view.set_scale(1.0);
+        let pointer = pos2(600.0, 150.0);
+        let before = view.to_world(rect, pointer);
+        view.zoom_at(rect, pointer, DEFAULT_ZOOM_STEP);
+        let after = view.to_world(rect, pointer);
+        assert!((before - after).length() < 1e-6, "{before:?} != {after:?}");
+        assert!((view.scale - DEFAULT_ZOOM_STEP).abs() < 1e-9);
     }
 }

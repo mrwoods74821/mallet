@@ -10,6 +10,7 @@ use glam::{DMat3, DMat4, DVec2, DVec3};
 use mallet_content::{EntityClass, GameData, Model};
 use mallet_vmf::geometry::{faces_bounds, solid_faces, Bounds, Plane};
 use mallet_vmf::light::MapLighting;
+use mallet_vmf::overlay::{self, Piece};
 use mallet_vmf::{parse_vec3, Entity, Side, Solid, TexAxis, Vmf};
 
 use crate::view2d::Axis2D;
@@ -58,6 +59,25 @@ fn point_entity_box(classname: &str) -> (DVec3, DVec3) {
 
 /// Edge coordinates are rounded to this many steps per unit when removing shared edges.
 const EDGE_QUANTIZE: f64 = 100.0;
+
+/// How far in front of and behind its faces a click still picks an overlay or decal.
+const DECAL_PICK_DEPTH: f64 = 1.0;
+/// The size of an `infodecal` whose texture is not known, in world units.
+const DEFAULT_DECAL_SIZE: f64 = 64.0;
+/// How many units nearer a face that squarely faces a point counts than one seen
+/// edge-on, when looking for the face nearest to the point.
+const FACING_BONUS: f64 = 0.01;
+/// Faces must point this much the same way to carry one decal between them.
+const DECAL_SAME_FACING: f64 = 0.99;
+
+/// The size in world units of the picture each `infodecal` texture projects, by
+/// [`decal_key`]; `None` for a material that has no texture.
+pub type DecalSizes = HashMap<String, Option<DVec2>>;
+
+/// The key of a material in [`DecalSizes`]: lower case with forward slashes.
+pub fn decal_key(material: &str) -> String {
+    material.trim().replace('\\', "/").to_ascii_lowercase()
+}
 
 /// What a mesh belongs to, and so what clicking it selects.
 ///
@@ -262,6 +282,10 @@ pub struct SceneFace {
     pub selected: bool,
     /// Units per luxel of the face's lightmap (the side's `lightmapscale`).
     pub lightmap_scale: f64,
+    /// A piece of an overlay or decal: its texture axes give coordinates from 0 to 1
+    /// across the picture whatever the texture's size, and it is drawn over the brush
+    /// face it lies on, blended by the picture's alpha, without a lightmap of its own.
+    pub decal: bool,
 }
 
 /// A face hit by a ray, for the texture tool.
@@ -323,6 +347,9 @@ pub struct WireMesh {
     /// mesh, so a renderer can keep data for each face; `None` for meshes made outside
     /// [`Scene::build`].
     pub first_face: Option<u32>,
+    /// The picture of an overlay or decal on brush faces. It is picked like any mesh,
+    /// but the texture tool and tools that look for a surface see through it.
+    pub decal: bool,
 }
 
 /// Everything the viewports draw.
@@ -363,7 +390,9 @@ impl Scene {
     /// entity's colour, matching Hammer's 2D views. Entities with a loaded `model` get the
     /// model, outlined by its rotated bounding box; others get the box their FGD class
     /// gives, or a small box. Point entities without their own colour use the class's.
-    pub fn build(vmf: &Vmf, models: &ModelCache, game_data: Option<&GameData>) -> Self {
+    /// Overlays and decals also get their picture, cut to the brush faces it lies on;
+    /// `decals` gives the size of each decal texture.
+    pub fn build(vmf: &Vmf, models: &ModelCache, game_data: Option<&GameData>, decals: &DecalSizes) -> Self {
         let mut scene = Self {
             geometry_generation: next_generation(),
             selection_generation: next_generation(),
@@ -450,6 +479,7 @@ impl Scene {
                     sprite: None,
                     origin: Some(origin),
                     first_face: None,
+                    decal: false,
                 };
                 scene.bounds.add_bounds(&mesh.bounds);
                 scene.meshes.push(mesh);
@@ -474,17 +504,131 @@ impl Scene {
                     sprite: entity_sprite(class),
                     origin: Some(origin),
                     first_face: None,
+                    decal: false,
                 };
                 scene.bounds.add_bounds(&mesh.bounds);
                 scene.meshes.push(mesh);
             }
         }
+        scene.add_decals(vmf, game_data, decals);
         let mut faces = 0u32;
         for mesh in &mut scene.meshes {
             mesh.first_face = Some(faces);
             faces = faces.saturating_add(mesh.faces.len() as u32);
         }
         scene
+    }
+
+    /// Adds the pictures of the map's overlays and decals, each cut to the brush faces
+    /// it lies on. An overlay lies on the faces its `sides` key lists; a decal on the
+    /// face nearest to it and the faces that continue that face.
+    fn add_decals(&mut self, vmf: &Vmf, game_data: Option<&GameData>, sizes: &DecalSizes) {
+        let class_is = |entity: &Entity, class: &str| entity.classname().eq_ignore_ascii_case(class);
+        let entities: Vec<&Entity> = vmf
+            .entities()
+            .filter(|entity| class_is(entity, overlay::OVERLAY_CLASS) || class_is(entity, overlay::DECAL_CLASS))
+            .collect();
+        if entities.is_empty() {
+            return;
+        }
+        let brushes = self.meshes.len();
+        let mut by_side: Option<HashMap<u32, (usize, usize)>> = None;
+        let mut added = Vec::new();
+        for entity in entities {
+            let (material, placed, pieces) = if class_is(entity, overlay::OVERLAY_CLASS) {
+                let index = by_side.get_or_insert_with(|| self.faces_by_side());
+                (
+                    entity.get("material"),
+                    overlay::Overlay::of(entity),
+                    self.overlay_pieces(entity, index),
+                )
+            } else {
+                let (placed, pieces) = self.decal_pieces(entity, &self.meshes[..brushes], sizes);
+                (entity.get("texture"), placed, pieces)
+            };
+            let (Some(material), Some(placed)) = (material.filter(|name| !name.trim().is_empty()), placed) else {
+                continue;
+            };
+            let class = game_data.and_then(|data| data.class(entity.classname()));
+            let color = entity.editor_color().or_else(|| class.and_then(|class| class.color));
+            added.push(decal_mesh(entity, material, &placed, pieces, to_color(color)));
+        }
+        for mesh in added {
+            self.bounds.add_bounds(&mesh.bounds);
+            self.meshes.push(mesh);
+        }
+    }
+
+    /// Where each brush face is among the meshes, by side id: the mesh's index and the
+    /// face's index in it.
+    fn faces_by_side(&self) -> HashMap<u32, (usize, usize)> {
+        self.meshes
+            .iter()
+            .enumerate()
+            .flat_map(|(mesh_index, mesh)| {
+                mesh.faces
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(face_index, face)| Some((face.side?, (mesh_index, face_index))))
+            })
+            .collect()
+    }
+
+    /// The pieces of an overlay on the faces its `sides` key lists.
+    fn overlay_pieces(&self, entity: &Entity, by_side: &HashMap<u32, (usize, usize)>) -> Vec<Piece> {
+        let Some(placed) = overlay::Overlay::of(entity) else {
+            return Vec::new();
+        };
+        let texture = overlay::texture_corners(entity);
+        let mut pieces = Vec::new();
+        let sides = entity.get("sides").unwrap_or_default();
+        for side in sides.split_whitespace().filter_map(|word| word.parse::<u32>().ok()) {
+            if let Some(&(mesh, face)) = by_side.get(&side) {
+                let face = &self.meshes[mesh].faces[face];
+                placed.pieces_on(&texture, &face.vertices, face.normal, &mut pieces);
+            }
+        }
+        pieces
+    }
+
+    /// Where a decal lands and its pieces: on the brush face nearest to it within
+    /// [`overlay::DECAL_REACH`], and on the faces that lie in the same plane. Tool faces
+    /// are passed over, as the game's trace passes through most of them.
+    fn decal_pieces(
+        &self,
+        entity: &Entity,
+        brushes: &[WireMesh],
+        sizes: &DecalSizes,
+    ) -> (Option<overlay::Overlay>, Vec<Piece>) {
+        let (Some(origin), Some(material)) = (entity.origin(), entity.get("texture")) else {
+            return (None, Vec::new());
+        };
+        let size = sizes
+            .get(&decal_key(material))
+            .copied()
+            .flatten()
+            .unwrap_or(DVec2::splat(DEFAULT_DECAL_SIZE));
+        let Some((_, point, normal)) = nearest_face(brushes, origin, overlay::DECAL_REACH) else {
+            return (Some(overlay::Overlay::on_surface(origin, DVec3::Z, size)), Vec::new());
+        };
+        let placed = overlay::Overlay::on_surface(point, normal, size);
+        let texture = overlay::UPRIGHT_TEXTURE;
+        let mut pieces = Vec::new();
+        for face in brushes
+            .iter()
+            .filter(|mesh| reaches(mesh, origin, size.length()))
+            .flat_map(decal_targets)
+        {
+            let same_plane = face.normal.dot(normal) > DECAL_SAME_FACING
+                && face
+                    .vertices
+                    .first()
+                    .is_some_and(|vertex| (*vertex - point).dot(normal).abs() < DECAL_PICK_DEPTH);
+            if same_plane {
+                placed.pieces_on(&texture, &face.vertices, face.normal, &mut pieces);
+            }
+        }
+        (Some(placed), pieces)
     }
 
     /// Whether any mesh belongs to `owner`.
@@ -583,7 +727,7 @@ impl Scene {
         let (mesh, distance, plane) = self
             .meshes
             .iter()
-            .filter(|mesh| mesh.owner.is_some())
+            .filter(|mesh| mesh.owner.is_some() && !mesh.decal)
             .filter_map(|mesh| {
                 if mesh.model.is_some() {
                     return Some((mesh, mesh_hit(mesh, origin, direction, models)?, None));
@@ -650,10 +794,69 @@ impl Scene {
     pub fn surface_hit(&self, origin: DVec3, direction: DVec3) -> Option<DVec3> {
         self.meshes
             .iter()
-            .filter(|mesh| mesh.model.is_none() && mesh.faces.iter().any(|face| face.material.is_some()))
+            .filter(|mesh| mesh.model.is_none() && !mesh.decal && mesh.faces.iter().any(|face| face.material.is_some()))
             .filter_map(|mesh| ray_convex(origin, direction, &mesh.planes))
             .min_by(f64::total_cmp)
             .map(|distance| origin + direction * distance)
+    }
+
+    /// The brush face a ray hits first and where, seeing through point entities, props,
+    /// overlays and decals. Used to place overlays and decals on the face under the cursor.
+    pub fn surface_face(&self, origin: DVec3, direction: DVec3) -> Option<(FaceHit, DVec3)> {
+        let (mesh, distance, plane) = self
+            .meshes
+            .iter()
+            .filter(|mesh| mesh.model.is_none() && !mesh.decal && mesh.faces.iter().any(|face| face.side.is_some()))
+            .filter_map(|mesh| {
+                let (distance, plane) = ray_convex_face(origin, direction, &mesh.planes)?;
+                Some((mesh, distance, plane?))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        let face = mesh.faces.get(plane)?;
+        let hit = FaceHit {
+            side: face.side?,
+            solid: face.solid?,
+            point: origin + direction * distance,
+        };
+        Some((hit, face.normal))
+    }
+
+    /// The brush face nearest to a point and no further than `reach` from it, passing
+    /// over tool faces: its side id, the face's point nearest to the given one, and its
+    /// outward normal.
+    pub fn nearest_face(&self, point: DVec3, reach: f64) -> Option<(u32, DVec3, DVec3)> {
+        nearest_face(&self.meshes, point, reach)
+    }
+
+    /// The brush faces that lie in the plane of the face with side id `side` and touch
+    /// the box `around`, that face included, so a picture placed there can run on over
+    /// the neighbouring brushes of the same wall.
+    pub fn faces_in_plane(&self, side: u32, around: &Bounds) -> Vec<u32> {
+        let Some(base) = self
+            .meshes
+            .iter()
+            .flat_map(|mesh| &mesh.faces)
+            .find(|face| face.side == Some(side))
+        else {
+            return Vec::new();
+        };
+        let Some(&anchor) = base.vertices.first() else {
+            return vec![side];
+        };
+        let touches = |bounds: &Bounds| bounds.min.cmple(around.max).all() && bounds.max.cmpge(around.min).all();
+        self.meshes
+            .iter()
+            .filter(|mesh| !mesh.decal && touches(&mesh.bounds))
+            .flat_map(|mesh| &mesh.faces)
+            .filter(|face| {
+                face.normal.dot(base.normal) > DECAL_SAME_FACING
+                    && face
+                        .vertices
+                        .first()
+                        .is_some_and(|vertex| (*vertex - anchor).dot(base.normal).abs() < mallet_vmf::geometry::EPSILON)
+            })
+            .filter_map(|face| face.side)
+            .collect()
     }
 
     /// Owners with a centre cross inside a 2D rectangle, the way Hammer's selection
@@ -818,6 +1021,9 @@ fn to_color(color: Option<[u8; 3]>) -> Color32 {
     color.map_or(DEFAULT_COLOR, |[r, g, b]| Color32::from_rgb(r, g, b))
 }
 
+/// An edge by its two quantized ends, the smaller first, so both directions match.
+type EdgeKey = ([i64; 3], [i64; 3]);
+
 fn quantize(point: DVec3) -> [i64; 3] {
     (point * EDGE_QUANTIZE).round().as_i64vec3().to_array()
 }
@@ -858,6 +1064,7 @@ fn brush_mesh(solid: &Solid, color: Color32, owner: Option<Owner>) -> Option<Wir
                 solid: solid.id(),
                 selected: false,
                 lightmap_scale: f64::from(side.lightmap_scale.unwrap_or(16).max(1)),
+                decal: false,
             };
             Some((scene_face, face.plane))
         })
@@ -874,7 +1081,136 @@ fn brush_mesh(solid: &Solid, color: Color32, owner: Option<Owner>) -> Option<Wir
         sprite: None,
         origin: None,
         first_face: None,
+        decal: false,
     })
+}
+
+/// Whether a point is inside a mesh's bounds grown by `reach` on every side.
+fn reaches(mesh: &WireMesh, point: DVec3, reach: f64) -> bool {
+    let reach = DVec3::splat(reach);
+    point.cmpge(mesh.bounds.min - reach).all() && point.cmple(mesh.bounds.max + reach).all()
+}
+
+/// The face among `meshes` nearest to `point` and within `reach` of it, as
+/// [`Scene::nearest_face`] gives it. Between faces just as near, as at the corner of a
+/// brush, the one that faces the point most squarely wins.
+fn nearest_face(meshes: &[WireMesh], point: DVec3, reach: f64) -> Option<(u32, DVec3, DVec3)> {
+    meshes
+        .iter()
+        .filter(|mesh| !mesh.decal && reaches(mesh, point, reach))
+        .flat_map(decal_targets)
+        .filter_map(|face| {
+            let (distance, nearest) = overlay::nearest_on_polygon(point, &face.vertices, face.normal)?;
+            let facing = face.normal.dot((point - nearest).normalize_or_zero());
+            (distance <= reach).then_some((distance - facing * FACING_BONUS, face.side?, nearest, face.normal))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, side, nearest, normal)| (side, nearest, normal))
+}
+
+/// The faces of a brush a decal can land on: all but tool faces.
+fn decal_targets(mesh: &WireMesh) -> impl Iterator<Item = &SceneFace> {
+    mesh.faces.iter().filter(|face| {
+        face.side.is_some()
+            && !face
+                .material
+                .as_deref()
+                .is_some_and(|material| decal_key(material).starts_with("tools/"))
+    })
+}
+
+/// The mesh of an overlay's or decal's picture: its pieces as faces, their outline as
+/// edges, and for picking the slab of its quad just in front of and behind the faces.
+/// Without pieces, as when it lists no faces, hangs in the air or is wound so that the
+/// game leaves it out, only the quad's outline is drawn, so it can still be found and
+/// picked.
+fn decal_mesh(
+    entity: &Entity,
+    material: &str,
+    placed: &overlay::Overlay,
+    pieces: Vec<Piece>,
+    color: Color32,
+) -> WireMesh {
+    let corners = placed.world_corners();
+    let mut counts: HashMap<EdgeKey, ([DVec3; 2], usize)> = HashMap::new();
+    for piece in &pieces {
+        let count = piece.vertices.len();
+        for index in 0..count {
+            let (a, b) = (piece.vertices[index], piece.vertices[(index + 1) % count]);
+            let (qa, qb) = (quantize(a), quantize(b));
+            let key = if qa <= qb { (qa, qb) } else { (qb, qa) };
+            counts.entry(key).or_insert(([a, b], 0)).1 += 1;
+        }
+    }
+    let mut edges: Vec<[DVec3; 2]> = counts
+        .into_values()
+        .filter_map(|(edge, count)| (count == 1).then_some(edge))
+        .collect();
+    let mut bounds = Bounds::EMPTY;
+    for vertex in pieces.iter().flat_map(|piece| &piece.vertices) {
+        bounds.add_point(*vertex);
+    }
+    if pieces.is_empty() {
+        edges = (0..4).map(|index| [corners[index], corners[(index + 1) % 4]]).collect();
+        for corner in corners {
+            bounds.add_point(corner);
+        }
+    }
+    let (normal, on_face) = pieces.first().map_or((placed.normal, placed.origin), |piece| {
+        (piece.normal, piece.vertices[0])
+    });
+    let centre = corners.iter().sum::<DVec3>() * 0.25;
+    let mut planes = vec![
+        Plane {
+            normal,
+            dist: normal.dot(on_face) + DECAL_PICK_DEPTH,
+        },
+        Plane {
+            normal: -normal,
+            dist: -normal.dot(on_face) + DECAL_PICK_DEPTH,
+        },
+    ];
+    for index in 0..4 {
+        let (a, b) = (corners[index], corners[(index + 1) % 4]);
+        if let Some(mut outward) = (b - a).cross(placed.normal).try_normalize() {
+            if outward.dot(centre - a) > 0.0 {
+                outward = -outward;
+            }
+            planes.push(Plane {
+                normal: outward,
+                dist: outward.dot(a),
+            });
+        }
+    }
+    let faces = pieces
+        .into_iter()
+        .map(|piece| SceneFace {
+            material: Some(material.to_owned()),
+            vertices: piece.vertices,
+            normal: piece.normal,
+            uaxis: piece.uaxis,
+            vaxis: piece.vaxis,
+            side: None,
+            solid: None,
+            selected: false,
+            lightmap_scale: 16.0,
+            decal: true,
+        })
+        .collect();
+    WireMesh {
+        color,
+        edges,
+        faces,
+        bounds,
+        planes,
+        owner: entity.id().map(Owner::Entity),
+        selected: false,
+        model: None,
+        sprite: None,
+        origin: entity.origin(),
+        first_face: None,
+        decal: true,
+    }
 }
 
 /// The 12 edges of an axis-aligned box.
@@ -931,6 +1267,7 @@ fn box_faces(bounds: &Bounds) -> Vec<SceneFace> {
                 solid: None,
                 selected: false,
                 lightmap_scale: 16.0,
+                decal: false,
             }
         })
         .collect()
@@ -1011,6 +1348,7 @@ mod tests {
             sprite: None,
             origin: None,
             first_face: None,
+            decal: false,
         }
     }
 
