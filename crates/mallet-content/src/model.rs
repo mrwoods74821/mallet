@@ -28,9 +28,10 @@ pub struct ModelMesh {
 pub struct Model {
     pub vertices: Vec<ModelVertex>,
     pub meshes: Vec<ModelMesh>,
-    /// Smallest corner of the geometry.
+    /// Smallest corner of the model's box: the hull the model was compiled with, as
+    /// Hammer and the game use, or the geometry's bounds when it has none.
     pub min: [f32; 3],
-    /// Largest corner of the geometry.
+    /// Largest corner of the model's box.
     pub max: [f32; 3],
 }
 
@@ -66,6 +67,7 @@ fn read_model(filesystem: &GameFs, path: &str) -> Result<Model, String> {
     let vtx = Vtx::read(&vtx_data).map_err(|error| error.to_string())?;
     let vvd = Vvd::read(&read(".vvd")?).map_err(|error| error.to_string())?;
     let model = vmdl::Model::from_parts(mdl, vtx, vvd);
+    let (hull_min, hull_max) = model.bounding_box();
 
     let vertices: Vec<ModelVertex> = model
         .vertices()
@@ -120,6 +122,13 @@ fn read_model(filesystem: &GameFs, path: &str) -> Result<Model, String> {
     }
     if vertices.is_empty() {
         return Err(format!("{base}.mdl has no vertices"));
+    }
+    let (hull_min, hull_max) = (
+        [hull_min.x, hull_min.y, hull_min.z],
+        [hull_max.x, hull_max.y, hull_max.z],
+    );
+    if (0..3).all(|axis| hull_max[axis] > hull_min[axis]) {
+        (min, max) = (hull_min, hull_max);
     }
     Ok(Model {
         vertices,

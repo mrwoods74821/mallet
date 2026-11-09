@@ -358,13 +358,26 @@ impl Scene {
                     .into_iter()
                     .map(|[a, b]| [transform.transform_point3(a), transform.transform_point3(b)])
                     .collect();
-                let mut bounds = Bounds::EMPTY;
-                for point in edges.iter().flatten() {
-                    bounds.add_point(*point);
-                }
                 let own_model = entity
                     .get("model")
                     .is_some_and(|path| path.trim().to_ascii_lowercase().ends_with(".mdl"));
+                let hull = class.and_then(|class| class.size).filter(|_| !own_model);
+                let (edges, bounds) = match hull {
+                    Some((min, max)) => {
+                        let bounds = Bounds {
+                            min: origin + DVec3::from_array(min),
+                            max: origin + DVec3::from_array(max),
+                        };
+                        (box_edges(&bounds), bounds)
+                    }
+                    None => {
+                        let mut bounds = Bounds::EMPTY;
+                        for point in edges.iter().flatten() {
+                            bounds.add_point(*point);
+                        }
+                        (edges, bounds)
+                    }
+                };
                 let shadows_off = entity.get("disableshadows").is_some_and(|value| value.trim() == "1");
                 let mesh = WireMesh {
                     color: to_color(entity_color),
