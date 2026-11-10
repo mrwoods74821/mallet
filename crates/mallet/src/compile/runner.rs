@@ -432,21 +432,8 @@ fn run_program(
     if command.working_dir.is_dir() {
         process.current_dir(&command.working_dir);
     }
-    // Linux compile tools load their engine libraries (libtier0.so and friends)
-    // from their own folder; without this they die with a loader error before
-    // main. Windows resolves these from the exe folder by default.
     #[cfg(not(windows))]
-    if let Some(folder) = command.program.parent() {
-        use std::ffi::OsString;
-        let mut paths = vec![folder.to_path_buf()];
-        if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
-            paths.push(PathBuf::from(OsString::from(existing)));
-        }
-        process.env(
-            "LD_LIBRARY_PATH",
-            std::env::join_paths(paths).unwrap_or_default(),
-        );
-    }
+    load_libraries_beside(&mut process, &command.program);
     hide_window(&mut process, low_priority);
     let mut child = process
         .spawn()
@@ -542,16 +529,33 @@ fn hide_window(process: &mut Command, low_priority: bool) {
 #[cfg(not(windows))]
 fn hide_window(_process: &mut Command, _low_priority: bool) {}
 
+/// Has a compile tool load the engine libraries that sit in its own folder, such as
+/// `libtier0.so`, ahead of the folders `LD_LIBRARY_PATH` already lists. Without this the
+/// Linux tools stop with a loader error before they start. Windows looks beside the
+/// program by itself.
+#[cfg(not(windows))]
+fn load_libraries_beside(process: &mut Command, program: &Path) {
+    let Some(folder) = program.parent().filter(|folder| !folder.as_os_str().is_empty()) else {
+        return;
+    };
+    let existing = std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default();
+    let listed = std::env::split_paths(&existing).filter(|path| !path.as_os_str().is_empty());
+    if let Ok(paths) = std::env::join_paths(std::iter::once(folder.to_path_buf()).chain(listed)) {
+        process.env("LD_LIBRARY_PATH", paths);
+    }
+}
+
+/// Runs the compiler at a lower priority when asked, as `BELOW_NORMAL` does on Windows.
 #[cfg(not(windows))]
 fn lower_priority(child: &std::process::Child, low_priority: bool) {
     if low_priority {
-        // renice-style niceness +10, the same intent as BELOW_NORMAL on Windows.
         unsafe {
             libc::setpriority(libc::PRIO_PROCESS, child.id(), 10);
         }
     }
 }
 
+/// Windows sets the priority when it starts the program, in `hide_window`.
 #[cfg(windows)]
 fn lower_priority(_child: &std::process::Child, _low_priority: bool) {}
 
