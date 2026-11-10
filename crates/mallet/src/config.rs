@@ -16,23 +16,22 @@ const KNOWN_GAMES: [&str; 5] = [
 ];
 
 /// Where Steam is installed unless Mallet Options says otherwise.
-///
-/// Per platform: Windows keeps the standard install folder; Linux tries
-/// `~/.steam/steam` (the distro-created symlink, e.g. to
-/// `~/.steam/debian-installation` on Ubuntu) and the manual-install
-/// location Steam's own docs name.
 #[cfg(windows)]
 pub const DEFAULT_STEAM_DIR: &str = "C:/Program Files (x86)/Steam";
 
-/// The Steam folders tried on this platform, in order, when `steam_dir` is not set.
+/// The Steam folders tried when `steam_dir` is not set, in order.
 #[cfg(windows)]
 pub fn default_steam_dirs() -> Vec<PathBuf> {
     vec![PathBuf::from(DEFAULT_STEAM_DIR)]
 }
 
+/// Where Steam is installed unless Mallet Options says otherwise: the link that Linux
+/// installs of Steam create in the home folder.
 #[cfg(not(windows))]
 pub const DEFAULT_STEAM_DIR: &str = "~/.steam/steam";
 
+/// The Steam folders tried when `steam_dir` is not set, in order: the link in the home
+/// folder, then the folder a manual install uses.
 #[cfg(not(windows))]
 pub fn default_steam_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -44,14 +43,14 @@ pub fn default_steam_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Mallet's settings/logs folder for this platform: `%APPDATA%` on Windows,
-/// the XDG config home (`$XDG_CONFIG_HOME` or `~/.config`) elsewhere, both
-/// with `MALLET_PROFILE` honoured through `app_folder()`.
+/// The folder Mallet's own folder sits in: `%APPDATA%`.
 #[cfg(windows)]
 fn platform_data_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|appdata| PathBuf::from(appdata))
+    std::env::var_os("APPDATA").map(PathBuf::from)
 }
 
+/// The folder Mallet's own folder sits in: `$XDG_CONFIG_HOME`, or `~/.config` when that
+/// is not set.
 #[cfg(not(windows))]
 fn platform_data_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME") {

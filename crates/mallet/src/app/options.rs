@@ -13,17 +13,21 @@ use crate::config::{self, ToolKind};
 use crate::editor::Editor;
 use crate::keymap::KeyMap;
 use crate::lighting::{HelperMode, LightingDetail, SkyMode, Tonemap};
-// The shell API is referenced only from the Windows-only file-types section.
 #[cfg(windows)]
 use crate::shell;
 use crate::view3d::MAX_LOOK_FRAMES;
 
 const GOOD: Color32 = Color32::from_rgb(90, 190, 110);
 const ERROR: Color32 = Color32::from_rgb(235, 90, 80);
-// Only used by the Windows-only file-type rows.
 #[cfg(windows)]
 const WARNING: Color32 = Color32::from_rgb(230, 180, 70);
 const MUTED: Color32 = Color32::from_gray(140);
+/// Where compile logs are kept, as the compile options say it.
+const LOGS_NOTE: &str = if cfg!(windows) {
+    "Written to %APPDATA%\\Mallet\\logs."
+} else {
+    "Written to ~/.config/Mallet/logs."
+};
 /// The width of the label column of the lighting preview's settings, so its grids line
 /// up.
 const LIGHTING_LABEL_WIDTH: f32 = 170.0;
@@ -489,12 +493,7 @@ fn compiling_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
         ui,
         &mut options.keep_logs,
         "Keep a log of every compile",
-        // Per-OS location, matching config::data_dir().
-        if cfg!(windows) {
-            "Written to %APPDATA%\\Mallet\\logs."
-        } else {
-            "Written to ~/.config/Mallet/logs."
-        },
+        LOGS_NOTE,
     );
     ui.add_space(8.0);
     egui::Grid::new("compile_options")
@@ -1396,8 +1395,6 @@ fn files_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
         }
     });
 
-    // File-type registration is a Windows feature (registry-backed); the
-    // section is hidden elsewhere, where shell.rs already refuses the calls.
     #[cfg(windows)]
     {
         ui.add_space(14.0);
@@ -1440,7 +1437,6 @@ fn files_section(ui: &mut egui::Ui, editor: &mut Editor, dirty: &mut bool) {
 
 /// One file type: whether it is set up, and a button to set it up or undo it. Returns
 /// `Some(true)` to set it up for this copy of Mallet, `Some(false)` to undo it.
-// Only rendered from the Windows-only file-types section of the options page.
 #[cfg(windows)]
 fn file_type_row(ui: &mut egui::Ui, title: &str, note: &str, state: &shell::Registration) -> Option<bool> {
     let mut choice = None;
