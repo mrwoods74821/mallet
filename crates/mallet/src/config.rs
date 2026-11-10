@@ -977,22 +977,21 @@ impl ToolKind {
 /// libraries listed by the Steam install at `steam_dir`, or in the usual place, in the
 /// order Steam lists them.
 pub fn detect_game_dir(steam_dir: Option<&Path>) -> Option<PathBuf> {
-    let libraries = match steam_dir {
+    let installs = match steam_dir {
         Some(steam) => vec![steam.to_path_buf()],
         None => default_steam_dirs(),
     };
-    let mut libraries = libraries;
-    let listing = libraries
-        .first()
-        .and_then(|steam| fs::read_to_string(steam.join("steamapps").join("libraryfolders.vdf")).ok())
-        .unwrap_or_default();
-    libraries.extend(
-        listing
-            .lines()
-            .filter(|line| line.trim_start().starts_with("\"path\""))
-            .filter_map(|line| line.split('"').nth(3))
-            .map(|path| PathBuf::from(path.replace("\\\\", "\\"))),
-    );
+    let mut libraries = installs.clone();
+    for steam in &installs {
+        let listing = fs::read_to_string(steam.join("steamapps").join("libraryfolders.vdf")).unwrap_or_default();
+        libraries.extend(
+            listing
+                .lines()
+                .filter(|line| line.trim_start().starts_with("\"path\""))
+                .filter_map(|line| line.split('"').nth(3))
+                .map(|path| PathBuf::from(path.replace("\\\\", "\\"))),
+        );
+    }
     libraries.dedup();
     libraries.iter().find_map(|library| {
         KNOWN_GAMES
