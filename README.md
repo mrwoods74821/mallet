@@ -340,12 +340,13 @@ as you change it:
 Settings are saved in `%APPDATA%\Mallet\config.json` on Windows and
 `~/.config/Mallet/config.json` on Linux (`$XDG_CONFIG_HOME` is honoured).
 
-If an error ever closes Mallet, it writes what went wrong to `%APPDATA%\Mallet\crash.log`.
-Attach that file when you report the problem.
+If an error ever closes Mallet, it writes what went wrong to `%APPDATA%\Mallet\crash.log`
+on Windows or `~/.config/Mallet/crash.log` on Linux. Attach that file when you report the
+problem.
 
 Where you leave the main window and every panel (Face Edit, the texture browser, Compile,
 Options and the rest), and their sizes, are remembered between runs in
-`%APPDATA%\Mallet\data` on Windows or `~/.config/Mallet/data` on Linux. Set
+`%APPDATA%\Mallet\data` on Windows or `~/.local/share/mallet` on Linux. Set
 `MALLET_PROFILE` to keep a separate layout, as test copies do.
 
 ## AI agents
